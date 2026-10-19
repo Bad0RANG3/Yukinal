@@ -1,6 +1,6 @@
 #!/usr/bin/env node
 
-import { existsSync, statSync } from "node:fs";
+import { existsSync, rmSync, statSync } from "node:fs";
 import { join } from "node:path";
 import { spawnSync } from "node:child_process";
 import { fileURLToPath } from "node:url";
@@ -55,6 +55,14 @@ const args = [
   entrypoint,
 ];
 
+// PyInstaller's `--clean` only clears its own cache and the `distpath/yukinal-agent`
+// directory, so anything else left in `agent/runtime` from an earlier build survives
+// and `package.mjs` copies it into the payload unconditionally. The licence notice
+// was the concrete case: a failed PyInstaller run used to ship the previous build's
+// THIRD_PARTY_LICENSES.txt. Clear both the onedir and that file before building.
+rmSync(join(output, "yukinal-agent"), { recursive: true, force: true });
+rmSync(join(output, "THIRD_PARTY_LICENSES.txt"), { force: true });
+
 const result = spawnSync(python, args, { cwd: root, stdio: "inherit", windowsHide: true });
 if (result.error) {
   console.error(`Could not launch PyInstaller: ${result.error.message}`);
@@ -70,6 +78,10 @@ if (!existsSync(executable) || !statSync(executable).isFile()) {
 
 const licenses = spawnSync(python, [
   join(root, "scripts", "collect-python-licenses.py"),
+  // Enumerate the frozen payload, not this interpreter's site-packages: the notice
+  // must describe the bytes that ship.
+  "--payload",
+  join(output, "yukinal-agent"),
   "--destination",
   join(output, "THIRD_PARTY_LICENSES.txt"),
 ], { cwd: root, stdio: "inherit", windowsHide: true });

@@ -3,6 +3,7 @@
 #include "yukinal/desktop_host/credential_store.hpp"
 #include "yukinal/desktop_host/database.hpp"
 #include "yukinal/desktop_host/desktop_target.hpp"
+#include "yukinal/desktop_host/scoped_environment.hpp"
 
 #include <algorithm>
 #include <cctype>
@@ -729,45 +730,6 @@ std::shared_ptr<SftpStreamChannel> spawn_process_sftp_stream_channel(
 }
 
 // ── Production remote-operation seam ─────────────────────────────────────────
-
-// Restores the process environment when it goes out of scope. The C++ SSH core
-// reads password/key/passphrase/proxy secrets from the environment by name; the
-// transfer worker runs on its own thread, so the values are held only for the
-// duration of one blocking SFTP call.
-class ScopedEnvironment {
- public:
-  explicit ScopedEnvironment(
-      const std::vector<std::pair<std::string, std::string>>& values) {
-    for (const auto& [name, value] : values) {
-      const char* previous = std::getenv(name.c_str());
-      saved_.emplace_back(name, previous == nullptr ? std::nullopt
-                                                    : std::optional<std::string>(previous));
-#ifdef _WIN32
-      _putenv_s(name.c_str(), value.c_str());
-#else
-      setenv(name.c_str(), value.c_str(), 1);
-#endif
-    }
-  }
-  ~ScopedEnvironment() {
-    for (const auto& [name, previous] : saved_) {
-#ifdef _WIN32
-      _putenv_s(name.c_str(), previous.has_value() ? previous->c_str() : "");
-#else
-      if (previous.has_value()) {
-        setenv(name.c_str(), previous->c_str(), 1);
-      } else {
-        unsetenv(name.c_str());
-      }
-#endif
-    }
-  }
-  ScopedEnvironment(const ScopedEnvironment&) = delete;
-  ScopedEnvironment& operator=(const ScopedEnvironment&) = delete;
-
- private:
-  std::vector<std::pair<std::string, std::optional<std::string>>> saved_;
-};
 
 std::vector<std::pair<std::string, std::string>> credential_values(
     const nlohmann::json& payload) {

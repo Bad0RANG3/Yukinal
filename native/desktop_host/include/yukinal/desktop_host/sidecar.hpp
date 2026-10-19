@@ -42,7 +42,7 @@ struct SidecarLaunch {
   // environment. Values are never logged.
   std::vector<std::pair<std::string, std::string>> environment;
   std::string data_directory;
-  std::string client_version = "1.0.0";
+  std::string client_version = "2.0.0-perview";
 };
 
 struct SidecarExitInfo {
@@ -116,6 +116,11 @@ class SidecarClient {
   void spawn_process(const SidecarLaunch& launch);
   bool read_stream(bool stdout_stream, std::string& chunk);
   [[nodiscard]] SidecarStartResult status_to_start_result() const;
+  // Best-effort, non-throwing cleanup for a timed-out `agent.run.*` request:
+  // sends `agent.run.stop` for the same run so the Python Agent stops burning
+  // its budget, and never waits more than a short bounded interval.
+  void cancel_timed_out_run(const std::string& method,
+                            const std::optional<nlohmann::json>& run_id) noexcept;
 
   struct Impl;
   std::unique_ptr<Impl> impl_;

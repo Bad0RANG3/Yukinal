@@ -14,7 +14,7 @@
  * 十份手抄的「怎么把 unknown 变成一句话」意味着：想统一去掉 zod 的冗长前缀、
  * 或者脱敏 URL 里的凭据，得改十个地方，漏一个就有一处静默地显示不同的文案。
  *
- * 刻意**不**依赖 React 与 Tauri，这样可以直接单测（见 tests/format.test.ts）。
+ * 刻意**不**依赖 React 与桌面宿主，这样可以直接单测（见 tests/format.test.ts）。
  */
 
 /**
@@ -34,7 +34,7 @@ const TIMESTAMP_FORMATTER = new Intl.DateTimeFormat("zh-CN", {
 /**
  * ISO 时间串 → 「08-14 15:32」。
  *
- * 传进来的值来自 Rust 的侧车，正常情况下一定是合法的 ISO 串；但界面上出现过
+ * 传进来的值来自宿主与侧车，正常情况下一定是合法的 ISO 串；但界面上出现过
  * 解析失败的时刻（数据库里是旧格式、时钟回拨等），那时**不能**抛异常 ——
  * 一行时间戳不该让整张列表崩掉。退回原样显示，至少让人看到原始值。
  */
@@ -78,12 +78,32 @@ const WEEK_MS = 7 * DAY_MS;
 /**
  * 任意抛出物 → 一句可以直接显示给人看的话。
  *
- * 这是 IPC 边界上唯一的兜底：`callDesktop` 会把 Rust 的错误与 zod 的校验失败
+ * 这是 IPC 边界上唯一的兜底：`callDesktop` 会把宿主的错误与 zod 的校验失败
  * 都抛出来，它们的类型并不统一（`Error`、字符串、有时是结构化对象）。
  * 不认识的一律 `String()`，不猜结构 —— 猜错会丢掉真正有用的信息。
+ * 唯一的例外是带 `issues` 数组的 Error（zod）：它的 `message` 是整段 JSON，
+ * 直接贴到通知里会把真正的第一条错误埋掉，因此只摘要第一条。
  */
 export function errorMessage(error: unknown): string {
-  return error instanceof Error ? error.message : String(error);
+  if (error instanceof Error) {
+    // zod's `message` is a multi-line JSON dump of every issue. IPC validation
+    // failures are routine (a stale sidecar payload), and pasting that dump into
+    // a one-line notice hides the actual problem. Summarise only this exact shape;
+    // every ordinary Error/IPC error keeps its message untouched.
+    const issues = (error as { issues?: unknown }).issues;
+    if (Array.isArray(issues)) return summarizeIssues(issues);
+    return error.message;
+  }
+  return String(error);
+}
+
+function summarizeIssues(issues: readonly unknown[]): string {
+  if (!issues.length) return "输入校验失败。";
+  const first = issues[0] as { path?: unknown; message?: unknown };
+  const path = Array.isArray(first.path) && first.path.length ? `${first.path.join(".")}：` : "";
+  const detail = typeof first.message === "string" ? first.message : "格式不符合要求";
+  const more = issues.length > 1 ? `（共 ${issues.length} 项）` : "";
+  return `输入校验失败：${path}${detail}${more}`.slice(0, 500);
 }
 
 /**

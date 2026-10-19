@@ -572,7 +572,8 @@
 .agent-task-trigger { display: inline-flex; min-width: 0; max-width: 280px; align-items: center; gap: 6px; border: 0; border-radius: var(--radius-control); background: transparent; color: var(--text); padding: 5px 6px; font: inherit; font-size: var(--text-label); text-align: left; }
 .agent-task-trigger > span { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .agent-task-trigger > svg { flex-shrink: 0; color: var(--faint); }
-.agent-task-trigger:hover:not(:disabled), .agent-task-trigger.is-active { background: var(--material-hover); }
+.agent-task-trigger:hover:not(:disabled):not([aria-disabled="true"]), .agent-task-trigger.is-active { background: var(--material-hover); }
+.agent-task-trigger[aria-disabled="true"] { cursor: default; opacity: .6; }
 .agent-task-heading > .agent-context { flex: 0 1 auto; font-size: var(--text-caption); }
 .agent-context-usage { color: var(--faint); font-size: var(--text-caption); white-space: nowrap; font-variant-numeric: tabular-nums; }
 .ai-first .agent-panel.agent-workspace:has(.agent-task-popover) { position: relative; }
@@ -639,10 +640,10 @@
 .agent-recent-conversations { display: grid; gap: 2px; min-width: 0; margin: 18px 4px 0; color: var(--faint); font-size: var(--text-caption); }
 .agent-recent-heading { display: flex; align-items: center; justify-content: space-between; gap: 12px; margin-bottom: 4px; }
 .agent-recent-conversations button { border: 0; background: transparent; color: var(--muted); font: inherit; cursor: pointer; }
-.agent-recent-conversations button:disabled { opacity: .5; cursor: default; }
+.agent-recent-conversations button:disabled, .agent-recent-conversations button[aria-disabled="true"] { opacity: .5; cursor: default; }
 .agent-recent-heading button { display: inline-flex; align-items: center; gap: 3px; padding: 4px 0 4px 8px; }
 .agent-recent-row { display: flex; align-items: center; gap: 8px; min-width: 0; min-height: 29px; padding: 4px 6px; text-align: left; border-radius: var(--radius-control); }
 .agent-recent-row > .icon, .agent-recent-row time { flex: 0 0 auto; color: var(--faint); }
 .agent-recent-row > span { min-width: 0; flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-.agent-recent-row:not(:disabled):hover { color: var(--text); background: var(--material-hover); }
+.agent-recent-row:not(:disabled):not([aria-disabled="true"]):hover { color: var(--text); background: var(--material-hover); }
 .agent-recent-error { display: flex; align-items: center; gap: 8px; color: var(--warning); }

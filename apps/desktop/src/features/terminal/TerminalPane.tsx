@@ -1,7 +1,7 @@
 /**
- * Terminal pane: xterm.js over the real Rust PTY chain.
+ * Terminal pane: xterm.js over the real native PTY chain.
  *
- * Flow: xterm onData → `terminal_write` → Rust PTY Manager → SSH channel → remote PTY;
+ * Flow: xterm onData → `terminal_write` → native PTY manager → SSH channel → remote PTY;
  * remote bytes → `terminal.data` event → xterm.write. Nothing is faked; if there is
  * no server yet (no SQLite row), the pane shows the honest empty state instead of a
  * pretend terminal.

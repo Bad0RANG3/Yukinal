@@ -148,7 +148,7 @@ test("the terminal result words are the ones the status map already uses", () =>
 
 /**
  * The event half of the IPC contract used to have no runtime gate, so a drifted
- * Rust payload crossed into the UI by cast — `terminal.data` bytes went straight
+ * native payload crossed into the UI by cast — `terminal.data` bytes went straight
  * into xterm unchecked. `EVENT_SCHEMAS` is now the gate; these tests keep it
  * aligned with the contract and pin the payload shapes the UI subscribes to.
  */
@@ -242,7 +242,7 @@ test("the terminal closed gate accepts a null exit code", () => {
   assert.equal(schema.safeParse({ terminalSessionId: "t_01", exitCode: null }).success, true);
   assert.equal(schema.safeParse({ terminalSessionId: "t_01", exitCode: 0 }).success, true);
   assert.equal(schema.safeParse({ terminalSessionId: "t_01" }).success, false);
-  // Rust sends exitCode as Option<u32>: a negative or fractional code is drift.
+  // The host sends an integer exit code or nothing: negative or fractional is drift.
   assert.equal(schema.safeParse({ terminalSessionId: "t_01", exitCode: -1 }).success, false);
   assert.equal(schema.safeParse({ terminalSessionId: "t_01", exitCode: 1.5 }).success, false);
 });

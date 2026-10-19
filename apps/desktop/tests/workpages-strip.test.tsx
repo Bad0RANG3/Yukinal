@@ -3,8 +3,7 @@
  *
  * 这里钉的是纯逻辑测不到、评审时又最容易悄悄丢的几件事：
  *
- * 1. **入口一直在。** 文件／终端／日志／服务四个启动按钮不依赖已打开的标签存在 ——
- *    标签为空时它们也必须渲染，否则「先打开一个工作页」这条路就断了。
+ * 1. **新增入口一直在。** 标签为空时仍可打开新建菜单；目标可单独切换。
  * 2. **tablist / tabpanel 是配对的。** 标签上的 `aria-controls` 必须正好等于舞台里那个
  *    `role="tabpanel"` 的 id，且一次只有一个标签进 Tab 序（roving tabIndex）。
  * 3. **关闭按钮有独立的名字。** 标签本体是 `role="tab"`，关闭是相邻的另一个按钮；两者
@@ -44,14 +43,18 @@ function render(overrides: Partial<Parameters<typeof TabStripView>[0]> = {}): st
   );
 }
 
-test("the launcher is present before any tab exists", () => {
+test("the create entry and target remain available before any tab exists", () => {
   const markup = render();
-  for (const label of ["打开文件", "打开终端", "打开日志", "打开服务"]) {
-    assert.ok(markup.includes(`aria-label="${label}"`), `missing launcher entry: ${label}`);
-  }
-  // 空状态没有 tablist；一条空的标签栏会让键盘停在不存在的东西上。
+  assert.ok(markup.includes('aria-label="新建或重开工作页"'));
+  assert.ok(markup.includes('aria-label="选择服务器"'));
   assert.equal(markup.includes('role="tablist"'), false);
-  assert.ok(markup.includes("对话保持可见"));
+  assert.ok(markup.includes("工作页"));
+});
+
+test("a selected target stays visible beside the tabs", () => {
+  const markup = render({ targetName: "生产机" });
+  assert.ok(markup.includes("当前目标：生产机"));
+  assert.ok(markup.includes("切换服务器"));
 });
 
 test("open tabs render as a named tablist with one roving tab stop", () => {
@@ -104,4 +107,11 @@ test("a tab without a server falls back to no target instead of an empty label",
   assert.ok(markup.includes('aria-label="关闭日志标签"'));
   // 没有目标就不画 `<small>`：一个空的服务器名比没有更糟。
   assert.equal(markup.includes("<small></small>"), false);
+});
+
+test("evidence and artifact tabs show their actual titles", () => {
+  const artifact: Workpage = { id: "artifact:one", kind: "artifact", title: "CPU 趋势", serverId: null, dock: "right", artifact: { id: "one", title: "CPU 趋势", content: { format: "json", text: "{}" } } };
+  const markup = render({ pages: [artifact], activeId: artifact.id });
+  assert.ok(markup.includes("CPU 趋势"));
+  assert.ok(markup.includes('aria-label="关闭CPU 趋势标签"'));
 });

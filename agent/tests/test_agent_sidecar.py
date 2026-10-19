@@ -4,6 +4,7 @@ import asyncio
 import io
 import json
 import os
+import sqlite3
 import sys
 import tempfile
 import unittest
@@ -360,6 +361,118 @@ class PythonSidecarTests(unittest.TestCase):
         self.assertEqual(resumes, [
             ("agent-checkpoint-1", "a" * 64, event["approval"]["approvalId"], True),
         ])
+
+    def test_a_failing_conversation_store_cannot_block_the_approval_decision(self) -> None:
+        # `_approval_respond` wrote the audit event before settling the future and
+        # did not guard the write. A broken store therefore raised out of the RPC
+        # *after* the approval had been consumed but *before* the paused run was
+        # resumed, leaving the run waiting until its approval timed out.
+        async def run_with_broken_store() -> tuple[Any, Any, list[tuple[str, dict[str, Any]]]]:
+            notifications: list[tuple[str, dict[str, Any]]] = []
+            sidecar = PythonSidecar(
+                _registry(),
+                notification_sink=lambda method, params: notifications.append((method, params)),
+            )
+            sidecar.handle(_request(1, "initialize", {
+                "protocolVersion": "1.0", "clientVersion": "desktop", "dataDir": "C:/data",
+            }))
+
+            real_record_event = sidecar._conversations.record_event
+
+            def broken_record_event(run_id: str, event: dict[str, Any]) -> None:
+                # Only the approval-decision audit write fails. The earlier
+                # `agent.waiting_approval` event must still be delivered so the
+                # test can answer the approval at all.
+                if event.get("type") == "approval.decision":
+                    raise sqlite3.OperationalError("database is locked")
+                real_record_event(run_id, event)
+
+            sidecar._conversations.record_event = broken_record_event  # type: ignore[method-assign]
+
+            class PausedAgent:
+                def __init__(self) -> None:
+                    self.resumes: list[tuple[Any, ...]] = []
+
+                async def resume_after_approval(
+                    self,
+                    checkpoint_id: str,
+                    fingerprint: str,
+                    approval_ref: str | None,
+                    *,
+                    approved: bool,
+                ) -> ModelAgentResult:
+                    self.resumes.append((checkpoint_id, fingerprint, approval_ref, approved))
+                    return ModelAgentResult("task-ui", "succeeded", "approved", (), (), 1, 10)
+
+            agent = PausedAgent()
+            result = ModelAgentResult(
+                "task-ui", "awaiting_approval", "",
+                ({"call_id": "call-ui-3", "status": "awaiting_approval"},),
+                (ApprovalRequest("c" * 64, "ops.write", "srv_stage1", "write", {}),),
+                1, 0, "approval_required", "agent-checkpoint-3",
+            )
+            task = asyncio.create_task(sidecar._await_approval(
+                {"taskId": "task-ui"}, "run-ui-3", agent, result,
+            ))
+            await asyncio.sleep(0)
+            event = notifications[-1][1]
+            response = sidecar.handle(_request(4, "agent.approval.respond", {
+                "approvalId": event["approval"]["approvalId"],
+                "runId": "run-ui-3",
+                "decision": "approve_once",
+                "respondedAt": "2026-10-15T00:00:00Z",
+            }))
+            # The decision reaches the paused run, which does not wait out the TTL.
+            resumed = await asyncio.wait_for(task, timeout=5)
+            return response, resumed, agent.resumes
+
+        with patch("sys.stderr", new=io.StringIO()) as stderr:
+            response, resumed, resumes = asyncio.run(run_with_broken_store())
+        self.assertNotIn("error", response)
+        self.assertTrue(response["result"]["accepted"])
+        self.assertEqual(resumed.answer, "approved")
+        self.assertEqual(len(resumes), 1)
+        self.assertIn("approval.decision", stderr.getvalue())
+
+    def test_admissions_are_bounded_even_when_none_have_finished(self) -> None:
+        # The pruner only removed entries whose run had completed. A stream of
+        # distinct, still-running admissions therefore grew the table without
+        # bound; the cap is a memory bound and must hold regardless of state.
+        sidecar = PythonSidecar(_registry())
+        cap = 256
+        overflow = 8
+        for index in range(cap + overflow):
+            sidecar._admissions[f"msg-{index}"] = {
+                "sessionId": "session-1",
+                "fingerprint": "f" * 64,
+                "runId": f"run-{index}",
+                "started": True,
+                "completed": False,
+            }
+            sidecar._prune_admissions()
+
+        self.assertLessEqual(len(sidecar._admissions), cap)
+        # Eviction is insertion ordered: the newest admissions survive.
+        self.assertIn(f"msg-{cap + overflow - 1}", sidecar._admissions)
+        self.assertIn(f"msg-{overflow}", sidecar._admissions)
+        self.assertNotIn("msg-0", sidecar._admissions)
+
+    def test_completed_admissions_are_evicted_before_running_ones(self) -> None:
+        sidecar = PythonSidecar(_registry())
+        cap = 256
+        for index in range(cap):
+            sidecar._admissions[f"done-{index}"] = {
+                "sessionId": "session-1", "fingerprint": "f" * 64,
+                "runId": f"run-done-{index}", "started": True, "completed": True,
+            }
+        sidecar._admissions["still-running"] = {
+            "sessionId": "session-1", "fingerprint": "f" * 64,
+            "runId": "run-still-running", "started": True, "completed": False,
+        }
+        sidecar._prune_admissions()
+        self.assertLessEqual(len(sidecar._admissions), cap)
+        self.assertIn("still-running", sidecar._admissions)
+        self.assertNotIn("done-0", sidecar._admissions)
 
     def test_rejected_approval_rpc_resumes_without_an_approval_reference(self) -> None:
         async def run_rejection() -> tuple[ModelAgentResult, list[tuple[Any, ...]], dict[str, Any]]:

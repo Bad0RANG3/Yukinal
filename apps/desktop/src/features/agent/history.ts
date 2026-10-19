@@ -1,7 +1,7 @@
 /**
  * 对话记录视图的纯逻辑：时间分组、搜索命中切段、目标名。
  *
- * 全部是纯函数 —— 不依赖 React、不依赖 Tauri、不读当前时间（`now` 由调用方传入），
+ * 全部是纯函数 —— 不依赖 React、不依赖桌面宿主、不读当前时间（`now` 由调用方传入），
  * 因此可以直接单测（见 `tests/history.test.ts`）。视图本身只负责把结果画出来。
  */
 
@@ -137,4 +137,24 @@ export function historyFilterParam(filter: HistoryFilter): boolean | undefined {
   if (filter === "active") return false;
   if (filter === "archived") return true;
   return undefined;
+}
+
+/**
+ * 列表的 `placeholderData` 只能在整个查询条件相同时沿用上一页。
+ *
+ * 只比 `serverId` 是不够的：改关键字或切「归档」后，旧行会在
+ * `isPlaceholderData` 期间继续可点，用户点的是一个不属于当前筛选的会话。
+ */
+export function sameHistoryQuery(
+  previousKey: readonly unknown[] | undefined,
+  serverId: string | null,
+  query: string,
+  filter: HistoryFilter,
+): boolean {
+  return (
+    previousKey?.[0] === "agent-chat-sessions" &&
+    previousKey[1] === serverId &&
+    previousKey[2] === query &&
+    previousKey[3] === filter
+  );
 }

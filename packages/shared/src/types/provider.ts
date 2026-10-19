@@ -9,8 +9,9 @@
 /**
  * Which protocol translates this provider. The complete vocabulary, in one place,
  * because it is the axis that reaches every layer of the app: the Zod schemas, the
- * Rust enum and the `provider_configs.kind` column, `runtime_provider_config()`, the
- * settings UI, and `buildProvider()` — the one place allowed to branch on it.
+ * `provider_configs.kind` column, the provider row the sidecar returns
+ * (`agent/src/yukinal_agent/provider_store.py:439-483`), the settings UI, and
+ * `buildProvider()` — the one place allowed to branch on it.
  *
  *  - `openai-compatible` — one adapter covering every endpoint that speaks the OpenAI
  *    shape (OpenAI, OpenRouter, Ollama, LM Studio, vLLM, in-house gateways).
@@ -54,10 +55,11 @@ export interface AiProviderConfig {
    * protocol *is* the adapter's whole reason to exist.
    *
    * Both sides enforce that rather than ignoring the field: on a native kind the key
-   * must be absent (`schemas/provider.ts` rejects it), and Rust omits it when it
-   * serializes the row. So "present" always means "this is a chat-dialect choice",
-   * and a `gemini` config carrying `wireApi: "responses"` is a rejected input instead
-   * of a value whose meaning depends on whether the reader remembered to ignore it.
+   * must be absent (`schemas/provider.ts` rejects it), and the sidecar only writes it for
+   * `openai-compatible` rows (`agent/src/yukinal_agent/provider_store.py:480`). So
+   * "present" always means "this is a chat-dialect choice", and a `gemini` config carrying
+   * `wireApi: "responses"` is a rejected input instead of a value whose meaning depends on
+   * whether the reader remembered to ignore it.
    */
   wireApi?: "chat" | "responses";
   /** Cached non-sensitive catalog entries used by the model selector. */
@@ -75,18 +77,23 @@ export interface ProviderModelOption {
 }
 
 /**
- * Per-run provider material resolved by Rust and injected with `agent.run.start`.
- * The API key rides only on this transient payload — never persisted, never
- * logged — while the durable config (baseUrl/model/label) lives in SQLite.
+ * Per-run provider material built by the sidecar and handed to the model layer.
+ *
+ * Despite the "runtime" name this is assembled *inside* the agent process
+ * (`agent/src/yukinal_agent/sidecar.py:378-402`) from the stored row plus the resolved
+ * key; the host never constructs it. The API key rides only on this transient payload —
+ * never persisted, never logged — while the durable config (baseUrl/model/label) lives in
+ * SQLite.
  */
 export interface RuntimeProviderConfig {
   kind: AiProviderKind;
   /**
-   * Full base URL. Rust falls back to the protocol's own public endpoint when the row
-   * has none (or a blank one): `https://api.anthropic.com` for `anthropic`,
-   * `https://generativelanguage.googleapis.com` for `gemini`. There is deliberately no
-   * such fallback for `openai-compatible` — that kind covers endpoints we do not own,
-   * so inventing a default would send the user's key somewhere they never chose.
+   * Full base URL. The sidecar falls back to the protocol's own public endpoint when the
+   * row has none (or a blank one): `https://api.anthropic.com` for `anthropic`,
+   * `https://generativelanguage.googleapis.com` for `gemini`
+   * (`agent/src/yukinal_agent/sidecar.py:383-386`). There is deliberately no such fallback
+   * for `openai-compatible` — that kind covers endpoints we do not own, so inventing a
+   * default would send the user's key somewhere they never chose.
    */
   baseUrl: string;
   model: string;
@@ -224,7 +231,7 @@ export interface McpOAuthConfig {
   issuer: string;
   clientId: string;
   /**
-   * Always present: Rust defaults rows written before the field existed to
+   * Always present: the host defaults rows written before the field existed to
    * `authorization_code`, and a flow change is part of the stored identity, so
    * switching it discards the stored token rather than reusing it.
    */

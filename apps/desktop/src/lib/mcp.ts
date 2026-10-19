@@ -5,7 +5,7 @@
  * 动作成功后就地失效），所以这里没有第二套约定。
  *
  * 这个文件里唯一值得单独说的地方是**它不重复实现端点策略**。URL 的 HTTPS/回环规则与
- * 可连接性由 Rust 的 `McpHttpConfig` 决定，界面只负责把后端返回的理由照原样显示出来
+ * 可连接性由宿主的 HTTP 传输校验决定，界面只负责把后端返回的理由照原样显示出来
  * （`mcpUnavailableText`）。
  */
 
@@ -234,7 +234,7 @@ export function toSaveInput(draft: McpServerDraft): McpServerSaveInput {
             clientAuth: draft.oauthClientAuth,
             dpop: draft.oauthDpop,
             // Trimmed only in the sense of "not sent when empty": the secret itself is sent
-            // verbatim, and Rust refuses control characters rather than silently fixing them.
+            // verbatim, and the host refuses control characters rather than silently fixing them.
             ...(draft.oauthClientSecret.length > 0
               ? { clientSecret: draft.oauthClientSecret }
               : {}),
@@ -292,7 +292,7 @@ export function statusLabel(view: McpServerView): { running: boolean; text: stri
 /**
  * 「现在为什么不能用」那一句。没有已知阻碍时返回 `null`。
  *
- * `unavailable.message` 来自 Rust，**原样显示**：它里面写着下一步该做什么
+ * `unavailable.message` 来自宿主，**原样显示**：它里面写着下一步该做什么
  * （`invalid_config` 会指出端点规则，`exited` 会带上退出码并说明不会自动重启）。
  */
 export function mcpUnavailableText(view: McpServerView): string | null {
@@ -311,7 +311,7 @@ export function mcpExitText(view: McpServerView): string | null {
 /**
  * 这种客户端认证方式会不会用到已存的 client secret。
  *
- * 与 Rust 的 `McpOAuthClientAuth::needs_secret` 是同一条规则：界面用它决定「要不要显示密钥
+ * 与宿主侧的 `needs_secret` 判断（`native/desktop_host/src/ipc_router.cpp:663`）是同一条规则：界面用它决定「要不要显示密钥
  * 输入框」，后端用它决定「要不要读凭据库」。两边都从这一个判断出发，所以不会出现「界面
  * 显示了一个永远不会被读的输入框」。
  */
@@ -360,8 +360,13 @@ export function mcpRestartText(view: McpServerView): string | null {
 
 /**
  * stderr 尾部与诊断信息。用 `<pre>` 之外的普通文本行呈现，并且**不做截断之外的处理**：
- * 这些行由 Rust 侧截断并脱敏过（`crates/core/src/mcp/mod.rs`），界面再脱敏一次会让两边
- * 的规则开始分叉。
+ * 这些行在宿主里已经被截断（每行 4000 字符、最多 40 行，
+ * `native/desktop_host/src/desktop_mcp.cpp:455-457`），界面再截一次只会让两边规则分叉。
+ *
+ * 注意宿主**只截断、不脱敏**：`stderrTail` 是子进程原样输出，可能带着第三方工具自己打出的
+ * 敏感串。所以这里能承诺的只有「不再改写」，不能承诺「已经脱敏」—— 早先这条注释把
+ * 「截断并脱敏」写在一起，但 `crates/core/src/mcp/mod.rs` 那份脱敏实现已经随 Rust 宿主
+ * 一起删掉了，现在没有任何一层做这件事。
  */
 export function serverMessages(view: McpServerView): string[] {
   const stderr = view.status.stderrTail.map((line) => `stderr: ${line}`);

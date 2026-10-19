@@ -1,5 +1,6 @@
 #pragma once
 
+#include <chrono>
 #include <cstdint>
 #include <functional>
 #include <memory>
@@ -30,6 +31,16 @@ class HostApprovalLedger {
     bool approve_once = false;
   };
 
+  // Raised when the host can neither find a ticket nor remember observing the
+  // sidecar announce the approval id. The host has no admission decision of its
+  // own to report for such an id, so the caller answers with an explicit failure
+  // instead of a success it never obtained. Distinct from std::nullopt, which
+  // keeps meaning "the sidecar owns this approval".
+  class UnknownApprovalError : public std::runtime_error {
+   public:
+    explicit UnknownApprovalError(const std::string& approval_id);
+  };
+
   HostApprovalLedger();
   ~HostApprovalLedger();
   HostApprovalLedger(const HostApprovalLedger&) = delete;
@@ -41,10 +52,20 @@ class HostApprovalLedger {
   // unsupported; the caller logs and continues.
   bool record_waiting_event(const nlohmann::json& params, std::int64_t now);
 
+  // Remember an approval the sidecar owns: every tool outside the four effectful
+  // SSH actions announces itself on the same notification stream, but only the
+  // sidecar holds its admission future. Recording the announcement is what lets a
+  // later response keep forwarding for that approval while an id the host never
+  // saw is refused. Observation-only: a malformed or already-expired event, or a
+  // host action approval, records nothing and returns false. The observation
+  // expires with the sidecar's own deadline and the table is capped.
+  bool record_sidecar_approval(const nlohmann::json& params, std::int64_t now);
+
   // Move a known host action ticket to waiting-for-ack. Returns std::nullopt when
-  // the approval belongs to another tool, which leaves it on its current round
-  // trip. Throws std::runtime_error for an expired, already-answered, mismatched
-  // or per-session decision.
+  // the approval belongs to another tool the host observed, which leaves it on
+  // its current round trip. Throws UnknownApprovalError when the host never saw
+  // the approval id, and std::runtime_error for an expired, already-answered,
+  // mismatched or per-session decision.
   std::optional<ResponseToken> begin_response(const std::string& approval_id,
                                               const std::string& run_id,
                                               const std::string& decision,
@@ -82,8 +103,22 @@ class HostApprovalLedger {
   // Consume the ticket exactly once. A request racing the approval RPC waits for
   // its host-side acknowledgement; a mismatch burns the approved ticket.
   // std::nullopt means the ticket was consumed and matched.
+  //
+  // The wait is bounded: `wait` defaults to the 180 s host approval TTL, so no
+  // ticket can outlive a single bounded wait and a stuck responder cannot hold a
+  // host worker forever. A ticket still `Responding` when the bound elapses is
+  // erased and reported as TicketError::Expired.
   std::optional<TicketError> consume(const ExecutionBinding& request,
-                                     const std::function<std::int64_t()>& now);
+                                     const std::function<std::int64_t()>& now,
+                                     std::chrono::milliseconds wait = kConsumeWaitBudget);
+
+  // The upper bound on how long an effectful action waits for the approval RPC's
+  // host-side acknowledgement. It equals the 180 s admission TTL the host accepts
+  // on an approval event (`kMaxApprovalTtlSeconds`), so a live ticket is never
+  // abandoned before its own deadline while a ticket nobody will ever answer
+  // cannot pin one of the four host workers past that deadline.
+  static constexpr std::chrono::milliseconds kConsumeWaitBudget =
+      std::chrono::seconds(180);
 
  private:
   struct Impl;

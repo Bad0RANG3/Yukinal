@@ -112,13 +112,12 @@ function collectorSummary(snapshot: ServerSnapshot) {
 /**
  * 未取到读数时是 `unknown`，有读数时一律交给 `healthClass`。
  *
- * 这里曾经自己重写了一遍阈值比较。那正是 `types/health.ts:8-9` 明令禁止的事：
- * 「原始数字变成健康等级的换算全项目只有一处，就是这里，外加 Rust 镜像
- * （crates/core/src/health.rs）—— UI 和 Agent 不允许各算各的」。
+ * 这里曾经自己重写了一遍阈值比较。那正是 `types/health.ts:12-13` 明令禁止的事：
+ * 「原始数字变成健康等级的换算每个语言只有一处，两边都对着共享 fixture 钉住」。
  * 更糟的是本文件已经 `import { HEALTH_THRESHOLDS }` 了：阈值取自共享模块，
  * 比较逻辑却是本地副本，于是「共享的那份对了、这份没跟上」不会有任何编译或
  * 测试报错。现在只保留 `undefined` 这一层判断，那确实是 UI 关心的事
- * （`HealthClass` 里没有 `unknown`，它属于 `HealthState`，见 types/health.ts:18）。
+ * （`HealthClass` 里没有 `unknown`，它属于 `HealthState`，见 types/health.ts:22）。
  */
 function gaugeClass(usage: number | undefined, thresholds: { warning: number; critical: number }): HealthClass | "unknown" {
   return usage === undefined ? "unknown" : healthClass(usage, thresholds);

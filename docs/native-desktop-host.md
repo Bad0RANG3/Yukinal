@@ -128,11 +128,12 @@ Native calls use an in-process WebView binding, not an HTTP API.
 parameters, responses, and event payloads come from `packages/shared`. The C++ host
 validates the RPC framing and each migrated command's inputs. Events are subscribed
 by name and delivered through the same bridge. Commands return a stable error until
-their C++ implementation is migrated; they must not silently fall back to Rust.
+their C++ implementation is migrated; they must not silently fall back to a host that
+no longer exists in this repository.
 
 The C++ host opens or creates the same `yukinal.db` used by the current desktop.
 `YUKINAL_DATA_DIR` overrides the platform app-data directory, matching the legacy
-host. It applies the ordered schema migrations through version 36, one transaction
+host. It applies the ordered schema migrations through version 37, one transaction
 per version, refuses newer databases, and makes a checksummed SQLite backup before
 migrating a nonempty existing database. If an upgrade fails, it restores that copy
 and removes the failed connection's WAL/SHM files. Server CRUD, OS credential

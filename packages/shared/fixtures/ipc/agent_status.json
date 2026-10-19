@@ -2,9 +2,9 @@
   "running": true,
   "pid": 25980,
   "protocolVersion": "1.0",
-  "agentVersion": "1.0.0",
+  "agentVersion": "0.1.0",
   "toolCount": 1,
-  "entry": "apps/agent/dist/index.js",
+  "entry": "python-agent/yukinal-agent.exe",
   "startedAt": "2026-01-01T00:00:00Z",
   "lastExit": null
 }

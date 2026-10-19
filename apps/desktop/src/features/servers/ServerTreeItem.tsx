@@ -7,11 +7,11 @@ import { errorMessage, formatTimestamp } from "../../lib/format.js";
 import { useHostKeyStatus } from "../../lib/host-key.js";
 import { callDesktop, isDesktopShell } from "../../lib/ipc.js";
 import { ENVIRONMENT_LABEL_SHORT, SERVER_STATUS_LABEL } from "../../lib/labels.js";
-import { useWorkspaceStore } from "../../stores/workspace-store.js";
 import { dashboardResources } from "../overview/dashboard-model.js";
+import { useWorkpagesStore } from "../workpages/workpages-store.js";
 
-export function ServerTreeItem({ server, selected, disabled, onSelect, children }: {
-  server: Server; selected: boolean; disabled: boolean; onSelect: () => void; children: ReactNode;
+export function ServerTreeItem({ server, selected, disabled, onSelect, onOpenWorkpage, children }: {
+  server: Server; selected: boolean; disabled: boolean; onSelect: () => void; onOpenWorkpage?: () => void; children: ReactNode;
 }) {
   const [expanded, setExpanded] = useState(false);
   const groupId = useId();
@@ -25,7 +25,7 @@ export function ServerTreeItem({ server, selected, disabled, onSelect, children 
     staleTime: 60_000, retry: false,
   });
   const resources = dashboardResources(server.id, snapshot.data);
-  const openServices = () => { if (disabled) return; onSelect(); useWorkspaceStore.getState().setServerPage("services"); };
+  const openServices = () => { if (disabled) return; onSelect(); useWorkpagesStore.getState().openTool("services", { serverId: server.id }); onOpenWorkpage?.(); };
   return <li className="server-list-item">
     <div className={`server-row ${selected ? "server-row-selected" : ""}`}>
       {server.capabilities.docker ? <button type="button" className="server-tree-toggle" aria-label={`${expanded ? "收起" : "展开"} ${server.name} 的资源`} aria-expanded={expanded} aria-controls={groupId} onClick={() => setExpanded((value) => !value)}><Icon name={expanded ? "chevronDown" : "chevronRight"} size="xs" /></button> : <span className="server-tree-spacer" />}

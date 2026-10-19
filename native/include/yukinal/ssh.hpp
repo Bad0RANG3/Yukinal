@@ -11,6 +11,13 @@ namespace yukinal::ssh_service {
 
 struct ExecResult {
   bool completed = false;
+  /// Only meaningful when `completed` is true. A completed result always came
+  /// from a real RFC 4254 "exit-status" request; libssh2 narrows that uint32 to
+  /// a signed `int` without a range check, so a large status can be reported
+  /// negative here. `completed == false` means the remote result is unknown --
+  /// including the case where the peer closed the channel without ever sending
+  /// an exit status (`error_code == "result_unknown"`), which must not be read
+  /// as a successful `exit 0`.
   int exit_code = -1;
   std::string stdout_text;
   std::string stderr_text;

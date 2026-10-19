@@ -1,7 +1,7 @@
 /**
  * 模型选择：把「有哪些 provider/model 可选」和「当前选中哪一个」收在一处。
  *
- * 选择的持久化属于 workspace store，可用列表属于 Rust 的 provider 查询，
+ * 选择的持久化属于 workspace store，可用列表属于宿主的 provider 查询，
  * 而「列表刷新后当前选择已失效」这条回落规则属于两者之间 —— 它只在这里出现一次。
  */
 

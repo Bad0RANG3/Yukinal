@@ -43,8 +43,11 @@ export type ChatSessions = {
     serverId?: string | null,
     parts?: AgentPromptPart[],
   ): Promise<string>;
-  /** 追加一条 Agent 回复；会话不存在时静默跳过。 */
-  recordAssistantMessage(content: string, identity?: ReplyIdentity): Promise<void>;
+  /**
+   * 追加一条 Agent 回复。返回 false 表示没有写进任何会话（例如运行中对话被删），
+   * 调用方必须把这件事告诉用户，而不是当作成功。
+   */
+  recordAssistantMessage(content: string, identity?: ReplyIdentity): Promise<boolean>;
   /** 归档状态变化只会影响当前会话。 */
   noteSessionUpdated(session: ChatSession): void;
   /** 返回 true 表示被删除的正是当前会话，调用方需要开一段新对话。 */
@@ -145,8 +148,13 @@ export function useChatSessions(): ChatSessions {
   );
 
   const recordAssistantMessage = useCallback(
-    async (content: string, identity?: ReplyIdentity): Promise<void> => { await recordMessage(activeSessionIdRef.current, "assistant", content, undefined, undefined, identity); },
-    [recordMessage],
+    async (content: string, identity?: ReplyIdentity): Promise<boolean> => {
+      // In a browser preview there is no session store at all: nothing was lost.
+      if (!shell) return true;
+      if (!activeSessionIdRef.current) return false;
+      return recordMessage(activeSessionIdRef.current, "assistant", content, undefined, undefined, identity);
+    },
+    [recordMessage, shell],
   );
 
   const startNewSession = useCallback((): void => {

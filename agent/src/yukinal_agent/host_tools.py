@@ -474,13 +474,20 @@ _STRUCTURED_ACTIONS: tuple[tuple[str, str, dict[str, Any]], ...] = (
     ),
     (
         "package.install",
-        "Install one apt or dnf package after exact per-call user approval and host plan checks.",
+        "Install one apt, dnf, or yum package after exact per-call user approval and host plan checks.",
         {
             "type": "object",
             "additionalProperties": False,
             "required": ["manager", "package", "timeoutSeconds"],
             "properties": {
-                "manager": {"type": "string", "enum": ["apt", "dnf"]},
+                "manager": {
+                    "type": "string",
+                    "enum": ["apt", "dnf", "yum"],
+                    "description": (
+                        "Use apt for Debian/Ubuntu, dnf for Fedora and modern RHEL, "
+                        "and yum for CentOS/RHEL 7."
+                    ),
+                },
                 "package": {"type": "string", "pattern": "^[A-Za-z0-9][A-Za-z0-9+._:-]{0,127}$"},
                 "version": {"type": "string", "pattern": "^[A-Za-z0-9][A-Za-z0-9+._:-]{0,127}$"},
                 "timeoutSeconds": {"type": "integer", "minimum": 1, "maximum": 25},
@@ -563,13 +570,20 @@ def register_host_tools(
         ),
         (
             "package.inspect",
-            "Read whether one apt or dnf package is installed and return its normalized version.",
+            "Read whether one apt, dnf, or yum package is installed and return its normalized version.",
             {
                 "type": "object",
                 "additionalProperties": False,
                 "required": ["manager", "package"],
                 "properties": {
-                    "manager": {"type": "string", "enum": ["apt", "dnf"]},
+                    "manager": {
+                        "type": "string",
+                        "enum": ["apt", "dnf", "yum"],
+                        "description": (
+                            "Use apt for Debian/Ubuntu, dnf for Fedora and modern RHEL, "
+                            "and yum for CentOS/RHEL 7."
+                        ),
+                    },
                     "package": {"type": "string", "pattern": "^[A-Za-z0-9][A-Za-z0-9+._:-]{0,127}$"},
                 },
             },
@@ -637,19 +651,20 @@ def register_host_tools(
             timeout_ms=20_000,
             cancellable=True,
         ))
-    registry.register(ToolSpec(
-        name="server.exec",
-        description="Run one bounded command on the selected remote server after exact per-call user approval and host plan checks.",
-        input_schema=_SERVER_EXEC_SCHEMA,
-        risk_level="destructive",
-        requires_approval=True,
-        handler=_host_tool_handler(host, "server.exec"),
-        target_id_argument=None,
-        target_required=True,
-        origin={"kind": "builtin"},
-        timeout_ms=30_000,
-        cancellable=True,
-    ))
+    if "server.exec" not in excluded_names:
+        registry.register(ToolSpec(
+            name="server.exec",
+            description="Run one bounded command on the selected remote server after exact per-call user approval and host plan checks.",
+            input_schema=_SERVER_EXEC_SCHEMA,
+            risk_level="destructive",
+            requires_approval=True,
+            handler=_host_tool_handler(host, "server.exec"),
+            target_id_argument=None,
+            target_required=True,
+            origin={"kind": "builtin"},
+            timeout_ms=30_000,
+            cancellable=True,
+        ))
     registry.register_many([
         ToolSpec(
             name=name,
@@ -665,6 +680,7 @@ def register_host_tools(
             cancellable=True,
         )
         for name, description, schema in _STRUCTURED_ACTIONS
+        if name not in excluded_names
     ])
     filesystem_actions = (
         (

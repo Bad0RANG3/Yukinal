@@ -26,10 +26,15 @@ jobs:
           - os: macos-latest
             openssh_container_test: OFF
     runs-on: ${{ matrix.os }}
+    permissions:
+      contents: read
     env:
       YUKINAL_SSH_CMAKE_BUILD_DIR: native/build-check
     steps:
+      # The gate runs package install scripts; do not persist checkout credentials in .git/config.
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
 
       - uses: pnpm/action-setup@008330803749db0355799c700092d9a85fd074e9 # v6.0.9
         with:
@@ -44,7 +49,10 @@ jobs:
         with:
           python-version: "3.14"
           cache: pip
-          cache-dependency-path: agent/pyproject.toml
+          # The gate installs both Python projects; the key must cover both manifests.
+          cache-dependency-path: |
+            agent/pyproject.toml
+            services/control-plane/pyproject.toml
 
       - name: Install Linux system deps (WebKitGTK for the C++ desktop host)
         if: matrix.os == 'ubuntu-latest'
@@ -54,6 +62,12 @@ jobs:
 
       - name: Install Python Agent and SSH test dependencies
         run: python -m pip install -e "agent[agent,models,test]"
+
+      # The gate runs the control-plane suite unconditionally; without these deps the
+      # step would either skip silently (the old behaviour) or fail on a clean runner.
+      # The `test` extra is enough: CI only exercises the SQLite path, so `postgres` stays out.
+      - name: Install control-plane test dependencies
+        run: python -m pip install -e "services/control-plane[test]"
 
       - name: Add NMake to PATH
         if: matrix.os == 'windows-latest'
@@ -87,7 +101,11 @@ jobs:
 
       # check.mjs runs CTest against this build, then the JavaScript/contract gates.
       - run: pnpm install --frozen-lockfile
+      # YUKINAL_CONTROL_PLANE_REQUIRED turns "the control-plane interpreter vanished"
+      # into a red gate on CI instead of a silent skip.
       - run: pnpm check
+        env:
+          YUKINAL_CONTROL_PLANE_REQUIRED: "1"
 
   advisory:
     name: dependency advisory audit

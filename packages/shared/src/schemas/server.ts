@@ -2,7 +2,7 @@
  * Runtime-validation schemas for cross-boundary data (-R7).
  *
  * Types in `../types/*` are the contract; these schemas are the gate. Anything
- * crossing React <-> Rust <-> agent must be parsed, never cast.
+ * crossing host <-> UI, or UI <-> sidecar, must be parsed, never cast.
  */
 
 import { z } from "zod";
@@ -142,7 +142,7 @@ export const AddServerInputSchema = z.strictObject({
     z.strictObject({ method: z.literal("password"), password: z.string().min(1).max(4_096) }),
     /**
      * `passphrase` 是**可选**的，且 `min(1)`：空串不是「空口令」而是「没填」，
-     * 表单必须省略字段而不是送一个 `""`（Rust 侧 `min(1).max(4_096)` 与之对齐）。
+     * 表单必须省略字段而不是送一个 `""`（宿主的 `min(1).max(4_096)` 与之对齐）。
      * 无口令的明文 key 就是不带这个字段的形状。
      */
     z.strictObject({

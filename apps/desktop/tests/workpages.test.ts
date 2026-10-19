@@ -43,6 +43,7 @@ test("workpages lock server targets and closing a terminal preserves its mounted
   const recent = useWorkpagesStore.getState().recent[0]!;
   store.reopen(recent);
   assert.equal(useWorkpagesStore.getState().pages.at(-1)?.serverId, "server-a");
+  assert.equal(useWorkpagesStore.getState().recent.some((page) => page.id === terminal.id), false);
   assert.equal(useWorkpagesStore.getState().retainedTerminals.length, 1);
   store.toggleExpanded(terminal.id);
   store.close(terminal.id);

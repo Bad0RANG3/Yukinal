@@ -38,8 +38,9 @@
 #include <openssl/evp.h>
 #endif
 
-#include "ssh_network.hpp"
+#include "exit_status.hpp"
 #include "host_key.hpp"
+#include "ssh_network.hpp"
 
 #include <libssh2.h>
 #include <libssh2_sftp.h>
@@ -1619,6 +1620,12 @@ int run_terminal_session(const TargetConfig& target, std::uint16_t columns,
 
   bool running = true;
   bool failed = false;
+  // `exit_status_received` distinguishes "the peer sent exit-status" from "the
+  // peer closed without one"; `exit_code` alone cannot, because libssh2 seeds a
+  // channel's status to zero and a legitimately received RFC 4254 uint32 may also
+  // narrow to a negative `int`. The JSON frame below is driven by the flag, so a
+  // received status is never downgraded to `null`. See `interpret_exit_status`.
+  bool exit_status_received = false;
   int exit_code = -1;
   std::array<char, 8192> buffer{};
   while (running) {
@@ -1706,7 +1713,20 @@ int run_terminal_session(const TargetConfig& target, std::uint16_t columns,
     }
     if (!running) break;
     if (libssh2_channel_eof(resources.channel_)) {
-      exit_code = libssh2_channel_get_exit_status(resources.channel_);
+      // `libssh2_channel_eof` also becomes true when a CHANNEL_CLOSE arrives
+      // without an "exit-status" request, and libssh2 defaults the numeric
+      // status field to zero, so reading it unconditionally would report a
+      // false success for a server that never sent the request. Only a received
+      // status is reported; otherwise the frame's `exit_code` stays JSON `null`
+      // to mean "not received". A received status is passed through verbatim
+      // (see `interpret_exit_status`), including a negative narrowed value.
+      const auto exit_status =
+          detail::interpret_exit_status(libssh2_channel_has_exit_status(resources.channel_),
+                                        libssh2_channel_get_exit_status(resources.channel_));
+      if (exit_status.received) {
+        exit_status_received = true;
+        exit_code = exit_status.value;
+      }
       break;
     }
     if (!made_progress) {
@@ -1720,8 +1740,8 @@ int run_terminal_session(const TargetConfig& target, std::uint16_t columns,
     (void)libssh2_channel_close(resources.channel_);
   }
   emit_terminal_message({{"type", "closed"},
-                         {"exit_code", exit_code < 0 ? nlohmann::json(nullptr)
-                                                       : nlohmann::json(exit_code)}});
+                         {"exit_code", exit_status_received ? nlohmann::json(exit_code)
+                                                            : nlohmann::json(nullptr)}});
   return failed ? 1 : 0;
 }
 
@@ -2129,12 +2149,20 @@ static ExecResult run_ssh_command_with_limits(const TargetConfig& target,
   }
 
   if (result.error_code.empty()) {
-    result.exit_code = libssh2_channel_get_exit_status(resources.channel_);
-    if (result.exit_code < 0) {
+    // See `interpret_exit_status`: libssh2's numeric status alone cannot report
+    // the absence of the "exit-status" request, so the companion
+    // `libssh2_channel_has_exit_status` flag is the gate. Anything the peer
+    // actually sent is reported verbatim, including values that libssh2's
+    // uint32-to-int narrowing makes negative (RFC 4254 allows the full range).
+    const auto exit_status =
+        detail::interpret_exit_status(libssh2_channel_has_exit_status(resources.channel_),
+                                      libssh2_channel_get_exit_status(resources.channel_));
+    if (!exit_status.received) {
       fail(&result, "result_unknown", "The SSH connection closed before an exit status was received");
     } else if (result.output_truncated && !preserve_truncated_output) {
       fail(&result, "output_limit", "SSH output exceeded the configured 64 KiB per-stream limit");
     } else {
+      result.exit_code = exit_status.value;
       result.completed = true;
     }
   }
@@ -2159,6 +2187,18 @@ static ExecResult server_exec_operation(const TargetConfig& target,
   if (!target.allow_server_exec) {
     ExecResult result;
     fail(&result, "operation_not_allowed", "server.exec requires a one-shot host authorization");
+    return result;
+  }
+  // Operator-configured command blacklist: a pure additional deny layer that runs
+  // after the one-shot capability gate above (which it must never mask) and before
+  // any command string is built or any SSH connection is attempted. Matching is on
+  // the raw `request.command` only -- `workdir`/`env` cannot influence the decision
+  // -- and the message deliberately never echoes the command or the matched pattern.
+  std::string denied_pattern;
+  if (server_exec_command_is_denied(target.server_exec_denylist, request.command, &denied_pattern)) {
+    ExecResult result;
+    fail(&result, "denied_by_policy",
+         "the server.exec command is blocked by the configured command blacklist");
     return result;
   }
   std::string command;
@@ -2342,9 +2382,9 @@ ExecResult package_inspect(const TargetConfig& target, const std::string& manage
   }
   const std::string package_arg = "'" + package + "'";
   const std::string command = manager == "apt"
-      ? "if command -v dpkg-query >/dev/null 2>&1; then dpkg-query --showformat='${Status}\\t${Version}\\n' --show -- " +
+      ? "if command -v apt-get >/dev/null 2>&1 && command -v dpkg-query >/dev/null 2>&1; then dpkg-query --showformat='${Status}\\t${Version}\\n' --show -- " +
             package_arg + " 2>/dev/null || printf '%s\\n' absent; else printf '%s\\n' unsupported; fi"
-      : "if command -v rpm >/dev/null 2>&1; then rpm --queryformat='installed\\t%{VERSION}-%{RELEASE}\\n' --query -- " +
+      : "if command -v " + manager + " >/dev/null 2>&1 && command -v rpm >/dev/null 2>&1; then rpm --queryformat='installed\\t%{VERSION}-%{RELEASE}\\n' --query -- " +
             package_arg + " 2>/dev/null || printf '%s\\n' absent; else printf '%s\\n' unsupported; fi";
   return run_ssh_command(target, command, timeout_seconds);
 }
@@ -2392,7 +2432,9 @@ ExecResult package_install(const TargetConfig& target, const std::string& manage
   const std::string command = manager == "apt"
       ? "DEBIAN_FRONTEND=noninteractive apt-get install --yes --no-install-recommends --no-remove -- " +
             package_arg + " 2>&1"
-      : "dnf install --assumeyes --setopt=install_weak_deps=False -- " + package_arg + " 2>&1";
+      : (manager == "dnf"
+             ? "dnf install --assumeyes --setopt=install_weak_deps=False -- " + package_arg + " 2>&1"
+             : "yum install --assumeyes -- " + package_arg + " 2>&1");
   return run_ssh_command_with_timeout_limit(target, command, timeout_seconds, 600);
 }
 

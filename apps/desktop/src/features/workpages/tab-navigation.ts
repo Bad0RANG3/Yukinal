@@ -33,7 +33,7 @@ export function nextTabIndex(
 
 /**
  * 关闭标签后把焦点送到下一个可用的落点：同一条标签栏里的邻居，退无可退时回到
- * 启动器。焦点直接掉回 `<body>` 会让键盘用户瞬间失去位置感，所以这条路径必须
+ * 新建入口。焦点直接掉回 `<body>` 会让键盘用户瞬间失去位置感，所以这条路径必须
  * 显式收尾。
  *
  * `preventScroll` 默认开启：关闭/重开是"恢复"动作，不该顺带把页面或标签行滚一下。
@@ -42,8 +42,7 @@ export function nextTabIndex(
  */
 export function focusWorkpageTab(pageId: string | null, options: { preventScroll?: boolean } = {}): void {
   const tab = pageId ? document.getElementById(`workpage-tab-${pageId}`) : null;
-  // 标签栏是启动按钮与标签并排的那一行；退到没有标签时落到第一个启动按钮上，
-  // 也就是"新建一个工作页"这个最合理的下一步。
-  const target = tab ?? document.querySelector<HTMLButtonElement>(".workspace-tabstrip-launch");
+  // 退到没有标签时落到新建入口，保持键盘位置可预测。
+  const target = tab ?? document.querySelector<HTMLButtonElement>(".workspace-tabstrip-create");
   target?.focus({ preventScroll: options.preventScroll ?? true });
 }

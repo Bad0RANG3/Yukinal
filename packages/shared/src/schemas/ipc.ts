@@ -1,13 +1,25 @@
 /**
- * Per-command runtime gates for the Tauri IPC contract (see `ipc/index.ts`).
+ * Per-command runtime gates for the desktop IPC contract (see `ipc/index.ts`).
  *
  * `IpcCommandMap` is the compile-time contract; this module is the runtime gate.
  * The map is keyed over `IpcCommandName` and exhaustively `satisfies` that union, so
  * adding a command to the map without a schema here fails compilation.
  *
- * Response schemas are strict: an extra field from Rust is a serde drift and must
- * fail the parse, not be silently stripped. Params are the same — the UI is our own
- * code, so a wrong param shape is a bug the gate should catch.
+ * Response strictness depends on **who authors the payload**, because that is what
+ * decides who a new field can surprise:
+ *
+ * - A response the C++ host composes field by field (`agent_status`, `server_connect`,
+ *   the host-key replies, ...) stays strict: an unknown key is a real disagreement
+ *   between two files in this repository, and failing the parse is the correct alarm.
+ * - A response the host hands back verbatim from the Python sidecar
+ *   (`SIDECAR_FORWARDED_COMMANDS` below) tolerates unknown keys. The sidecar is a
+ *   separately-versioned process whose answer this repository does not own, so an added
+ *   field must not turn a successful call into a parse exception in the UI; the addition
+ *   is reported as a diagnostic instead (`unknownResponseKeys` + the desktop gate).
+ *   Tolerance is not passthrough: missing fields and wrong types are still refused.
+ *
+ * Params are strict either way — the UI is our own code, so a wrong param shape is a bug
+ * the gate should catch.
  */
 
 import { z } from "zod";
@@ -113,6 +125,211 @@ export const IpcServerIdSchema = SERVER_ID_SCHEMA;
 const IpcTerminalSessionIdSchema = z.string().trim().min(1).max(256);
 const IpcPortSchema = z.number().int().min(1).max(65535);
 
+/**
+ * The commands whose response the C++ host hands back **verbatim** from the Python sidecar.
+ *
+ * `IpcRouter::agent_run_command` (`native/desktop_host/src/ipc_router.cpp`) forwards
+ * `client.request(...)` as the response frame without rebuilding it field by field, and
+ * `provider_command` does the same. The sidecar is a separately-versioned process: this
+ * repository does not own its JSON, so an added field there is a *compatibility* event,
+ * not a bug in a file we can fix. Gating these responses strictly meant one added key —
+ * top level or nested — turned a successful agent/provider call into a parse exception in
+ * the UI, which is the failure this list exists to scope.
+ *
+ * Pinned by name, and pinned again in `ipc.test.ts`: a command moving in or out of this
+ * list changes how much compatibility the contract owes a foreign process.
+ *
+ * Everything else in `IPC_SCHEMAS` stays strict. A response the host composes itself
+ * (`agent_status`, `server_connect`, the host-key replies) comes from two files in this
+ * repository, so an unknown key there is a real disagreement and failing is the alarm.
+ */
+export const SIDECAR_FORWARDED_COMMANDS = [
+  "agent_run_start",
+  "agent_run_stop",
+  "agent_context_reset",
+  "agent_context_reset_all",
+  "agent_memory_list",
+  "agent_memory_save",
+  "agent_memory_delete",
+  "provider_list",
+  "provider_save",
+  "provider_activate",
+  "provider_delete",
+  "provider_models",
+  "provider_test",
+] as const;
+
+export type SidecarForwardedCommand = (typeof SIDECAR_FORWARDED_COMMANDS)[number];
+
+type RawSchemaDef = Record<string, unknown> & { type: string };
+
+function rawDef(schema: z.ZodType): RawSchemaDef {
+  return (schema as unknown as { def: RawSchemaDef }).def;
+}
+
+/**
+ * How a rebuilt tree treats a key its shape does not mention.
+ *
+ * - `tolerate` — keep the key (a foreign process may add fields we do not know yet);
+ * - `strict` — refuse it (`unrecognized_keys`), i.e. the pre-tolerance reading.
+ *
+ * There is deliberately no `strip` (drop-it) option. Nobody needs it, and zod's default
+ * already means it for a plain `z.object`; adding a third mode to the walker would be a
+ * dead branch inside the fix whose whole point is that the contract's two readings of an
+ * unknown key are both explicit.
+ */
+type KeyPolicy = "tolerate" | "strict";
+
+/**
+ * Rebuild a schema tree with a different unknown-key policy, keeping everything else.
+ *
+ * This walks the *actual* schema — `def.shape`, array `element`, wrapper `innerType`,
+ * union `options`, tuple `items`, record `keyType`/`valueType` — and clones each node with
+ * `z.clone`, which keeps that node's own `checks` (so a `.refine()` still runs) and its
+ * declared output type. Setting `catchall` is the only semantic change: `z.unknown()` for
+ * tolerance, `z.never()` for strictness.
+ *
+ * Deep, not shallow: a top-level `catchall` alone would let the sidecar add a field inside
+ * `provider.providers[0]` and still crash the UI, which is the same bug one level down.
+ *
+ * The return type is the input type, deliberately. The *declared* contract of a forwarded
+ * command stays its known shape — `consistency.ts` pins it, and handlers keep the types
+ * they had — while the runtime gate accepts a superset and reports the difference.
+ */
+function rebuildKeyPolicy<T extends z.ZodType>(schema: T, policy: KeyPolicy): T {
+  const def = rawDef(schema);
+  const clone = (next: Record<string, unknown>): T =>
+    z.clone(schema, { ...def, ...next } as never) as unknown as T;
+  switch (def.type) {
+    case "object": {
+      const shape = (def["shape"] ?? {}) as Record<string, z.ZodType>;
+      const rebuilt: Record<string, z.ZodType> = {};
+      for (const [key, value] of Object.entries(shape)) rebuilt[key] = rebuildKeyPolicy(value, policy);
+      return clone({ shape: rebuilt, catchall: policy === "strict" ? z.never() : z.unknown() });
+    }
+    case "array":
+      return clone({ element: rebuildKeyPolicy(def["element"] as z.ZodType, policy) });
+    case "optional":
+    case "nullable":
+    case "default":
+    case "readonly":
+    case "nonoptional":
+    case "catch":
+    case "prefault":
+      return clone({ innerType: rebuildKeyPolicy(def["innerType"] as z.ZodType, policy) });
+    case "union":
+      return clone({ options: (def["options"] as z.ZodType[]).map((option) => rebuildKeyPolicy(option, policy)) });
+    case "tuple":
+      return clone({ items: (def["items"] as z.ZodType[]).map((item) => rebuildKeyPolicy(item, policy)) });
+    case "record":
+      return clone({
+        keyType: rebuildKeyPolicy(def["keyType"] as z.ZodType, policy),
+        valueType: rebuildKeyPolicy(def["valueType"] as z.ZodType, policy),
+      });
+    case "lazy":
+      return clone({ getter: () => rebuildKeyPolicy((def["getter"] as () => z.ZodType)(), policy) });
+    default:
+      // Leaves, enums, literals, primitives: nothing below them can carry an unknown key.
+      return schema;
+  }
+}
+
+/**
+ * The tolerant reading of a sidecar-forwarded response: unknown keys are kept.
+ *
+ * Missing fields and wrong types are still refused — this is a relaxation of *one*
+ * question ("may there be a key I do not know?"), not a passthrough. Keep the addition
+ * observable with `unknownResponseKeys`, otherwise a drifting sidecar becomes invisible.
+ */
+export function forwardedResponseSchema<T extends z.ZodType>(schema: T): T {
+  return rebuildKeyPolicy(schema, "tolerate");
+}
+
+/**
+ * The strict reading of the same tree: unknown keys are refused (`unrecognized_keys`).
+ *
+ * Exists so the loosening stays a *reading* rather than a deletion — a test or audit can
+ * still ask "would this have failed before?" and get the answer the strict rows give.
+ */
+export function strictResponseSchema<T extends z.ZodType>(schema: T): T {
+  return rebuildKeyPolicy(schema, "strict");
+}
+
+/**
+ * The keys `value` carries that `schema`'s object shapes do not mention, anywhere in
+ * the payload (top level or nested).
+ *
+ * This is what keeps tolerance honest. Accepting an unknown key without recording it
+ * would trade a visible parse failure for an invisible drift: the UI would keep working
+ * while the sidecar and this contract quietly diverged. The desktop gate turns each
+ * returned name into one diagnostic per command.
+ *
+ * Only *names* are returned, not paths: the point is "this contract does not know this
+ * field", and the shape that found it is the caller's `command`. Keys under an unknown
+ * key are not walked — their shape is unknown by definition.
+ */
+export function unknownResponseKeys(schema: z.ZodType, value: unknown): string[] {
+  const found = new Set<string>();
+  collectUnknownKeys(schema, value, found);
+  return [...found];
+}
+
+function collectUnknownKeys(schema: z.ZodType, value: unknown, found: Set<string>): void {
+  if (value === null || typeof value !== "object") return;
+  const def = rawDef(schema);
+  switch (def.type) {
+    case "object": {
+      const shape = (def["shape"] ?? {}) as Record<string, z.ZodType>;
+      for (const [key, entry] of Object.entries(value as Record<string, unknown>)) {
+        const child = shape[key];
+        if (child === undefined) found.add(key);
+        else collectUnknownKeys(child, entry, found);
+      }
+      return;
+    }
+    case "array": {
+      const element = def["element"] as z.ZodType;
+      for (const item of value as unknown[]) collectUnknownKeys(element, item, found);
+      return;
+    }
+    case "tuple": {
+      const items = def["items"] as z.ZodType[];
+      (value as unknown[]).forEach((item, index) => {
+        const itemSchema = items[index];
+        if (itemSchema !== undefined) collectUnknownKeys(itemSchema, item, found);
+      });
+      return;
+    }
+    case "record": {
+      const valueType = def["valueType"] as z.ZodType;
+      for (const entry of Object.values(value as Record<string, unknown>)) {
+        collectUnknownKeys(valueType, entry, found);
+      }
+      return;
+    }
+    case "optional":
+    case "nullable":
+    case "default":
+    case "readonly":
+    case "nonoptional":
+    case "catch":
+    case "prefault":
+      collectUnknownKeys(def["innerType"] as z.ZodType, value, found);
+      return;
+    case "union":
+      // The tolerant tree validates every option, so the option that owns the payload is
+      // not recoverable from a successful parse. Every object branch is walked and the
+      // names are deduplicated, which is the honest answer: any of them could be the one.
+      for (const option of def["options"] as z.ZodType[]) collectUnknownKeys(option, value, found);
+      return;
+    case "lazy":
+      collectUnknownKeys((def["getter"] as () => z.ZodType)(), value, found);
+      return;
+    default:
+      return;
+  }
+}
+
 export const CorePingResponseSchema = z.strictObject({
   version: z.string().min(1),
   os: z.string().min(1),
@@ -124,7 +341,7 @@ export const ServerConnectResponseSchema = z.strictObject({ status: z.literal("c
 export const ServerSnapshotResponseSchema = z.strictObject({ snapshot: ServerSnapshotSchema });
 export const TerminalOpenResponseSchema = z.strictObject({ terminalSessionId: IpcTerminalSessionIdSchema });
 
-/** Sidecar lifecycle, `agent_*` commands (fields mirror the Rust supervisor state). */
+/** Sidecar lifecycle, `agent_*` commands (fields mirror the host-side supervisor state). */
 
 export const SidecarExitSchema = z.strictObject({
   code: z.number().int().nullable(),
@@ -151,9 +368,21 @@ export const AgentStatusSchema = z.strictObject({
   startedAt: z.string().min(1).nullable(),
   lastExit: SidecarExitSchema.nullable(),
   /**
-   * Optional rather than nullable: the field is *omitted* when there is nothing to
-   * report (`skip_serializing_if` on the Rust side), so the status of an idle supervisor
-   * stays byte-identical to the fixture that predates automatic recovery.
+   * **Declared, but with no producer yet.**
+   *
+   * The shape is the recovery record ADR 0010 describes, and it is optional rather than
+   * nullable so a status without recovery stays byte-identical to the older fixture. But
+   * nothing in this repository emits it: `agent_status` is composed field by field by the
+   * C++ host (`native/desktop_host/src/ipc_router.cpp:9010-9037`) and that branch never
+   * sets `restart`, because the C++ host has no supervisor that could restart a sidecar
+   * (R1-desktop H-1). It was previously documented as `skip_serializing_if` "on the Rust
+   * side" — a host that no longer exists, which is how the absence went unnoticed.
+   *
+   * Kept rather than deleted: `ipc/index.ts` declares it on `AgentStatus`, and four UI
+   * call sites branch on it (`features/agent/AgentPanel.tsx:117,476`,
+   * `features/agent/AgentNotices.tsx:32`, `features/settings/RuntimeSettings.tsx:92-95`).
+   * Removing the field would delete those branches instead of the missing producer, so the
+   * field stays and the day a supervisor lands it has a contract to fill.
    */
   restart: RestartRecordSchema.optional(),
 });
@@ -178,9 +407,10 @@ export const IpcFingerprintSchema = z
   .regex(/^SHA256:[A-Za-z0-9+/]{43}$/, "fingerprint must be SHA256:<43 base64 chars, unpadded>");
 
 /**
- * `pinnedFingerprint` is optional, never nullable: Rust omits the field when there is no
- * pin (`skip_serializing_if`), and a `null` here would mean both sides disagree about
- * what "no pin" looks like.
+ * `pinnedFingerprint` is optional, never nullable: the host omits the key entirely when
+ * there is no pin (`native/desktop_host/src/ipc_router.cpp:8497,8634` only write it when
+ * present), and a `null` here would mean both sides disagree about what "no pin" looks
+ * like.
  */
 export const ServerHostKeyStatusResponseSchema = z.strictObject({
   host: z.string().trim().min(1).max(256),
@@ -289,6 +519,19 @@ export const IPC_SCHEMAS = {
     params: z.strictObject({ serverId: IpcServerIdSchema, path: z.string().min(1) }),
     response: z.strictObject({ path: z.string().min(1), entries: z.array(z.strictObject({ name: z.string(), path: z.string(), type: z.enum(REMOTE_FILE_TYPES), size: z.number().nonnegative() })) }),
   },
+  /**
+   * **Host-implemented, but no UI call site.**
+   *
+   * `remote_file_list` and `remote_file_preview` are what the file browser actually calls;
+   * nothing in `apps/desktop/src` reaches for a whole-file read, and the only caller of
+   * this row is the preview fixture (`apps/desktop/src/lib/preview-fixtures.ts:500`, pinned
+   * by `apps/desktop/tests/preview-fixtures.test.ts:21`). The host side does implement it.
+   *
+   * Kept because it is the one command that returns file *content* rather than a bounded
+   * preview, and the file surface is still being built — a third party or the next UI
+   * revision can call it without a contract change. It is annotated rather than deleted so
+   * that "the fixture covers it" is not mistaken for "the product uses it".
+   */
   remote_file_read: {
     params: z.strictObject({ serverId: IpcServerIdSchema, path: z.string().min(1) }),
     response: z.strictObject({ path: z.string().min(1), content: z.string(), truncated: z.boolean() }),
@@ -336,6 +579,18 @@ export const IPC_SCHEMAS = {
     params: z.strictObject({ serverId: IpcServerIdSchema.optional() }),
     response: z.strictObject({ transfers: z.array(TransferSnapshotSchema).max(256) }),
   },
+  /**
+   * **Host-implemented, but no UI call site.**
+   *
+   * The transfer list and the `file.transfer_updated` event are what the transfer UI
+   * consumes; nothing reads a single transfer by id, and this row's only caller is the
+   * preview fixture (`apps/desktop/src/lib/preview-fixtures.ts:514`, pinned by
+   * `apps/desktop/tests/preview-fixtures.test.ts:28`).
+   *
+   * Kept for the same reason as `remote_file_read`: it is the point-read half of the
+   * transfer surface, useful to a caller that has a transfer id out of band, and deleting
+   * it would remove the only way to ask about one transfer without listing them all.
+   */
   file_transfer_get: {
     params: z.strictObject({ transferId: z.string().trim().min(1).max(128) }),
     response: z.strictObject({ transfer: TransferSnapshotSchema }),
@@ -388,6 +643,15 @@ export const IPC_SCHEMAS = {
     response: EMPTY_PAYLOAD,
   },
   agent_spawn: { params: EMPTY_PAYLOAD, response: AgentSpawnResponseSchema },
+  /**
+   * **Host-implemented, but no UI call site.**
+   *
+   * Stopping work goes through `agent_run_stop` (and the Python tool-call interruption
+   * path); nothing in `apps/desktop/src` kills the sidecar process itself. The host does
+   * implement it, and it is the blunt instrument of last resort for a wedged sidecar, so it
+   * stays declared with a fixture — annotated, because a schema without a caller used to
+   * read as a working feature.
+   */
   agent_kill: { params: EMPTY_PAYLOAD, response: z.strictObject({ killed: z.boolean() }) },
   agent_status: { params: EMPTY_PAYLOAD, response: AgentStatusSchema },
   agent_logs: { params: EMPTY_PAYLOAD, response: AgentLogsResponseSchema },
@@ -432,29 +696,31 @@ export const IPC_SCHEMAS = {
      * there, because it reaches the UI through a response frame rather than the event
      * channel and therefore does not pass the event gate.
      */
-    response: z.strictObject({
-      runId: z.string().min(1),
-      started: z.boolean(),
-      duplicate: z.boolean().optional(),
-      resumed: z.boolean().optional(),
-      result: AgentRunResultSchema.optional(),
-    }),
+    response: forwardedResponseSchema(
+      z.strictObject({
+        runId: z.string().min(1),
+        started: z.boolean(),
+        duplicate: z.boolean().optional(),
+        resumed: z.boolean().optional(),
+        result: AgentRunResultSchema.optional(),
+      }),
+    ),
   },
   agent_run_stop: {
     params: z.strictObject({ runId: z.string().trim().min(1).max(256) }),
-    response: z.strictObject({ stopped: z.boolean() }),
+    response: forwardedResponseSchema(z.strictObject({ stopped: z.boolean() })),
   },
   agent_context_reset: {
     params: z.strictObject({ sessionId: z.string().trim().min(1).max(256), focusServerId: IpcServerIdSchema.optional() }),
-    response: z.strictObject({ reset: z.boolean() }),
+    response: forwardedResponseSchema(z.strictObject({ reset: z.boolean() })),
   },
   agent_context_reset_all: {
     params: EMPTY_PAYLOAD,
-    response: z.strictObject({ reset: z.boolean(), count: z.number().int().nonnegative() }),
+    response: forwardedResponseSchema(z.strictObject({ reset: z.boolean(), count: z.number().int().nonnegative() })),
   },
-  agent_memory_list: { params: AgentMemoryListInputSchema, response: z.strictObject({ memories: z.array(AgentMemorySchema).max(100) }) },
-  agent_memory_save: { params: AgentMemorySaveInputSchema, response: z.strictObject({ memory: AgentMemorySchema }) },
-  agent_memory_delete: { params: AgentMemoryDeleteInputSchema, response: z.strictObject({ deleted: z.boolean() }) },
+  agent_memory_list: { params: AgentMemoryListInputSchema, response: forwardedResponseSchema(z.strictObject({ memories: z.array(AgentMemorySchema).max(100) })) },
+  agent_memory_save: { params: AgentMemorySaveInputSchema, response: forwardedResponseSchema(z.strictObject({ memory: AgentMemorySchema })) },
+  agent_memory_delete: { params: AgentMemoryDeleteInputSchema, response: forwardedResponseSchema(z.strictObject({ deleted: z.boolean() })) },
   agent_approval_respond: {
     params: ApprovalResponseSchema,
     response: z.strictObject({ accepted: z.boolean() }),
@@ -518,22 +784,22 @@ export const IPC_SCHEMAS = {
     params: z.strictObject({ sessionId: z.string().trim().min(1).max(256) }),
     response: z.strictObject({ deleted: z.boolean() }),
   },
-  provider_list: { params: EMPTY_PAYLOAD, response: z.strictObject({ providers: z.array(ProviderConfigSchema) }) },
+  provider_list: { params: EMPTY_PAYLOAD, response: forwardedResponseSchema(z.strictObject({ providers: z.array(ProviderConfigSchema) })) },
   provider_save: {
     params: ProviderSaveInputSchema,
-    response: z.strictObject({ provider: ProviderConfigSchema }),
+    response: forwardedResponseSchema(z.strictObject({ provider: ProviderConfigSchema })),
   },
   provider_activate: {
     params: z.strictObject({ providerId: z.string().min(1) }),
-    response: z.strictObject({ provider: ProviderConfigSchema }),
+    response: forwardedResponseSchema(z.strictObject({ provider: ProviderConfigSchema })),
   },
   provider_delete: {
     params: z.strictObject({ providerId: z.string().min(1) }),
-    response: ProviderDeleteResponseSchema,
+    response: forwardedResponseSchema(ProviderDeleteResponseSchema),
   },
   provider_models: {
     params: z.strictObject({ providerId: z.string().min(1) }),
-    response: z.strictObject({ models: z.array(ProviderModelOptionSchema) }),
+    response: forwardedResponseSchema(z.strictObject({ models: z.array(ProviderModelOptionSchema) })),
   },
   mcp_server_list: { params: z.strictObject({}), response: McpServerListResponseSchema },
   mcp_server_save: {
@@ -592,6 +858,15 @@ export const IPC_SCHEMAS = {
     params: InvestigationTaskStopInputSchema,
     response: InvestigationTaskResponseSchema,
   },
+  /**
+   * **Host-implemented, but no UI call site.**
+   *
+   * The UI drives task transitions through `investigation_task_start` /
+   * `_stop` / `_recover`; the raw status write is the host-side primitive those three are
+   * built on and nothing in `apps/desktop/src` calls it directly. Kept as the declared
+   * primitive with a fixture, and annotated so the presence of a schema is not read as
+   * evidence of a caller.
+   */
   investigation_task_status_update: {
     params: InvestigationTaskStatusUpdateInputSchema,
     response: InvestigationTaskResponseSchema,
@@ -628,13 +903,22 @@ export const IPC_SCHEMAS = {
     params: z.strictObject({ input: InvestigationScheduleUpdateInputSchema }),
     response: z.strictObject({ schedule: InvestigationScheduleSchema }),
   },
+  /**
+   * **Host-implemented, but no UI call site.**
+   *
+   * This is the scheduler's internal step boundary — the host calls it on its own clock
+   * and answers with what the tick decided. The UI reads schedules through
+   * `investigation_schedule_list` / `_runs` and never ticks one, so this row exists for
+   * tests and for a host that wants to drive a tick explicitly. Annotated rather than
+   * deleted because the tick is a real, specified state transition, not dead surface.
+   */
   investigation_schedule_tick: {
     params: z.strictObject({ input: InvestigationScheduleTickInputSchema }),
     response: InvestigationScheduleTickResponseSchema,
   },
   provider_test: {
     params: z.strictObject({ providerId: z.string().min(1) }),
-    response: z.strictObject({ ok: z.literal(true) }),
+    response: forwardedResponseSchema(z.strictObject({ ok: z.literal(true) })),
   },
 } satisfies IpcCommandSchemaMap;
 
@@ -648,7 +932,7 @@ export const IPC_SCHEMAS = {
  * checking the shape at all.
  *
  * Events are notifications, not requests: a payload that fails its schema can only
- * be dropped, never re-asked. So the schema is here to make a drifted Rust payload
+ * be dropped, never re-asked. So the schema is here to make a drifted native payload
  * a *visible* dropped event rather than a silent runtime failure deep in a writer.
  *
  * Each `agent.*` channel is gated by **its own member schema**, not by the whole
@@ -658,10 +942,12 @@ export const IPC_SCHEMAS = {
  * already knew it was handling. A cast there is where a payload that passed the loose
  * gate reaches a handler as a shape nothing validated.
  *
- * Narrowing is safe because the channel name *is* the payload's discriminator: Rust
- * reads `params.type` and emits on `tauri_event_name(event_type)`
- * (`apps/desktop/src-tauri/src/commands/mod.rs:470,504`). Nothing the transport can
- * deliver is rejected by this; it stops accepting what the transport cannot produce.
+ * Narrowing is safe because the channel name *is* the payload's discriminator: the sidecar
+ * publishes an `agent.stream` notification tagged by `type`
+ * (`agent/src/yukinal_agent/sidecar.py:1015-1019`) and the host routes it under that same
+ * string (`native/desktop_host/src/ipc_router.cpp:8988-8990`), with no separator rewriting.
+ * Nothing the transport can deliver is rejected by this; it stops accepting what the
+ * transport cannot produce.
  */
 export const EVENT_SCHEMAS = {
   "agent.started": AGENT_EVENT_MEMBER_SCHEMAS["agent.started"],
@@ -686,7 +972,7 @@ export const EVENT_SCHEMAS = {
   }),
   "terminal.closed": z.strictObject({
     terminalSessionId: IpcTerminalSessionIdSchema,
-    // Rust sends `Option<u32>`, so a negative or fractional code is drift.
+    // The host sends an integer exit code or nothing, so a negative or fractional code is drift.
     exitCode: z.number().int().nonnegative().nullable(),
   }),
   /**

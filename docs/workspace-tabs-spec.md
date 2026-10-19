@@ -5,6 +5,10 @@
 - 不改：审批链、宿主硬边界、执行语义。本文所有"对 Agent 的可见性"都只是**呈现**，不授予任何执行权（见[安全与数据边界](./security.md)）。
 - 依据：以下行号取自施工前的工作树（分支 `codex/ui-layout-direction`）；实现差异集中记在 2.2 与 2.3 的"实现备注"里。
 
+## 2026-10-20 标签栏更新
+
+中间工作页改为单个「＋」入口、横向标签区和右侧目标选择。新建菜单列出文件、终端、日志、服务，并直接列出最近关闭的工作页；没有服务器目标时先引导选择服务器。活动标签使用现有石墨表面突出，证据与产物显示真实标题。关闭后的键盘焦点回到相邻标签或「＋」，重开后从最近关闭列表移除。工作页仍固定打开时的服务器，关闭终端标签仍保留会话。下文第 1 至 6 节记录 v1 的设计与验收，不作为此轮入口布局的现状说明。
+
 ## 1. 现状盘点
 
 > 本节是**施工前**的快照（分支 `codex/ui-layout-direction`），保留下来是为了说明为什么要动结构。里面提到的 `WorkpagesLauncher`、`.workpages-launcher`、Dock 内标签条等在 v1 已被替换，现行落点见第 2 节。
@@ -112,7 +116,7 @@ WorkpagesDock（stage + operations）
 
 - `HostKeyGate` 包裹：终端/文件/日志/服务四类内容都必须继续在 Gate 内（`WorkpagesDock.tsx:105-107`，判定逻辑 `apps/desktop/src/features/servers/HostKeyGate.tsx:55-69`）。
 - 终端"关闭视图不结束会话"：`retainedTerminals` + `TerminalPane` 的 `active` 闩锁与 `open` 语义（`workpages-store.ts:29`，`apps/desktop/src/features/terminal/TerminalPane.tsx:69,119-121`）。标签栏只能改变可见性，不能改成条件挂载。
-- 每页打开时捕获的 `serverId`：标签切换**不得**把它改成"当前选中服务器"。这是与右侧服务器视图标签最重要的区别。
+- 每页打开时捕获的 `serverId`：标签切换**不得**把它改成"当前选中服务器"。右侧只保留概览和活动参考视图；文件、终端、日志、服务从中央工作页打开。
 - 原生弹出窗口、证据页、产物页渲染路径不动（`WorkpageWindow.tsx:11,31`）。
 
 ## 3. 原生标题栏：满宽 40px 条的真实风险

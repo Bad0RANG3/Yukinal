@@ -1,7 +1,9 @@
 #pragma once
 
-// Ordered SQL port of crates/database/src/schema.rs. Append new migrations only;
-// keep the SQL bodies and their user_version numbers aligned with that history.
+// Ordered SQL migrations for the desktop host's local database. This file is the
+// only source of that history: append new migrations only, and never renumber or
+// reword one that has shipped. `content_hash.cpp` covers the payloads; this header
+// covers `PRAGMA user_version`.
 
 #include <array>
 #include <string_view>

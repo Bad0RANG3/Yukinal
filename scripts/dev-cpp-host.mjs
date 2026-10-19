@@ -3,7 +3,7 @@
 import { spawn } from "node:child_process";
 import { existsSync } from "node:fs";
 import { setTimeout as delay } from "node:timers/promises";
-import { dirname, join, resolve } from "node:path";
+import { dirname, join, resolve, delimiter } from "node:path";
 import { fileURLToPath } from "node:url";
 
 import { resolveCommandInvocation } from "./lib/commands.mjs";
@@ -118,6 +118,20 @@ function hostExecutable() {
   return executable;
 }
 
+function sshServiceExecutable() {
+  const suffix = process.platform === "win32" ? ".exe" : "";
+  const candidates = [
+    join(buildDirectory, `yukinal-ssh-service${suffix}`),
+    join(buildDirectory, "Debug", `yukinal-ssh-service${suffix}`),
+    join(buildDirectory, "Release", `yukinal-ssh-service${suffix}`),
+  ];
+  const executable = candidates.find(existsSync);
+  if (!executable) {
+    throw new Error(`CMake built the desktop but the SSH worker is missing under ${buildDirectory}.`);
+  }
+  return executable;
+}
+
 async function main() {
   const sharedBuild = resolveCommandInvocation("pnpm", ["--filter", "@yukinal/shared", "build"]);
   await run(sharedBuild.command, sharedBuild.args);
@@ -125,7 +139,9 @@ async function main() {
   const configureArgs = [
     "-S", native,
     "-B", buildDirectory,
-    "-DYUKINAL_BUILD_SSH_SERVICE=OFF",
+    // The dev host uses the same SSH core and executable as the packaged app so
+    // terminal and SFTP features work in the full application preview.
+    "-DYUKINAL_BUILD_SSH_SERVICE=ON",
     "-DYUKINAL_BUILD_DESKTOP_HOST=ON",
     "-DYUKINAL_BUILD_TESTS=OFF",
     "-DYUKINAL_FETCH_DEPS=ON",
@@ -134,7 +150,7 @@ async function main() {
   await run("cmake", configureArgs);
   await run("cmake", [
     "--build", buildDirectory,
-    "--target", "yukinal-desktop-host",
+    "--target", "yukinal-desktop-host", "yukinal-ssh-service",
     "--config", "Debug",
   ]);
 
@@ -142,6 +158,9 @@ async function main() {
   if (!existsSync(viteEntry)) {
     throw new Error("Vite is not installed. Run pnpm install --frozen-lockfile first.");
   }
+  // Check before starting Vite so an incomplete native build cannot open a
+  // seemingly functional desktop whose terminal worker is absent.
+  const serviceBinary = sshServiceExecutable();
   const url = `http://127.0.0.1:${port}`;
   const vite = spawnLongRunning(process.execPath, [
     viteEntry, "--host", "127.0.0.1", "--port", String(port), "--strictPort",
@@ -158,6 +177,11 @@ async function main() {
       process.platform === "win32" ? "python.exe" : "python",
     );
     const hostEnvironment = { ...process.env };
+    // The C++ host forwards these to the Agent sidecar, which only exposes the
+    // managed `ssh.*` tools when autoconfig is on and the worker binary exists.
+    hostEnvironment.YUKINAL_SSH_SERVICE_BINARY = serviceBinary;
+    hostEnvironment.YUKINAL_SSH_SERVICE_AUTOCONFIG = "1";
+    hostEnvironment.PATH = [dirname(serviceBinary), hostEnvironment.PATH ?? ""].join(delimiter);
     if (!hostEnvironment.YUKINAL_AGENT_PYTHON && existsSync(venvPython)) {
       hostEnvironment.YUKINAL_AGENT_PYTHON = venvPython;
     }

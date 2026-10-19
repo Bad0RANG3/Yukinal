@@ -12,7 +12,7 @@ controlled AI Agent with a hardened, structured SSH service.
 [**English**](README.md) · [中文](README.zh-CN.md)
 
 [![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](./LICENSE)
-[![Version](https://img.shields.io/badge/interface-1.0.0-informational.svg)](./packages/shared/src/version.ts)
+[![Version](https://img.shields.io/badge/interface-2.0.0--perview-informational.svg)](./packages/shared/src/version.ts)
 [![Platform](https://img.shields.io/badge/platform-Windows%20%7C%20macOS%20%7C%20Linux-6f42c1.svg)](#build-and-run)
 [![Python](https://img.shields.io/badge/python-3.11%2B-3776ab.svg)](./agent/README.md)
 [![Node](https://img.shields.io/badge/node-%3E%3D24-339933.svg)](package.json)
@@ -24,7 +24,7 @@ controlled AI Agent with a hardened, structured SSH service.
 
 > **Status:** Yukinal 2.0 is an in-progress rewrite that moves SSH operations
 > behind a standalone C++ service and a Python Agent while the React interface
-> stays the product UI. The current app/package interface version is `1.0.0`.
+> stays the product UI. The current app/package interface version is `2.0.0-perview`.
 > The Rust/Tauri host and the legacy Node agent have been removed; the C++
 > WebView host is now the only desktop host. Packaging (installers, signing,
 > notarization) is **not implemented yet**. See
@@ -172,7 +172,12 @@ pnpm check
 `pnpm check` runs repository hygiene and secret scanning, the docs-link gate,
 the CTest suite (C++ service/host + Python Agent), the control-plane tests when
 its venv exists, TypeScript build/typecheck/tests, the desktop bundle, and the
-Python sidecar smoke test.
+Python sidecar smoke test. It also guards its own configuration: an explicitly
+set `YUKINAL_SSH_CMAKE_BUILD_DIR` that cannot run tests stops the gate with the
+repairing `cmake` command instead of skipping the native suite behind a green
+line. It does **not** run a linter, formatter, or static analysis (no
+clang-format/clang-tidy, eslint, ruff, or mypy), so style and static issues still
+need human review.
 
 **5. Run the desktop**
 

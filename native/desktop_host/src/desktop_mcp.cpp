@@ -3,6 +3,7 @@
 #include "yukinal/desktop_host/credential_store.hpp"
 #include "yukinal/desktop_host/database.hpp"
 #include "yukinal/desktop_host/desktop_oauth.hpp"
+#include "header_safety.hpp"
 
 #include <httplib.h>
 
@@ -13,11 +14,14 @@
 #include <condition_variable>
 #include <cstdint>
 #include <cstdlib>
+#include <ctime>
+#include <iomanip>
 #include <map>
 #include <memory>
 #include <mutex>
 #include <optional>
 #include <random>
+#include <sstream>
 #include <stdexcept>
 #include <thread>
 #include <utility>
@@ -42,7 +46,7 @@ constexpr std::size_t kMaxFrameBytes = 8 * 1024 * 1024;
 constexpr std::size_t kMaxStderrLines = 40;
 constexpr const char* kProtocolVersion = "2024-11-05";
 constexpr const char* kClientName = "yukinal-desktop";
-constexpr const char* kClientVersion = "1.0.0";
+constexpr const char* kClientVersion = "2.0.0-perview";
 
 std::string sanitize_segment(const std::string& value) {
   std::string out;
@@ -60,6 +64,21 @@ std::string sanitize_segment(const std::string& value) {
 
 std::string internal_tool_name(const std::string& server_segment, const std::string& tool) {
   return "mcp." + server_segment + "." + sanitize_segment(tool);
+}
+
+// The shared `McpServerStatus.startedAt` shape: UTC seconds, no fractional part.
+std::string iso8601_utc_now() {
+  const auto now = std::chrono::system_clock::now();
+  const auto time = std::chrono::system_clock::to_time_t(now);
+  std::tm utc{};
+#ifdef _WIN32
+  gmtime_s(&utc, &time);
+#else
+  gmtime_r(&time, &utc);
+#endif
+  std::ostringstream rendered;
+  rendered << std::put_time(&utc, "%Y-%m-%dT%H:%M:%SZ");
+  return rendered.str();
 }
 
 bool split_internal_name(const std::string& name, std::string& server_segment,
@@ -167,19 +186,6 @@ std::string trim_ascii(std::string value) {
     --end;
   }
   return value.substr(start, end - start);
-}
-
-// Mirrors Rust's `char::is_control`: C0, DEL and the C1 range.
-bool has_control_characters(const std::string& value) {
-  for (std::size_t index = 0; index < value.size(); ++index) {
-    const auto byte = static_cast<unsigned char>(value[index]);
-    if (byte < 0x20 || byte == 0x7f) return true;
-    if (byte == 0xc2 && index + 1 < value.size()) {
-      const auto next = static_cast<unsigned char>(value[index + 1]);
-      if (next >= 0x80 && next <= 0x9f) return true;
-    }
-  }
-  return false;
 }
 
 // One `auth-param` out of a `WWW-Authenticate` value (RFC 7235 §2.1).
@@ -325,6 +331,12 @@ struct McpSupervisor::Impl {
     std::vector<std::pair<std::string, std::string>> http_headers;
     std::string http_session_id;
     std::vector<std::string> diagnostics;
+    // What the read-only status reports. A stdio session records the launched
+    // program and its process id; an HTTP session has no local process, so both
+    // stay empty and the status renders them as null.
+    std::string program;
+    long long process_id = 0;
+    std::string started_at;
     // Present when the server row carries a connected OAuth configuration. It
     // resolves the stored token (refreshing when needed) and signs a per-request
     // DPoP proof; the plaintext token never leaves this object.
@@ -562,7 +574,7 @@ struct McpSupervisor::Impl {
       value = challenge_parameter(challenge, "nonce");
     }
     value = trim_ascii(std::move(value));
-    if (value.empty() || value.size() > 1024 || has_control_characters(value)) return std::string();
+    if (value.empty() || value.size() > 1024 || has_header_control_characters(value)) return std::string();
     return value;
   }
 
@@ -948,6 +960,9 @@ struct McpSupervisor::Impl {
     CloseHandle(child_err);
     CloseHandle(info.hThread);
     session->process = info.hProcess;
+    session->process_id = static_cast<long long>(info.dwProcessId);
+    session->program = command;
+    session->started_at = iso8601_utc_now();
     session->stdin_write = parent_in;
     session->stdout_read = parent_out;
     session->stderr_read = parent_err;
@@ -981,6 +996,9 @@ struct McpSupervisor::Impl {
     close(out_pipe[1]);
     close(err_pipe[1]);
     session->pid = child;
+    session->process_id = static_cast<long long>(child);
+    session->program = command;
+    session->started_at = iso8601_utc_now();
     session->stdin_write = in_pipe[1];
     session->stdout_read = out_pipe[0];
     session->stderr_read = err_pipe[0];
@@ -1041,17 +1059,33 @@ struct McpSupervisor::Impl {
     session->http_origin = parts.origin;
     session->http_path = parts.path;
     session->running = true;
+    session->started_at = iso8601_utc_now();
     // Static auth headers: the reference is resolved against the OS credential
     // store, so the plaintext never leaves it. A missing secret is not fatal;
-    // the server's own 401 is the real answer.
+    // the server's own 401 is the real answer. A stored value is re-validated
+    // here as well as at save time, because a row can predate that check or be
+    // written by another host version: `httplib::write_headers` copies both
+    // name and value verbatim, so a CR/LF/NUL there would inject headers. One
+    // bad header is dropped (closed), never the whole server.
     for (const auto& header : row.value("httpAuthHeaders", nlohmann::json::array())) {
       if (!header.is_object()) continue;
       const auto name = header.value("name", std::string());
       const auto reference = header.value("credentialRef", std::string());
       if (name.empty() || reference.empty()) continue;
+      if (name.size() > 128 || has_header_control_characters(name)) {
+        session->diagnostics.push_back(
+            "dropped a static header whose name contains control characters");
+        continue;
+      }
       try {
         const auto secret = credentials->get(CredentialReference::parse(reference));
         std::string value(reinterpret_cast<const char*>(secret.data()), secret.size());
+        if (value.size() > 8192 || has_header_control_characters(value)) {
+          session->diagnostics.push_back(
+              "dropped the static header \"" + name +
+              "\" because its stored secret contains control characters");
+          continue;
+        }
         session->http_headers.emplace_back(name, std::move(value));
       } catch (const std::exception&) {
         continue;
@@ -1139,9 +1173,17 @@ struct McpSupervisor::Impl {
     std::lock_guard lock(session->mutex);
     return {{"serverId", session->server_id},
             {"running", session->running},
-            {"pid", nullptr},
-            {"program", nullptr},
-            {"startedAt", nullptr},
+            // Only a live stdio session has a local process to report; an HTTP
+            // session and a dead one answer null, never a fabricated id.
+            {"pid", session->running && session->process_id > 0
+                        ? nlohmann::json(session->process_id)
+                        : nlohmann::json(nullptr)},
+            {"program", session->running && !session->program.empty()
+                            ? nlohmann::json(session->program)
+                            : nlohmann::json(nullptr)},
+            {"startedAt", session->running && !session->started_at.empty()
+                              ? nlohmann::json(session->started_at)
+                              : nlohmann::json(nullptr)},
             {"protocolVersion", session->protocol_version.empty()
                                     ? nlohmann::json(nullptr)
                                     : nlohmann::json(session->protocol_version)},
@@ -1189,6 +1231,24 @@ nlohmann::json McpSupervisor::stop(const std::string& server_id) {
            {{"config", *row}, {"status", std::move(status)}, {"tools", nlohmann::json::array()}}},
           {"shutdown",
            {{"wasRunning", was_running}, {"killed", false}, {"unreaped", false}}}};
+}
+
+std::optional<nlohmann::json> McpSupervisor::status(const std::string& server_id) {
+  std::shared_ptr<Impl::Session> session;
+  {
+    std::lock_guard lock(impl_->mutex);
+    const auto found = impl_->sessions.find(server_id);
+    if (found == impl_->sessions.end()) return std::nullopt;
+    session = found->second;
+  }
+  // A session whose reader observed the child exit is genuinely stopped, even
+  // though it is still mapped. Report it as absent so the caller answers with the
+  // stopped shape rather than a running one.
+  {
+    std::lock_guard lock(session->mutex);
+    if (!session->running) return std::nullopt;
+  }
+  return impl_->status_for(session);
 }
 
 nlohmann::json McpSupervisor::catalog() {

@@ -21,7 +21,7 @@ test("different instants do not collapse to the same label", () => {
 });
 
 test("an unparsable timestamp degrades to the raw value instead of throwing", () => {
-  // One bad row must not take down the list it sits in. Rust is the source of these
+  // One bad row must not take down the list it sits in. The host is the source of these
   // strings, and a legacy or truncated value has reached the UI before.
   for (const bad of ["", "not a date", "0000-13-45"]) {
     assert.doesNotThrow(() => formatTimestamp(bad));
@@ -38,6 +38,22 @@ test("an Error is unwrapped to its message, and anything else is stringified", (
   // which of the several thrown shapes it is handed.
   class IpcError extends Error {}
   assert.equal(errorMessage(new IpcError("schema rejected the payload")), "schema rejected the payload");
+});
+
+test("a zod-shaped Error collapses to its first issue instead of dumping JSON", () => {
+  const zodLike = Object.assign(new Error('[{"code":"invalid_type","path":["params","runId"],"message":"Expected string"}]'), {
+    issues: [
+      { code: "invalid_type", path: ["params", "runId"], message: "Expected string" },
+      { code: "invalid_type", path: ["params", "sessionId"], message: "Expected string" },
+    ],
+  });
+  const message = errorMessage(zodLike);
+  assert.equal(message.includes("{"), false, "a raw issue dump must not reach the notice");
+  assert.ok(message.includes("params.runId"), "the first failing path is the actionable part");
+  assert.ok(message.includes("Expected string"));
+  assert.ok(message.includes("共 2 项"), "the count tells the user it is not the only problem");
+  // An ordinary Error must stay byte-for-byte unchanged.
+  assert.equal(errorMessage(new Error("plain failure")), "plain failure");
 });
 
 test("a size steps through the binary units", () => {

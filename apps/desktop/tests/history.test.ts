@@ -17,6 +17,7 @@ import {
   historyFilterTotal,
   historyTargetLabel,
   matchSegments,
+  sameHistoryQuery,
 } from "../src/features/agent/history.js";
 
 /** 本地时间构造 ISO 串：这些用例说的是「本地日历日」，用 UTC 写会读不出意图。 */
@@ -126,6 +127,21 @@ test("a record names its target, and never falls back to an opaque server id", (
   assert.equal(historyTargetLabel({ serverId: undefined }, servers), "全局工作区");
   // 服务器已经删掉时也要说人话：srv_02xyz 对使用者不回答任何问题。
   assert.equal(historyTargetLabel({ serverId: "srv_02xyz" }, servers), "已移除的服务器");
+});
+
+test("placeholder rows only survive when the whole history query is unchanged", () => {
+  // Same server but a new keyword: those rows belong to the old search.
+  assert.equal(sameHistoryQuery(["agent-chat-sessions", "srv_a", "", "active"], "srv_a", "nginx", "active"), false);
+  // Same keyword but a different filter: an archived row must not stay clickable under "进行中".
+  assert.equal(sameHistoryQuery(["agent-chat-sessions", "srv_a", "nginx", "all"], "srv_a", "nginx", "archived"), false);
+  // Different server.
+  assert.equal(sameHistoryQuery(["agent-chat-sessions", "srv_b", "", "active"], "srv_a", "", "active"), false);
+  // The exact same query is the only case that keeps the previous page.
+  assert.equal(sameHistoryQuery(["agent-chat-sessions", "srv_a", "nginx", "active"], "srv_a", "nginx", "active"), true);
+  assert.equal(sameHistoryQuery(["agent-chat-sessions", null, "", "all"], null, "", "all"), true);
+  // A missing previous query must not be treated as a match.
+  assert.equal(sameHistoryQuery(undefined, "srv_a", "", "active"), false);
+  assert.equal(sameHistoryQuery(["agent-memories", "srv_a", "", "active"], "srv_a", "", "active"), false);
 });
 
 test("filter totals and the archived parameter describe the same three tabs", () => {

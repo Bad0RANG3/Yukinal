@@ -10,7 +10,9 @@ cannot both hand the same task to a node.
 from __future__ import annotations
 
 import asyncio
+import threading
 import unittest
+from unittest.mock import patch
 
 from sqlalchemy import text
 from sqlalchemy.ext.asyncio import create_async_engine
@@ -187,6 +189,133 @@ class ApprovalBindingTests(ControlPlaneTestCase):
         self.assertIn("approval_expired", refused.json()["message"])
         self.assertEqual(self.get_task(self.tenant_id, task_id)["status"], "queued")
 
+    # ── the cited task must be the task being approved ───────────────────────
+
+    def an_exec_task(self, tenant_id: str, node_id: str) -> str:
+        self.approve(tenant_id, node_id, EXEC, EXEC_PAYLOAD)
+        created = self.create_task(tenant_id, node_id, EXEC, EXEC_PAYLOAD)
+        self.assertEqual(created["status"], 201, created["body"])
+        return created["body"]["id"]
+
+    def cite_task(self, task_id: str, *, action: str = EXEC, payload: dict | None = None):
+        return self.client.post(
+            f"/v1/tenants/{self.tenant_id}/approvals",
+            json={
+                "action": action,
+                "nodeId": self.node_id,
+                "payload": payload if payload is not None else EXEC_PAYLOAD,
+                "taskId": task_id,
+                "requestedBy": "agent",
+            },
+            headers=AUTH,
+        )
+
+    def test_an_approval_may_cite_the_task_it_covers(self) -> None:
+        task_id = self.an_exec_task(self.tenant_id, self.node_id)
+        response = self.cite_task(task_id)
+        self.assertEqual(response.status_code, 201, response.text)
+        self.assertEqual(response.json()["task_id"], task_id)
+
+    def test_an_approval_cannot_cite_a_task_on_another_node(self) -> None:
+        other_node, _key = self.provision_node(self.tenant_id, "build-02")
+        other_task = self.an_exec_task(self.tenant_id, other_node)
+        # Same tenant, but the task belongs to a different node. Citing it must
+        # not bind this node's approval to the other node's work.
+        response = self.cite_task(other_task)
+        self.assertEqual(response.status_code, 409, response.text)
+        self.assertEqual(response.json()["code"], "conflict")
+
+    def test_an_approval_cannot_cite_a_task_that_does_another_action(self) -> None:
+        task_id = self.an_exec_task(self.tenant_id, self.node_id)
+        response = self.cite_task(task_id, action="docker.restart")
+        self.assertEqual(response.status_code, 409, response.text)
+        self.assertEqual(response.json()["code"], "conflict")
+
+    def test_an_approval_cannot_cite_a_task_that_does_another_payload(self) -> None:
+        task_id = self.an_exec_task(self.tenant_id, self.node_id)
+        response = self.cite_task(task_id, payload={"command": "rm -rf /"})
+        self.assertEqual(response.status_code, 409, response.text)
+        self.assertEqual(response.json()["code"], "conflict")
+
+
+class ConcurrentDecisionTests(ControlPlaneTestCase):
+    """Two operators acting on one pending request cannot both win.
+
+    Both requests are released together at ``require_tenant``, before either has
+    read the approval, so the approve path (which awaits the tenant TTL before
+    writing) and the reject/revoke path really are in flight at the same time.
+    """
+
+    def setUp(self) -> None:
+        super().setUp()
+        self.tenant_id = self.create_tenant()
+        self.node_id, _key = self.provision_node(self.tenant_id)
+
+    def race(self, left, right):
+        barrier = threading.Barrier(2)
+        real_require_tenant = service.require_tenant
+        lock = threading.Lock()
+        outcomes: list[tuple[str, int]] = []
+
+        async def gated_require_tenant(*args, **kwargs):
+            barrier.wait(timeout=10)
+            return await real_require_tenant(*args, **kwargs)
+
+        def run(label, call):
+            response = call()
+            with lock:
+                outcomes.append((label, response.status_code))
+
+        with patch.object(service, "require_tenant", gated_require_tenant):
+            workers = [
+                threading.Thread(target=run, args=("left", left)),
+                threading.Thread(target=run, args=("right", right)),
+            ]
+            for worker in workers:
+                worker.start()
+            for worker in workers:
+                worker.join(timeout=20)
+        return outcomes
+
+    def transition_audit(self, actions: set[str]) -> list[dict]:
+        audit = self.client.get(
+            f"/v1/tenants/{self.tenant_id}/audit", headers=AUTH
+        ).json()
+        return [event for event in audit if event["action"] in actions]
+
+    def test_concurrent_approve_and_reject_have_one_winner(self) -> None:
+        approval_id = self.create_approval(
+            self.tenant_id, self.node_id, EXEC, EXEC_PAYLOAD
+        ).json()["id"]
+
+        outcomes = self.race(
+            lambda: self.decide(self.tenant_id, approval_id, "approved"),
+            lambda: self.decide(self.tenant_id, approval_id, "rejected"),
+        )
+        self.assertEqual(sorted(code for _label, code in outcomes), [200, 409])
+
+        transitions = self.transition_audit({"approval.approved", "approval.rejected"})
+        self.assertEqual(len(transitions), 1, transitions)
+        winner = transitions[0]["action"].removeprefix("approval.")
+        self.assertEqual(self.stored_approval_state(approval_id), winner)
+
+    def test_concurrent_approve_and_revoke_have_one_winner(self) -> None:
+        approval_id = self.create_approval(
+            self.tenant_id, self.node_id, EXEC, EXEC_PAYLOAD
+        ).json()["id"]
+
+        outcomes = self.race(
+            lambda: self.decide(self.tenant_id, approval_id, "approved"),
+            lambda: self.revoke(self.tenant_id, approval_id),
+        )
+        self.assertEqual(sorted(code for _label, code in outcomes), [200, 409])
+
+        transitions = self.transition_audit({"approval.approved", "approval.revoke"})
+        self.assertEqual(len(transitions), 1, transitions)
+        winner = transitions[0]["action"]
+        expected = "approved" if winner == "approval.approved" else "revoked"
+        self.assertEqual(self.stored_approval_state(approval_id), expected)
+
 
 class ApprovalChannelTests(ControlPlaneTestCase):
     def test_the_channel_reports_work_waiting_for_an_approval(self) -> None:
@@ -330,6 +459,72 @@ class AtomicAssignmentTests(ControlPlaneTestCase):
         self.assertEqual(
             transitions[0]["detail"], {"from": "queued", "to": "running", "outcome": None}
         )
+
+
+    def test_a_revocation_between_selection_and_claim_does_not_dispatch(self) -> None:
+        """The claim, not the earlier authorisation read, decides.
+
+        ``assign_queued_tasks`` first asks whether the task is authorised and
+        then tries to claim it. A withdrawal that lands between those two steps
+        must make the claim match no row: otherwise the task starts under a
+        decision the operator already withdrew.
+        """
+        # The node carries one active task at a time; free it before queueing
+        # the effectful one this test is about.
+        self.assertEqual(self.move(self.tenant_id, self.task_id, "running"), 200)
+        self.assertEqual(self.move(self.tenant_id, self.task_id, "succeeded"), 200)
+        approval_id = self.approve(self.tenant_id, self.node_id, EXEC, EXEC_PAYLOAD)
+        task_id = self.create_task(
+            self.tenant_id, self.node_id, EXEC, EXEC_PAYLOAD
+        )["body"]["id"]
+        real_claim = service.claim_queued_task
+
+        async def revoke_then_claim(session, claimed_task_id, **kwargs):
+            await service.revoke_approval(
+                session,
+                tenant_id=self.tenant_id,
+                approval_id=approval_id,
+                revoked_by="ada",
+            )
+            return await real_claim(session, claimed_task_id, **kwargs)
+
+        async def scenario(engine):
+            factory = create_session_factory(engine)
+            async with factory() as session:
+                async with session.begin():
+                    node = await service.require_node_by_id(session, self.node_id)
+                    with patch.object(service, "claim_queued_task", revoke_then_claim):
+                        return await service.assign_queued_tasks(session, node)
+
+        assigned, waiting = self.run_service(scenario)
+        self.assertEqual(assigned, [])
+        self.assertEqual(waiting, [])
+        task = self.get_task(self.tenant_id, task_id)
+        self.assertEqual(task["status"], "queued")
+        self.assertEqual(task["attempts"], 0)
+        audit = self.client.get(f"/v1/tenants/{self.tenant_id}/audit", headers=AUTH).json()
+        self.assertEqual(
+            [
+                event
+                for event in audit
+                if event["action"] == "task.transition" and event["subject_id"] == task_id
+            ],
+            [],
+        )
+
+        # The task is not lost, only refused: the next dispatch round reports the
+        # withdrawal instead of silently leaving the queue idle.
+        async def next_round(engine):
+            factory = create_session_factory(engine)
+            async with factory() as session:
+                async with session.begin():
+                    node = await service.require_node_by_id(session, self.node_id)
+                    return await service.assign_queued_tasks(session, node)
+
+        assigned, waiting = self.run_service(next_round)
+        self.assertEqual(assigned, [])
+        self.assertEqual([entry["reason"] for entry in waiting], ["approval_revoked"])
+        self.assertEqual(self.get_task(self.tenant_id, task_id)["status"], "queued")
 
 
 class ActionPolicyTests(unittest.TestCase):

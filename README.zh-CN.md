@@ -12,7 +12,7 @@
 [English](README.md) · [**中文**](README.zh-CN.md)
 
 [![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](./LICENSE)
-[![Version](https://img.shields.io/badge/interface-1.0.0-informational.svg)](./packages/shared/src/version.ts)
+[![Version](https://img.shields.io/badge/interface-2.0.0--perview-informational.svg)](./packages/shared/src/version.ts)
 [![Platform](https://img.shields.io/badge/platform-Windows%20%7C%20macOS%20%7C%20Linux-6f42c1.svg)](#构建与运行)
 [![Python](https://img.shields.io/badge/python-3.11%2B-3776ab.svg)](./agent/README.md)
 [![Node](https://img.shields.io/badge/node-%3E%3D24-339933.svg)](package.json)
@@ -23,7 +23,7 @@
 ---
 
 > **状态：** Yukinal 2.0 正在重写中：SSH 操作迁移到独立的 C++ 服务和
-> Python Agent，React 界面仍是产品 UI。当前 app/package 接口版本为 `1.0.0`。
+> Python Agent，React 界面仍是产品 UI。当前 app/package 接口版本为 `2.0.0-perview`。
 > Rust/Tauri 宿主与 legacy Node agent
 > 已从仓库删除，C++ WebView 宿主是唯一桌面宿主。打包（安装器、签名、公证）
 > **尚未实现**。详见[重写状态](./docs/rewrite-cpp-python.md)与
@@ -166,7 +166,11 @@ pnpm check
 
 `pnpm check` 会依次执行仓库卫生与密钥扫描、文档链接门禁、CTest 套件（C++
 服务/宿主 + Python Agent）、控制平面测试（其 venv 存在时）、TypeScript
-构建/类型检查/单测、桌面打包，以及 Python 边车冒烟。
+构建/类型检查/单测、桌面打包，以及 Python 边车冒烟。它也会守护自身配置：
+显式设置的 `YUKINAL_SSH_CMAKE_BUILD_DIR` 若不是可运行的测试构建，门禁会带着
+`cmake` 修复命令直接失败，而不是把原生套件跳过后仍打印绿。它**不包含** lint、
+格式化或静态分析（没有 clang-format/clang-tidy、eslint、ruff 或 mypy），
+风格与静态问题仍需人工审查。
 
 **5. 运行桌面应用**
 

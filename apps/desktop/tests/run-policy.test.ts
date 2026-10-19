@@ -61,10 +61,21 @@ test("'按环境自动' is the default and sends no policyId", () => {
   assert.equal(RUN_POLICY_ORDER[0], null);
 });
 
-test("the automatic choice leaves the field off the wire entirely", () => {
+test("no choice ever puts a policyId on the wire", () => {
+  // This node has no policy engine (`permissionPolicyIds` is empty), and `agent_run_start`
+  // rejects ANY request that carries `policyId` with `-32602`. So the honest reading of the
+  // settings UI is "this choice is UI state only": every value — including the built-in
+  // policy ids — must leave the field off the request. Before this rule the picker's every
+  // option corresponded to exactly one outcome: the run failed to start.
   assert.equal(requestPolicyId(null), undefined);
-  for (const id of BUILTIN_POLICY_IDS) assert.equal(requestPolicyId(id), id);
-  // Tauri serialises the args as JSON, so an `undefined` field really does leave the
+  for (const id of BUILTIN_POLICY_IDS) {
+    assert.equal(
+      requestPolicyId(id),
+      undefined,
+      `choosing ${id} must not send a policyId: the sidecar would refuse the run with -32602`,
+    );
+  }
+  // The host serialises the args as JSON, so an `undefined` field really does leave the
   // request — which is what makes "按环境自动" the absence of an override rather than a
   // hidden default the UI chose on the user's behalf.
   assert.equal(
@@ -73,7 +84,8 @@ test("the automatic choice leaves the field off the wire entirely", () => {
   );
   assert.equal(
     JSON.stringify({ runId: "run_1", policyId: requestPolicyId("policy.production") }),
-    '{"runId":"run_1","policyId":"policy.production"}',
+    '{"runId":"run_1"}',
+    "a built-in policy id must be dropped from the request, not forwarded",
   );
 });
 

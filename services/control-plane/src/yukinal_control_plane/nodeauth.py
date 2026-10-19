@@ -6,9 +6,15 @@ control plane never stores a node secret: it stores the public half and verifies
 That keeps the credential boundary honest (no material at rest) and lets a node
 prove possession on each call without a session table.
 
-Canonical string (newline separated, hashed body):
+Canonical string (newline separated, node id first, hashed body):
 
-    <timestamp>\n<nonce>\n<METHOD>\n<path[?query]>\n<sha256-hex(body)>
+    <node-id>\n<timestamp>\n<nonce>\n<METHOD>\n<path[?query]>\n<sha256-hex(body)>
+
+The node id is *inside* the signature, not merely beside it. It is the row the
+control plane looks the public key up in, and a key is registered once, so
+signing the id is what stops a key registered in one place from being presented
+under a different node's header: without it the id is unsigned routing input and
+the signature only proves that *some* registered key signed the same bytes.
 
 The timestamp must be within :data:`SIGNATURE_WINDOW_SECONDS` of the server
 clock, and the nonce must be unused for that node, so a captured request cannot
@@ -119,11 +125,18 @@ def body_digest(body: bytes) -> str:
 
 
 def canonical_request(
-    *, timestamp: str, nonce: str, method: str, path: str, body: bytes
+    *, node_id: str, timestamp: str, nonce: str, method: str, path: str, body: bytes
 ) -> bytes:
-    """The exact bytes a node signs and the control plane verifies."""
+    """The exact bytes a node signs and the control plane verifies.
+
+    ``node_id`` is the first line, so the signed bytes name the node the
+    signature is for. Every field is newline separated and the node id is not
+    attacker-chosen on the verifying side (it is the header the caller sent, but
+    the key it is checked against is that node's own), so a key registered under
+    one node cannot be replayed against another node's id.
+    """
     return "\n".join(
-        [timestamp, nonce, method.upper(), path, body_digest(body)]
+        [node_id, timestamp, nonce, method.upper(), path, body_digest(body)]
     ).encode("utf-8")
 
 
@@ -152,6 +165,7 @@ def verify_signature(public_key_b64: str, signature_b64: str, canonical: bytes) 
 def sign_headers(
     private_key: Ed25519PrivateKey,
     *,
+    node_id: str,
     method: str,
     path: str,
     body: bytes = b"",
@@ -162,12 +176,19 @@ def sign_headers(
 
     This is the client-side contract: a node driver signs the canonical string
     with its private key and sends the public-key-derived headers, never the key
-    itself beyond the identifier the operator already registered.
+    itself beyond the identifier the operator already registered. ``node_id`` is
+    the id the driver's own registration returned; it is signed, so a driver
+    cannot sign for a node it is not.
     """
     stamp = str(int(time.time()) if timestamp is None else timestamp)
     value = secrets.token_hex(16) if nonce is None else nonce
     canonical = canonical_request(
-        timestamp=stamp, nonce=value, method=method, path=path, body=body
+        node_id=node_id,
+        timestamp=stamp,
+        nonce=value,
+        method=method,
+        path=path,
+        body=body,
     )
     signature = private_key.sign(canonical)
     return {

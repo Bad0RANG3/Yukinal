@@ -5,6 +5,7 @@
 #include "yukinal/desktop_host/database.hpp"
 #include "yukinal/desktop_host/desktop_target.hpp"
 #include "yukinal/desktop_host/local_paths.hpp"
+#include "yukinal/desktop_host/scoped_environment.hpp"
 
 #include <stdexcept>
 #include <string>
@@ -25,45 +26,6 @@ namespace yukinal::desktop_host {
 namespace {
 
 #ifdef YUKINAL_DESKTOP_HOST_WITH_SSH_CORE
-// The C++ SSH core resolves password/key/passphrase/proxy secrets from the
-// process environment by name. The desktop IPC runs one command at a time on the
-// WebView thread, so a scoped override is safe; the Python sidecar is a separate
-// process and never shares this block.
-class ScopedEnvironment {
- public:
-  explicit ScopedEnvironment(
-      const std::vector<std::pair<std::string, std::string>>& values) {
-    for (const auto& [name, value] : values) {
-      const char* previous = std::getenv(name.c_str());
-      saved_.emplace_back(name, previous == nullptr ? std::nullopt
-                                                    : std::optional<std::string>(previous));
-#ifdef _WIN32
-      _putenv_s(name.c_str(), value.c_str());
-#else
-      setenv(name.c_str(), value.c_str(), 1);
-#endif
-    }
-  }
-  ~ScopedEnvironment() {
-    for (const auto& [name, previous] : saved_) {
-#ifdef _WIN32
-      _putenv_s(name.c_str(), previous.has_value() ? previous->c_str() : "");
-#else
-      if (previous.has_value()) {
-        setenv(name.c_str(), previous->c_str(), 1);
-      } else {
-        unsetenv(name.c_str());
-      }
-#endif
-    }
-  }
-  ScopedEnvironment(const ScopedEnvironment&) = delete;
-  ScopedEnvironment& operator=(const ScopedEnvironment&) = delete;
-
- private:
-  std::vector<std::pair<std::string, std::optional<std::string>>> saved_;
-};
-
 yukinal::ssh_service::TargetConfig build_target_config(const nlohmann::json& payload) {
   const auto& target = payload.at("target");
   const auto target_id = target.at("target_id").get<std::string>();

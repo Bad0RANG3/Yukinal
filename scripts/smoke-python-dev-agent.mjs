@@ -1,6 +1,6 @@
 #!/usr/bin/env node
 
-/** Exercise the source Python Agent through the same NDJSON sidecar contract as Tauri. */
+/** Exercise the source Python Agent through the same NDJSON sidecar contract the desktop host uses. */
 
 import { spawnSync } from "node:child_process";
 import { existsSync } from "node:fs";

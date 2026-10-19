@@ -9,8 +9,9 @@
  *
  * 1. **没有 `dangerouslySetInnerHTML`。** 正文是不可信文本，它只会变成我们自己创建的
  *    元素里的文字节点。解析器不认 HTML，这里也不把它当 HTML。
- * 2. **链接只在外部浏览器打开。** 渲染层使用 opener 能力允许的 `http(s)` / `mailto`
- *    URL，不让 WebView 导航离开应用。未知 scheme 在解析阶段已经是普通文字。
+ * 2. **链接只在外部浏览器打开，`#fragment` 例外。** 外部链接走 opener 能力允许的
+ *    `http(s)` / `mailto` URL，不让 WebView 导航离开应用；页内锚点则跳到本组件渲染
+ *    的标题（标题带稳定 id）。未知 scheme 在解析阶段已经是普通文字。
  * 3. **远程图片需要明确同意。** 默认只显示替代文字和加载按钮；用户点击后才会为
  *    同一个 `http(s)` URL 创建带 `no-referrer` 的 `<img>`。
  *
@@ -20,29 +21,132 @@
 
 import { memo, useState, type ReactNode } from "react";
 
+import { errorMessage } from "../lib/format.js";
 import { openExternalUrl } from "../lib/external.js";
 import { parseMarkdown, type Block, type ColumnAlign, type Inline } from "../lib/markdown.js";
 import { KeywordText } from "./KeywordText.js";
 
 const HEADING_TAG = { 1: "h1", 2: "h2", 3: "h3", 4: "h4", 5: "h5", 6: "h6" } as const;
 
+type HeadingIds = Map<Block, string>;
+
 export const MarkdownText = memo(function MarkdownText({ text, className }: { text: string; className?: string }) {
   const blocks = parseMarkdown(text);
+  const headingIds = assignHeadingIds(blocks);
   return (
-    <div className={className}>
+    <div className={className} data-markdown-root="">
       {blocks.map((block, index) => (
-        <BlockView block={block} key={index} />
+        <BlockView block={block} headingIds={headingIds} key={index} />
       ))}
     </div>
   );
 });
 
-function BlockView({ block }: { block: Block }) {
+/**
+ * Give every heading a stable, deduplicated id so `[text](#anchor)` can jump to it.
+ *
+ * Markdown headings have no ids of their own, and the renderer deliberately does not
+ * navigate the WebView. Without this, an in-page link reached the external opener and
+ * threw (`#…` is not an allowed opener scheme) — a link that looked clickable and did
+ * nothing visible.
+ */
+export function headingSlug(text: string, taken: ReadonlySet<string> = new Set()): string {
+  const base =
+    text
+      .trim()
+      .toLowerCase()
+      .replace(/[^\p{L}\p{N}\s_-]/gu, "")
+      .replace(/\s+/gu, "-")
+      .replace(/-+/gu, "-")
+      .replace(/^-|-$/gu, "") || "section";
+  let slug = base;
+  let suffix = 2;
+  while (taken.has(slug)) slug = base + "-" + suffix++;
+  return slug;
+}
+
+function assignHeadingIds(blocks: Block[]): HeadingIds {
+  const ids: HeadingIds = new Map();
+  const taken = new Set<string>();
+  const visit = (children: Block[]): void => {
+    for (const block of children) {
+      if (block.kind === "heading") {
+        const slug = headingSlug(inlineText(block.content), taken);
+        taken.add(slug);
+        ids.set(block, slug);
+      } else if (block.kind === "quote") {
+        visit(block.blocks);
+      } else if (block.kind === "list") {
+        for (const item of block.items) visit(item.blocks);
+      }
+    }
+  };
+  visit(blocks);
+  return ids;
+}
+
+function inlineText(nodes: Inline[]): string {
+  return nodes
+    .map((node) => {
+      switch (node.kind) {
+        case "text":
+        case "code":
+          return node.text;
+        case "strong":
+        case "emphasis":
+        case "strike":
+        case "link":
+          return inlineText(node.children);
+        case "image":
+          return node.alt;
+        case "footnote":
+          return "[" + node.label + "]";
+        case "break":
+          return " ";
+      }
+    })
+    .join("");
+}
+
+/** `#…` is an in-page jump; everything else still goes through the restricted opener. */
+export function markdownLinkTarget(href: string): { kind: "anchor"; id: string } | { kind: "external"; url: string } {
+  if (!href.startsWith("#")) return { kind: "external", url: href };
+  return { kind: "anchor", id: decodeAnchorId(href) };
+}
+
+export function decodeAnchorId(href: string): string {
+  try {
+    return decodeURIComponent(href.slice(1));
+  } catch {
+    return href.slice(1);
+  }
+}
+
+/**
+ * Open an external link and turn a rejection into a visible sentence.
+ *
+ * Exported with an injectable opener so the failure path is testable without a desktop
+ * host: an unhandled rejection would leave the click silently doing nothing.
+ */
+export async function openMarkdownExternalLink(
+  href: string,
+  open: (url: string) => Promise<unknown> = openExternalUrl,
+): Promise<string | null> {
+  try {
+    await open(href);
+    return null;
+  } catch (cause) {
+    return "无法打开链接：" + errorMessage(cause);
+  }
+}
+
+function BlockView({ block, headingIds }: { block: Block; headingIds: HeadingIds }) {
   switch (block.kind) {
     case "heading": {
       const Tag = HEADING_TAG[clampLevel(block.level)];
+      const id = headingIds.get(block);
       return (
-        <Tag className="md-heading">
+        <Tag className="md-heading" id={id}>
           <InlineView nodes={block.content} />
         </Tag>
       );
@@ -72,7 +176,7 @@ function BlockView({ block }: { block: Block }) {
               {item.checked ? "☑" : "☐"}
             </span>
           )}
-          <ListItemBlocks blocks={item.blocks} tight={block.tight} />
+          <ListItemBlocks blocks={item.blocks} headingIds={headingIds} tight={block.tight} />
         </li>
       ));
       return block.ordered ? (
@@ -86,7 +190,7 @@ function BlockView({ block }: { block: Block }) {
     case "quote":
       return (
         <blockquote className="md-quote">
-          <BlockList blocks={block.blocks} />
+          <BlockList blocks={block.blocks} headingIds={headingIds} />
         </blockquote>
       );
     case "table":
@@ -137,25 +241,25 @@ function BlockView({ block }: { block: Block }) {
  * CommonMark 的 tight 只省略列表项**直接子段落**的 `<p>`；引用、嵌套列表等容器里
  * 的段落仍走普通块渲染，并由那些容器自己的 tight 状态决定。
  */
-function ListItemBlocks({ blocks, tight }: { blocks: Block[]; tight: boolean }) {
+function ListItemBlocks({ blocks, headingIds, tight }: { blocks: Block[]; headingIds: HeadingIds; tight: boolean }) {
   return (
     <>
       {blocks.map((block, index) =>
         tight && block.kind === "paragraph" ? (
           <InlineView nodes={block.content} key={index} />
         ) : (
-          <BlockView block={block} key={index} />
+          <BlockView block={block} headingIds={headingIds} key={index} />
         ),
       )}
     </>
   );
 }
 
-function BlockList({ blocks }: { blocks: Block[] }) {
+function BlockList({ blocks, headingIds }: { blocks: Block[]; headingIds: HeadingIds }) {
   return (
     <>
       {blocks.map((block, index) => (
-        <BlockView block={block} key={index} />
+        <BlockView block={block} headingIds={headingIds} key={index} />
       ))}
     </>
   );
@@ -193,17 +297,7 @@ function InlineView({ nodes }: { nodes: Inline[] }): ReactNode {
               </del>
             );
           case "link":
-            return (
-              <button
-                type="button"
-                className="md-link"
-                key={index}
-                title={node.href}
-                onClick={() => void openExternalUrl(node.href)}
-              >
-                <InlineView nodes={node.children} />
-              </button>
-            );
+            return <MarkdownLink href={node.href} key={index}><InlineView nodes={node.children} /></MarkdownLink>;
           case "image":
             return <RemoteMarkdownImage key={index} href={node.href} alt={node.alt} />;
           case "footnote":
@@ -216,6 +310,61 @@ function InlineView({ nodes }: { nodes: Inline[] }): ReactNode {
             return <br key={index} />;
         }
       })}
+    </>
+  );
+}
+
+/**
+ * A link is still a `<button>`: Markdown must never create a navigable `<a href>` in
+ * the app shell. `#fragment` links jump within the document (headings now carry ids),
+ * while everything else goes through the restricted external opener. A failed open is
+ * reported next to the link instead of becoming an unhandled rejection.
+ */
+function MarkdownLink({ href, children }: { href: string; children: ReactNode }) {
+  const [notice, setNotice] = useState<string | null>(null);
+  const target = markdownLinkTarget(href);
+  if (target.kind === "anchor") {
+    return (
+      <>
+        <button
+          type="button"
+          className="md-link"
+          data-anchor={target.id}
+          title={href}
+          onClick={(event) => {
+            // Scope the lookup to this rendered message: two replies can both have a
+            // "结论" heading, and jump must land in the message that owns the link.
+            const root = event.currentTarget.closest("[data-markdown-root]");
+            const heading = root
+              ? Array.from(root.querySelectorAll("[id]")).find((element) => element.id === target.id) ?? null
+              : null;
+            if (!heading) {
+              setNotice("找不到页内锚点：" + target.id);
+              return;
+            }
+            setNotice(null);
+            heading.scrollIntoView({ behavior: "smooth", block: "start" });
+          }}
+        >
+          {children}
+        </button>
+        {notice ? <span className="md-link-error" role="status">{notice}</span> : null}
+      </>
+    );
+  }
+  return (
+    <>
+      <button
+        type="button"
+        className="md-link"
+        title={href}
+        onClick={() => {
+          void openMarkdownExternalLink(href).then((failure) => setNotice(failure));
+        }}
+      >
+        {children}
+      </button>
+      {notice ? <span className="md-link-error" role="status">{notice}</span> : null}
     </>
   );
 }

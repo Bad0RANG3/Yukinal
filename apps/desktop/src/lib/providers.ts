@@ -38,7 +38,7 @@ export const PROVIDER_KIND_LABEL: Record<AiProviderKind, string> = {
  *
  * `openai-compatible` 是 `null`：它覆盖的是我们不拥有的端点（OpenRouter、Ollama、vLLM、
  * 内部网关……），替用户编一个默认值等于把密钥送去一个他没选过的服务商。另外两个的地址
- * 没有歧义 —— 协议本身就是那家服务商的。同一份事实在 Rust 侧是
+ * 没有歧义 —— 协议本身就是那家服务商的。同一份事实在宿主侧是
  * `commands/provider.rs` 的 `ANTHROPIC_DEFAULT_BASE_URL` / `GEMINI_DEFAULT_BASE_URL`
  * （那边是权威的运行时兜底；这里只是替用户把字段填好，两者请一起改）。
  */

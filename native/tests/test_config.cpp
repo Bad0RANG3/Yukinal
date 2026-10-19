@@ -5,7 +5,13 @@
 #include "yukinal/config.hpp"
 
 using nlohmann::json;
+using yukinal::ssh_service::kMaxServerExecDenyEntries;
+using yukinal::ssh_service::kMaxServerExecDenyPatternBytes;
 using yukinal::ssh_service::parse_config;
+using yukinal::ssh_service::parse_server_exec_denylist;
+using yukinal::ssh_service::server_exec_command_is_denied;
+using yukinal::ssh_service::server_exec_denylist_to_json;
+using yukinal::ssh_service::ServerExecDenyList;
 
 namespace {
 
@@ -19,6 +25,33 @@ json valid_config() {
                                                {"known_hosts_file", "known_hosts"},
                                                {"auth", {{"type", "password"},
                                                         {"password_env", "STAGING_SSH_PASSWORD"}}}}})}};
+}
+
+bool config_rejected(const json& value) {
+  try {
+    (void)parse_config(value);
+  } catch (const std::runtime_error&) {
+    return true;
+  }
+  return false;
+}
+
+bool denylist_rejected(const json& value) {
+  try {
+    (void)parse_server_exec_denylist(value, "config.server_exec_denylist");
+  } catch (const std::runtime_error&) {
+    return true;
+  }
+  return false;
+}
+
+std::string denylist_error(const json& value) {
+  try {
+    (void)parse_server_exec_denylist(value, "config.server_exec_denylist");
+  } catch (const std::runtime_error& error) {
+    return error.what();
+  }
+  return {};
 }
 
 }  // namespace
@@ -507,4 +540,319 @@ YUKINAL_TEST(config_rejects_missing_or_ambiguous_private_key_source) {
     ambiguous_rejected = true;
   }
   YUKINAL_REQUIRE(ambiguous_rejected);
+}
+
+YUKINAL_TEST(config_parses_server_exec_denylist_literal_and_regex_entries) {
+  const auto list = parse_server_exec_denylist(
+      json::array({"rm -rf /",
+                   json{{"pattern", "shutdown"}, {"regex", true}, {"case_insensitive", true}},
+                   json{{"pattern", "sudo systemctl stop"}, {"regex", false}}}),
+      "config.server_exec_denylist");
+  YUKINAL_REQUIRE(list.entries.size() == 3);
+
+  YUKINAL_REQUIRE(list.entries[0].pattern == "rm -rf /");
+  YUKINAL_REQUIRE(!list.entries[0].is_regex);
+  YUKINAL_REQUIRE(!list.entries[0].case_insensitive);
+  YUKINAL_REQUIRE(list.entries[0].expression == nullptr);
+
+  YUKINAL_REQUIRE(list.entries[1].pattern == "shutdown");
+  YUKINAL_REQUIRE(list.entries[1].is_regex);
+  YUKINAL_REQUIRE(list.entries[1].case_insensitive);
+  YUKINAL_REQUIRE(list.entries[1].expression != nullptr);
+
+  YUKINAL_REQUIRE(list.entries[2].pattern == "sudo systemctl stop");
+  YUKINAL_REQUIRE(!list.entries[2].is_regex);
+  YUKINAL_REQUIRE(!list.entries[2].case_insensitive);
+  YUKINAL_REQUIRE(list.entries[2].expression == nullptr);
+
+  const auto round_trip = server_exec_denylist_to_json(list);
+  YUKINAL_REQUIRE(round_trip.is_array());
+  YUKINAL_REQUIRE(round_trip.size() == 3);
+  const json expected_literal = {{"pattern", "rm -rf /"}, {"regex", false}, {"case_insensitive", false}};
+  const json expected_regex = {{"pattern", "shutdown"}, {"regex", true}, {"case_insensitive", true}};
+  const json expected_plain = {
+      {"pattern", "sudo systemctl stop"}, {"regex", false}, {"case_insensitive", false}};
+  YUKINAL_REQUIRE(round_trip[0] == expected_literal);
+  YUKINAL_REQUIRE(round_trip[1] == expected_regex);
+  YUKINAL_REQUIRE(round_trip[2] == expected_plain);
+
+  const auto reparsed = parse_server_exec_denylist(round_trip, "config.server_exec_denylist");
+  YUKINAL_REQUIRE(reparsed.entries.size() == 3);
+  YUKINAL_REQUIRE(reparsed.entries[1].is_regex);
+  YUKINAL_REQUIRE(reparsed.entries[1].case_insensitive);
+}
+
+YUKINAL_TEST(config_normalizes_server_exec_denylist_literal_and_regex_sources) {
+  const auto list = parse_server_exec_denylist(
+      json::array({"  rm \t\n -rf   /  ",
+                   json{{"pattern", "a   b"}, {"regex", true}},
+                   json{{"pattern", "  ^sudo\\s+reboot$  "}, {"regex", true}}}),
+      "config.server_exec_denylist");
+  YUKINAL_REQUIRE(list.entries.size() == 3);
+
+  // The normalized source is both what is compiled and what is reported.
+  YUKINAL_REQUIRE(list.entries[0].pattern == "rm -rf /");
+  YUKINAL_REQUIRE(!list.entries[0].is_regex);
+  YUKINAL_REQUIRE(server_exec_command_is_denied(list, "rm -rf / --no-preserve-root"));
+
+  // A regex source with internal whitespace collapses too, and still matches the
+  // collapsed command text.
+  YUKINAL_REQUIRE(list.entries[1].pattern == "a b");
+  YUKINAL_REQUIRE(list.entries[1].is_regex);
+  YUKINAL_REQUIRE(server_exec_command_is_denied(list, "a b"));
+  YUKINAL_REQUIRE(server_exec_command_is_denied(list, "xxa   bxx"));
+
+  YUKINAL_REQUIRE(list.entries[2].pattern == "^sudo\\s+reboot$");
+  YUKINAL_REQUIRE(server_exec_command_is_denied(list, "sudo   reboot"));
+
+  const auto round_trip = server_exec_denylist_to_json(list);
+  YUKINAL_REQUIRE(round_trip[0]["pattern"] == "rm -rf /");
+  YUKINAL_REQUIRE(round_trip[1]["pattern"] == "a b");
+  YUKINAL_REQUIRE(round_trip[2]["pattern"] == "^sudo\\s+reboot$");
+}
+
+YUKINAL_TEST(config_rejects_malformed_server_exec_denylist_entries) {
+  YUKINAL_REQUIRE(denylist_rejected(json{{"pattern", "rm -rf /"}}));
+  YUKINAL_REQUIRE(denylist_rejected(json("rm -rf /")));
+  YUKINAL_REQUIRE(denylist_rejected(json::array({42})));
+  YUKINAL_REQUIRE(denylist_rejected(json::array({json::array({"rm -rf /"})})));
+  YUKINAL_REQUIRE(denylist_rejected(json::array({json{{"pattern", "rm -rf /"}, {"unknown", true}}})));
+  YUKINAL_REQUIRE(denylist_rejected(json::array({json{{"regex", true}}})));
+  YUKINAL_REQUIRE(denylist_rejected(json::array({json{{"pattern", ""}}})));
+  YUKINAL_REQUIRE(denylist_rejected(json::array({json{{"pattern", "   \t\n"}}})));
+  YUKINAL_REQUIRE(denylist_rejected(json::array({json{{"pattern", 7}}})));
+  YUKINAL_REQUIRE(denylist_rejected(json::array({json{{"pattern", nullptr}}})));
+  YUKINAL_REQUIRE(denylist_rejected(json::array({std::string("rm -rf /\0hidden", 15)})));
+  YUKINAL_REQUIRE(denylist_rejected(json::array({json{{"pattern", "shutdown"}, {"regex", "yes"}}})));
+  YUKINAL_REQUIRE(denylist_rejected(json::array({json{{"pattern", "shutdown"}, {"case_insensitive", 1}}})));
+  YUKINAL_REQUIRE(denylist_rejected(json::array({json{{"pattern", "("}, {"regex", true}}})));
+  YUKINAL_REQUIRE(denylist_rejected(json::array({json{{"pattern", "[unterminated"}, {"regex", true}}})));
+
+  json too_many = json::array();
+  for (std::size_t i = 0; i < kMaxServerExecDenyEntries + 1; ++i) {
+    too_many.push_back("command-" + std::to_string(i));
+  }
+  YUKINAL_REQUIRE(denylist_rejected(too_many));
+
+  json at_limit = json::array();
+  for (std::size_t i = 0; i < kMaxServerExecDenyEntries; ++i) {
+    at_limit.push_back("command-" + std::to_string(i));
+  }
+  YUKINAL_REQUIRE(parse_server_exec_denylist(at_limit, "config.server_exec_denylist").entries.size() ==
+                  kMaxServerExecDenyEntries);
+
+  YUKINAL_REQUIRE(denylist_rejected(json::array({std::string(kMaxServerExecDenyPatternBytes + 1, 'a')})));
+  YUKINAL_REQUIRE(parse_server_exec_denylist(
+                      json::array({std::string(kMaxServerExecDenyPatternBytes, 'a')}),
+                      "config.server_exec_denylist")
+                      .entries.size() == 1);
+
+  // An empty array is a valid deny list that denies nothing.
+  YUKINAL_REQUIRE(parse_server_exec_denylist(json::array(), "config.server_exec_denylist")
+                      .entries.empty());
+}
+
+YUKINAL_TEST(config_server_exec_denylist_errors_are_stable_and_label_prefixed) {
+  const std::string pattern_error =
+      "config.server_exec_denylist[3].pattern must be a non-empty string of at most 1024 bytes";
+  const std::string first_pattern_error =
+      "config.server_exec_denylist[0].pattern must be a non-empty string of at most 1024 bytes";
+  YUKINAL_REQUIRE(denylist_error(json::array({"ok", "ok", "ok", ""})) == pattern_error);
+  YUKINAL_REQUIRE(denylist_error(json::array({"ok", "ok", "ok", "   \t\n"})) == pattern_error);
+  YUKINAL_REQUIRE(denylist_error(json::array({"ok", "ok", "ok", std::string("a\0b", 3)})) == pattern_error);
+  // A bare non-string, non-object item is rejected as an item, not as a pattern.
+  YUKINAL_REQUIRE(denylist_error(json::array({"ok", "ok", "ok", 7})) ==
+                  "config.server_exec_denylist[3] must be a string or an object");
+  YUKINAL_REQUIRE(denylist_error(json::array({"ok", 7})) ==
+                  "config.server_exec_denylist[1] must be a string or an object");
+  YUKINAL_REQUIRE(denylist_error(json::array({json{{"regex", true}}})) == first_pattern_error);
+  YUKINAL_REQUIRE(denylist_error(json::array({json{{"pattern", false}}})) == first_pattern_error);
+
+  // Every message is label-prefixed and never echoes a command or a pattern.
+  for (const auto& malformed :
+       json::array({json{{"pattern", "rm -rf /"}}, json("rm -rf /"), json::array({42}),
+                    json::array({json{{"pattern", "x"}, {"unknown", true}}}),
+                    json::array({json{{"pattern", "(unclosed"}, {"regex", true}}})})) {
+    const auto message = denylist_error(malformed);
+    YUKINAL_REQUIRE(message.rfind("config.server_exec_denylist", 0) == 0);
+    YUKINAL_REQUIRE(message.find("rm -rf /") == std::string::npos);
+  }
+  YUKINAL_REQUIRE(denylist_error(json::array({json{{"pattern", "x"}, {"regex", 1}}})) ==
+                  "config.server_exec_denylist[0].regex must be a boolean");
+  YUKINAL_REQUIRE(denylist_error(json::array({json{{"pattern", "x"}, {"case_insensitive", "no"}}})) ==
+                  "config.server_exec_denylist[0].case_insensitive must be a boolean");
+  YUKINAL_REQUIRE(denylist_error(json::array({json{{"pattern", "("}, {"regex", true}}})) ==
+                  "config.server_exec_denylist[0].pattern is not a valid regular expression");
+}
+
+YUKINAL_TEST(config_rejects_malformed_server_exec_denylist_in_config) {
+  auto unknown_root_key = valid_config();
+  unknown_root_key["server_exec_denylists"] = json::array();
+  YUKINAL_REQUIRE(config_rejected(unknown_root_key));
+
+  auto non_array = valid_config();
+  non_array["server_exec_denylist"] = "rm -rf /";
+  YUKINAL_REQUIRE(config_rejected(non_array));
+
+  auto unknown_entry_key = valid_config();
+  unknown_entry_key["server_exec_denylist"] =
+      json::array({json{{"pattern", "shutdown"}, {"icase", true}}});
+  YUKINAL_REQUIRE(config_rejected(unknown_entry_key));
+
+  auto malformed_regex = valid_config();
+  malformed_regex["targets"][0]["server_exec_denylist"] =
+      json::array({json{{"pattern", "(unclosed"}, {"regex", true}}});
+  YUKINAL_REQUIRE(config_rejected(malformed_regex));
+
+  auto too_many = valid_config();
+  too_many["targets"][0]["server_exec_denylist"] = json::array();
+  for (std::size_t i = 0; i < kMaxServerExecDenyEntries + 1; ++i) {
+    too_many["targets"][0]["server_exec_denylist"].push_back("command-" + std::to_string(i));
+  }
+  YUKINAL_REQUIRE(config_rejected(too_many));
+}
+
+YUKINAL_TEST(config_merges_service_level_denylist_into_every_target) {
+  auto value = valid_config();
+  json service_level = json::array();
+  service_level.push_back("shutdown");
+  service_level.push_back(json{{"pattern", "^sudo\\s+reboot"}, {"regex", true}});
+  value["server_exec_denylist"] = std::move(service_level);
+  value["targets"][0]["server_exec_denylist"] = json::array({"rm -rf /"});
+  value["targets"].push_back(json{{"target_id", "prod-api-02"},
+                                  {"host", "prod.example.test"},
+                                  {"port", 22},
+                                  {"username", "ops"},
+                                  {"known_hosts_file", "known_hosts"},
+                                  {"auth", {{"type", "password"}, {"password_env", "PROD_SSH_PASSWORD"}}}});
+
+  const auto config = parse_config(value);
+  // ServiceConfig keeps the service-level list unmerged so callers can distinguish.
+  YUKINAL_REQUIRE(config.server_exec_denylist.entries.size() == 2);
+  YUKINAL_REQUIRE(config.server_exec_denylist.entries[0].pattern == "shutdown");
+  YUKINAL_REQUIRE(config.server_exec_denylist.entries[1].pattern == "^sudo\\s+reboot");
+  YUKINAL_REQUIRE(config.server_exec_denylist.entries[1].is_regex);
+
+  const auto& first = config.targets.at("staging-web-01");
+  YUKINAL_REQUIRE(first.server_exec_denylist.entries.size() == 3);
+  YUKINAL_REQUIRE(first.server_exec_denylist.entries[0].pattern == "shutdown");
+  YUKINAL_REQUIRE(first.server_exec_denylist.entries[1].pattern == "^sudo\\s+reboot");
+  YUKINAL_REQUIRE(first.server_exec_denylist.entries[2].pattern == "rm -rf /");
+  YUKINAL_REQUIRE(!first.server_exec_denylist.entries[2].is_regex);
+
+  // A target without its own key still receives the service-level entries.
+  const auto& second = config.targets.at("prod-api-02");
+  YUKINAL_REQUIRE(second.server_exec_denylist.entries.size() == 2);
+  YUKINAL_REQUIRE(second.server_exec_denylist.entries[0].pattern == "shutdown");
+  YUKINAL_REQUIRE(second.server_exec_denylist.entries[1].pattern == "^sudo\\s+reboot");
+
+  std::string matched;
+  YUKINAL_REQUIRE(server_exec_command_is_denied(second.server_exec_denylist, "sudo   reboot now", &matched));
+  YUKINAL_REQUIRE(matched == "^sudo\\s+reboot");
+}
+
+YUKINAL_TEST(config_probe_only_target_may_carry_a_denylist) {
+  auto value = valid_config();
+  value["server_exec_denylist"] = json::array({"shutdown"});
+  auto& target = value["targets"][0];
+  target.erase("known_hosts_file");
+  target["probe_only"] = true;
+  target["auth"] = {{"type", "probe"}};
+  target["server_exec_denylist"] = json::array({"reboot"});
+
+  const auto config = parse_config(value);
+  const auto& parsed = config.targets.at("staging-web-01");
+  YUKINAL_REQUIRE(parsed.probe_only);
+  YUKINAL_REQUIRE(parsed.server_exec_denylist.entries.size() == 2);
+  YUKINAL_REQUIRE(parsed.server_exec_denylist.entries[0].pattern == "shutdown");
+  YUKINAL_REQUIRE(parsed.server_exec_denylist.entries[1].pattern == "reboot");
+}
+
+YUKINAL_TEST(server_exec_matcher_denies_literal_substrings_after_whitespace_collapse) {
+  const auto list = parse_server_exec_denylist(json::array({"rm -rf /"}), "config.server_exec_denylist");
+  std::string matched;
+  YUKINAL_REQUIRE(server_exec_command_is_denied(list, "rm -rf /", &matched));
+  YUKINAL_REQUIRE(matched == "rm -rf /");
+  YUKINAL_REQUIRE(server_exec_command_is_denied(list, "sudo rm -rf / --no-preserve-root"));
+  YUKINAL_REQUIRE(server_exec_command_is_denied(list, "rm   -rf   /"));
+  YUKINAL_REQUIRE(server_exec_command_is_denied(list, "\trm\n-rf\f/  "));
+  // Literal entries match as substrings of the normalized command.
+  YUKINAL_REQUIRE(server_exec_command_is_denied(list, "rm -rf /tmp/cache"));
+  YUKINAL_REQUIRE(!server_exec_command_is_denied(list, "rsync -a /tmp/cache"));
+}
+
+YUKINAL_TEST(server_exec_matcher_honours_case_sensitivity_per_entry) {
+  const auto sensitive =
+      parse_server_exec_denylist(json::array({"shutdown"}), "config.server_exec_denylist");
+  YUKINAL_REQUIRE(server_exec_command_is_denied(sensitive, "shutdown -h now"));
+  YUKINAL_REQUIRE(!server_exec_command_is_denied(sensitive, "SHUTDOWN -h now"));
+
+  const auto insensitive = parse_server_exec_denylist(
+      json::array({json{{"pattern", "shutdown"}, {"case_insensitive", true}}}), "config.server_exec_denylist");
+  std::string matched;
+  YUKINAL_REQUIRE(server_exec_command_is_denied(insensitive, "SHUTDOWN -h now", &matched));
+  YUKINAL_REQUIRE(matched == "shutdown");
+  YUKINAL_REQUIRE(server_exec_command_is_denied(insensitive, "Sudo ShUtDoWn"));
+
+  const auto regex_sensitive = parse_server_exec_denylist(
+      json::array({json{{"pattern", "^shutdown$"}, {"regex", true}}}), "config.server_exec_denylist");
+  YUKINAL_REQUIRE(!server_exec_command_is_denied(regex_sensitive, "SHUTDOWN"));
+
+  const auto regex_insensitive = parse_server_exec_denylist(
+      json::array({json{{"pattern", "^shutdown$"}, {"regex", true}, {"case_insensitive", true}}}),
+      "config.server_exec_denylist");
+  YUKINAL_REQUIRE(server_exec_command_is_denied(regex_insensitive, "SHUTDOWN"));
+}
+
+YUKINAL_TEST(server_exec_matcher_handles_regex_entries) {
+  const auto list = parse_server_exec_denylist(
+      json::array({json{{"pattern", "^sudo\\s+systemctl\\s+(stop|restart)\\s+sshd$"}, {"regex", true}}}),
+      "config.server_exec_denylist");
+  std::string matched;
+  YUKINAL_REQUIRE(server_exec_command_is_denied(list, "sudo   systemctl   stop   sshd", &matched));
+  YUKINAL_REQUIRE(matched == "^sudo\\s+systemctl\\s+(stop|restart)\\s+sshd$");
+  YUKINAL_REQUIRE(server_exec_command_is_denied(list, "sudo systemctl restart sshd"));
+  YUKINAL_REQUIRE(!server_exec_command_is_denied(list, "systemctl status sshd"));
+  YUKINAL_REQUIRE(!server_exec_command_is_denied(list, "sudo systemctl start sshd"));
+}
+
+YUKINAL_TEST(server_exec_matcher_reports_the_first_matching_pattern) {
+  const json regex_entry = {{"pattern", "rm\\s+-rf\\s+/"}, {"regex", true}};
+  const auto list = parse_server_exec_denylist(
+      json::array({"shutdown", "reboot", regex_entry}), "config.server_exec_denylist");
+  std::string matched;
+  YUKINAL_REQUIRE(server_exec_command_is_denied(list, "shutdown now", &matched));
+  YUKINAL_REQUIRE(matched == "shutdown");
+
+  matched.clear();
+  YUKINAL_REQUIRE(server_exec_command_is_denied(list, "sudo   rm   -rf   /", &matched));
+  YUKINAL_REQUIRE(matched == "rm\\s+-rf\\s+/");
+
+  matched = "untouched";
+  YUKINAL_REQUIRE(!server_exec_command_is_denied(list, "uname -a", &matched));
+  YUKINAL_REQUIRE(matched == "untouched");
+
+  YUKINAL_REQUIRE(server_exec_command_is_denied(list, "systemctl reboot"));
+  YUKINAL_REQUIRE(!server_exec_command_is_denied(list, "now do a REBOOT"));
+}
+
+YUKINAL_TEST(server_exec_matcher_allows_everything_for_an_empty_list) {
+  const ServerExecDenyList empty;
+  YUKINAL_REQUIRE(empty.entries.empty());
+  std::string matched = "untouched";
+  YUKINAL_REQUIRE(!server_exec_command_is_denied(empty, "rm -rf /", &matched));
+  YUKINAL_REQUIRE(matched == "untouched");
+  YUKINAL_REQUIRE(!server_exec_command_is_denied(empty, ""));
+
+  const auto from_json = parse_server_exec_denylist(json::array(), "config.server_exec_denylist");
+  YUKINAL_REQUIRE(!server_exec_command_is_denied(from_json, "shutdown -h now"));
+  std::string untouched = "untouched";
+  YUKINAL_REQUIRE(!server_exec_command_is_denied(from_json, "rm -rf /", &untouched));
+  YUKINAL_REQUIRE(untouched == "untouched");
+
+  auto value = valid_config();
+  const auto config = parse_config(value);
+  YUKINAL_REQUIRE(config.server_exec_denylist.entries.empty());
+  YUKINAL_REQUIRE(config.targets.at("staging-web-01").server_exec_denylist.entries.empty());
+  YUKINAL_REQUIRE(server_exec_denylist_to_json(config.server_exec_denylist).empty());
 }

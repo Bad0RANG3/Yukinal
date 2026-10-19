@@ -16,6 +16,7 @@ import {
   IPC_SCHEMAS,
   WindowShellContextSchema,
   WindowShellSurfaceSchema,
+  unknownResponseKeys,
   type WindowShellContext,
   type WindowShellSurface,
   type IpcCommandMap,
@@ -106,11 +107,50 @@ export class IpcUnavailableError extends Error {
   }
 }
 
+/**
+ * Call a native command and validate its response.
+ *
+ * Validation is not the same question for every command, because the *author* of the
+ * payload is not the same. A response the host composes itself must match the contract
+ * exactly. A response the host forwards verbatim from the Python sidecar tolerates
+ * unknown keys — the sidecar is separately versioned and an added field there must not
+ * turn a successful call into an exception — but tolerance is paired with reporting:
+ * `reportUnknownResponseKeys` names every field the contract does not know, so drift
+ * stays visible instead of becoming silence.
+ */
 export async function callDesktop<C extends IpcCommandName>(
   command: C,
   params: IpcCommandMap[C]["params"],
 ): Promise<IpcCommandMap[C]["response"]> {
-  return callDesktopParsed(command, params, (raw) => IPC_SCHEMAS[command].response.parse(raw));
+  const schema = IPC_SCHEMAS[command].response;
+  return callDesktopParsed(command, params, (raw) => {
+    const parsed = schema.parse(raw);
+    reportUnknownResponseKeys(command, schema, raw);
+    return parsed;
+  });
+}
+
+const reportedUnknownResponseKeys = new Set<string>();
+
+/**
+ * Say which fields a response carried that this contract does not declare.
+ *
+ * The tolerant sidecar-forwarded gates deliberately keep such a field rather than
+ * throwing, which is only defensible while the addition is still *observable*: without
+ * this, a sidecar that renamed or added a field would look exactly like one that did
+ * not, and the contract would drift with nothing to notice it. Reported once per
+ * command — a hot `provider_list` must not flood the console — with the field names, so
+ * the fix (extend the contract, or fix the sidecar) is a decision someone can make.
+ */
+function reportUnknownResponseKeys(command: string, schema: z.ZodType, raw: unknown): void {
+  if (reportedUnknownResponseKeys.has(command)) return;
+  const unknown = unknownResponseKeys(schema, raw);
+  if (unknown.length === 0) return;
+  reportedUnknownResponseKeys.add(command);
+  console.warn(
+    `[ipc] "${command}" response carried ${unknown.length} field(s) this contract does not declare:`,
+    unknown.join(", "),
+  );
 }
 
 /** Same as `callDesktop`, but validates/normalises the raw payload first. */
@@ -216,7 +256,7 @@ export type DesktopSubscription = {
  * Subscribe to a native event through the same gate as commands.
  *
  * This wraps the unlisten race that every call site had to solve by hand.
- * `listenDesktop` is async — Tauri hands back the unlisten function in a promise —
+ * `listenDesktop` is async — the host hands back the unlisten function in a promise —
  * but teardown is synchronous, so the four existing call sites each wrote their own
  * version of:
  *

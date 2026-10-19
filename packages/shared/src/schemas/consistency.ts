@@ -1,7 +1,13 @@
 /**
  * Compile-time contract tests: the zod schemas (runtime gate) and the hand-written
- * types (source of truth mirrored by Rust/serde) must stay structurally compatible.
- * If a Rust struct, a TS type or a schema drifts, this file stops compiling.
+ * types (the contract itself) must stay structurally compatible.
+ * If a TS type or a schema drifts, this file stops compiling.
+ *
+ * What this file *cannot* catch is the other side of the boundary: the C++ host and the
+ * Python sidecar are not compiled against these types, so their agreement rests on
+ * `packages/shared/fixtures` plus the producer checks in `events/index.ts` and
+ * `event-vocabulary.test.ts`. The old claim that a Rust struct was "mirrored by serde"
+ * here described a language that no longer exists in this repository.
  */
 
 import type { z } from "zod";
@@ -134,11 +140,19 @@ import type { EventName } from "../events/index.js";
  * Every channel the UI is allowed to subscribe to must be a declared event name.
  *
  * `EVENT_SCHEMAS` is the runtime gate and `EVENT_NAMES` is the declared protocol
- * vocabulary; only this direction is an invariant. A declared name with no gate is
- * not automatically a defect — `server.updated` and `terminal.opened` are on the
- * wire and Rust emits them, the UI just has no subscriber yet — but a *gate* with no
- * declared name would mean the UI listens on a channel the contract does not admit,
- * which is the direction that silently accepts payloads nobody specified.
+ * vocabulary; only this direction is an invariant. A declared name with no gate is not
+ * automatically a defect — it may be a reserved name, or a channel whose producer has not
+ * landed yet — but a *gate* with no declared name would mean the UI listens on a channel
+ * the contract does not admit, which is the direction that silently accepts payloads
+ * nobody specified.
+ *
+ * Which declared names are actually produced is a separate, *measured* question, and this
+ * comment used to answer it wrongly: it claimed `server.updated` and `terminal.opened`
+ * were "on the wire and Rust emits them". `terminal.opened` is emitted
+ * (`native/desktop_host/src/desktop_terminal.cpp:391`), but `server.updated` has no emitter
+ * anywhere in this repository, and "Rust" as the emitter does not exist at all. The
+ * per-name producer state is recorded in `../events/index.ts` and pinned by
+ * `event-vocabulary.test.ts`; this file deliberately makes no claim about it.
  *
  * `keyof typeof EVENT_SCHEMAS` also drives `AgentEventName` and `DesktopEventName`,
  * so this pin is what keeps those aliases from naming things the protocol lacks.

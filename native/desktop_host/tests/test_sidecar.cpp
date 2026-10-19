@@ -14,6 +14,8 @@
 #include <memory>
 #include <string>
 #include <string_view>
+#include <thread>
+#include <vector>
 
 #ifdef _WIN32
 #include <windows.h>
@@ -142,6 +144,30 @@ int run_tests(int argc, char** argv) {
   client.configure(launch);
   client.set_host_handler(handle_host);
 
+  // REGRESSION TEST: a failed spawn must not publish a running state. Before the
+  // fix, start() set process_started before spawn_process(), and the following
+  // stop() waited forever on a monitor thread that had never been created.
+  {
+    SidecarClient broken;
+    SidecarLaunch broken_launch;
+    broken_launch.program = directory.path / "definitely-not-a-sidecar-program";
+    broken.configure(broken_launch);
+    bool spawn_rejected = false;
+    try {
+      (void)broken.start(std::chrono::milliseconds(1000));
+    } catch (const yukinal::desktop_host::SidecarError&) {
+      spawn_rejected = true;
+    }
+    check(spawn_rejected, "start() with a nonexistent sidecar program should throw");
+    check(!broken.status().running, "a failed sidecar spawn must not report running");
+    const auto stop_started = std::chrono::steady_clock::now();
+    broken.stop(std::chrono::milliseconds(1000));
+    const auto stop_elapsed = std::chrono::steady_clock::now() - stop_started;
+    check(stop_elapsed < std::chrono::seconds(5),
+          "stop() after a failed sidecar spawn must return within five seconds");
+    check(!broken.status().running, "stop() after a failed spawn must report stopped");
+  }
+
   const auto started = client.start(std::chrono::milliseconds(60000));
   check(started.pid != 0, "the sidecar should report a process id");
   check(started.tool_count > 0, "the sidecar should expose at least one tool");
@@ -257,12 +283,19 @@ int run_tests(int argc, char** argv) {
   check(stopped.ok && stopped.value.value("stopped", true) == false,
         "agent_run_stop should forward and report an unknown run as not stopped");
 
+  // The host only forwards an approval response for an id it tracked itself or
+  // saw the sidecar announce. An id nobody ever requested is refused outright, so
+  // the UI can never render a success the host never obtained, and the sidecar
+  // never receives a response for an approval that is not in flight.
   const auto approval = router.invoke(
       "agent_approval_respond",
       {{"approvalId", "apr_router_missing"}, {"runId", "run_router_execute"},
        {"decision", "reject"}, {"respondedAt", "2026-10-16T00:00:00Z"}});
-  check(approval.ok && approval.value.value("accepted", true) == false,
-        "agent_approval_respond should forward and report an unknown approval as stale");
+  check(!approval.ok &&
+            approval.value.value("code", std::string()) == "AGENT_APPROVAL_UNKNOWN",
+        "agent_approval_respond should refuse an approval the host never saw");
+  check(!approval.value.contains("accepted"),
+        "a refused approval must not report an acceptance to the UI");
 
   // Durable investigation start: the host binds a run to the task before it
   // forwards `agent.run.start`, so a rejected start must fail the bound run and
@@ -308,6 +341,7 @@ int run_tests(int argc, char** argv) {
   {
     std::ofstream script(relay_source / "yukinal_agent" / "sidecar.py");
     script << R"PY(import json
+import os
 import sys
 
 def send(frame):
@@ -321,12 +355,34 @@ for line in sys.stdin:
     elif method == "tools.list":
         result = {"tools": []}
     elif method == "provider.list":
+        # Announce a sidecar-owned approval (a non-host-action tool) on the same
+        # notification stream the ledger observes, then answer the host request.
+        send({"jsonrpc": "2.0", "method": "agent.stream", "params": {
+            "type": "agent.waiting_approval",
+            "runId": "run_relay",
+            "approval": {"approvalId": "apr_relay_foreign", "runId": "run_relay",
+                         "traceId": "trace_relay", "callId": "call_relay",
+                         "toolName": "filesystem.write",
+                         "input": {"path": "/tmp/relay"},
+                         "inputFingerprint": "0" * 64,
+                         "target": {"host": "local", "environment": "local"},
+                         "planId": "plan_relay", "planStepId": "step_relay",
+                         "evidenceIds": [],
+                         "expiresAt": "2099-01-01T00:00:00Z"}}})
         send({"jsonrpc": "2.0", "id": 9000, "method": "host.chat.context", "params": frame["params"]})
         response = json.loads(sys.stdin.readline())
         if "error" in response:
             send({"jsonrpc": "2.0", "id": frame["id"], "error": response["error"]})
             continue
         result = response["result"]
+    elif method == "agent.approval.respond":
+        params = frame.get("params") or {}
+        # Record every decision that actually reaches the sidecar: the host layer
+        # is the guard that must keep a decision it cannot grant away from here.
+        with open(os.path.join(os.path.dirname(os.path.abspath(__file__)), "approvals.log"),
+                  "a", encoding="utf-8") as handle:
+            handle.write(str(params.get("decision")) + "\n")
+        result = {"accepted": params.get("approvalId") == "apr_relay_foreign"}
     else:
         send({"jsonrpc": "2.0", "id": frame["id"], "error": {"code": -32601, "message": "unknown relay method"}})
         continue
@@ -384,8 +440,135 @@ for line in sys.stdin:
   const auto foreign_history = context_router.invoke("provider_list", foreign_params);
   check(!foreign_history.ok && foreign_history.value.value("code", std::string()) == "INVALID_PARAMS",
         "the native hydration RPC must reject another server's history");
+  // The other half of the unknown-id rule, end to end: the relay announced a
+  // sidecar-owned approval (`filesystem.write`, not a host action) on the real
+  // notification stream, so a response to it must still be forwarded and must
+  // report the sidecar's own answer. Without this, "refuse unknown ids" could
+  // silently degrade into "refuse every sidecar-owned approval".
+  const auto relayed = context_router.invoke(
+      "agent_approval_respond",
+      {{"approvalId", "apr_relay_foreign"}, {"runId", "run_relay"},
+       {"decision", "approve_once"}, {"respondedAt", "2026-10-17T01:00:02Z"}});
+  check(relayed.ok && relayed.value.value("accepted", false),
+        "an observed sidecar-owned approval must still forward and report accepted");
+  // ...and a decision the host cannot grant is refused before that forward, so a
+  // session grant never reaches the sidecar as if it were an approval.
+  for (const char* decision : {"approve_session", "maybe"}) {
+    const auto refused = context_router.invoke(
+        "agent_approval_respond",
+        {{"approvalId", "apr_relay_foreign"}, {"runId", "run_relay"},
+         {"decision", decision}, {"respondedAt", "2026-10-17T01:00:02Z"}});
+    check(!refused.ok && refused.value.value("code", std::string()) == "INVALID_PARAMS",
+          "a decision outside the whitelist must be refused at the host layer");
+  }
+  // The relay logged every decision that actually reached the sidecar: only the
+  // forwarded `approve_once` may be there, because the host answers the RPC after
+  // handling it. A refused decision must never have crossed the pipe.
+  {
+    std::ifstream decisions(relay_source / "yukinal_agent" / "approvals.log");
+    std::string line;
+    std::vector<std::string> seen;
+    while (std::getline(decisions, line)) {
+      if (!line.empty()) seen.push_back(line);
+    }
+    check(seen == std::vector<std::string>{"approve_once"},
+          "only a whitelisted decision may reach the sidecar");
+  }
   check(context_router.invoke("agent_kill", json::object()).ok,
         "the context relay sidecar should stop cleanly");
+
+  // REGRESSION TEST: a timed-out `agent.run.*` request must cancel the run in
+  // the sidecar. Before the fix, `request()` erased the pending entry and threw
+  // while the Python run kept burning its budget with a result nobody could
+  // receive. The fake sidecar records every frame it receives; it deliberately
+  // never answers `agent.run.start`.
+  {
+    const auto timeout_source = directory.path / "timeout-probe";
+    std::filesystem::create_directories(timeout_source / "yukinal_agent");
+    std::ofstream(timeout_source / "yukinal_agent" / "__init__.py").close();
+    {
+      std::ofstream script(timeout_source / "yukinal_agent" / "sidecar.py");
+      script << R"PY(import json
+import os
+import sys
+
+log_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "frames.log")
+
+def record(frame):
+    with open(log_path, "a", encoding="utf-8") as handle:
+        handle.write(json.dumps({"method": frame.get("method"),
+                                 "params": frame.get("params"),
+                                 "hasId": "id" in frame},
+                                separators=(",", ":")) + "\n")
+
+def send(frame):
+    print(json.dumps(frame, separators=(",", ":")), flush=True)
+
+for line in sys.stdin:
+    frame = json.loads(line)
+    method = frame.get("method")
+    record(frame)
+    if method == "initialize":
+        send({"jsonrpc": "2.0", "id": frame["id"],
+              "result": {"protocolVersion": "1.0", "agentVersion": "timeout-probe"}})
+    elif method == "tools.list":
+        send({"jsonrpc": "2.0", "id": frame["id"], "result": {"tools": []}})
+    elif method == "agent.run.start":
+        # Simulate a run that is still working: answer nothing at all.
+        pass
+    elif method == "agent.run.stop":
+        send({"jsonrpc": "2.0", "id": frame["id"], "result": {"stopped": True}})
+    else:
+        send({"jsonrpc": "2.0", "id": frame["id"],
+              "error": {"code": -32601, "message": "unknown timeout-probe method"}})
+)PY";
+    }
+    SidecarClient timeout_client;
+    SidecarLaunch timeout_launch;
+    timeout_launch.program = argv[1];
+    timeout_launch.args = {"-m", "yukinal_agent.sidecar"};
+    timeout_launch.environment.push_back({"PYTHONPATH", timeout_source.string()});
+    timeout_launch.data_directory = (timeout_source / "data").string();
+    timeout_launch.client_version = "timeout-probe";
+    timeout_client.configure(timeout_launch);
+    timeout_client.set_host_handler(handle_host);
+    const auto timeout_started = timeout_client.start(std::chrono::milliseconds(20000));
+    check(timeout_started.pid != 0, "the timeout probe sidecar should start");
+    bool timed_out = false;
+    const auto request_started = std::chrono::steady_clock::now();
+    try {
+      (void)timeout_client.request("agent.run.start", {{"runId", "run_timeout_probe"}},
+                                   std::chrono::milliseconds(300));
+    } catch (const yukinal::desktop_host::SidecarError&) {
+      timed_out = true;
+    }
+    check(timed_out, "an unanswered agent.run.start must time out");
+    check(std::chrono::steady_clock::now() - request_started < std::chrono::seconds(10),
+          "a timed-out run request must not block on run cleanup indefinitely");
+    // The cleanup is intentionally best-effort and asynchronous from this
+    // thread's point of view, so poll the sidecar's record for a bounded while.
+    bool saw_stop = false;
+    const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(5);
+    while (std::chrono::steady_clock::now() < deadline) {
+      std::ifstream log(timeout_source / "yukinal_agent" / "frames.log");
+      std::string line;
+      while (std::getline(log, line)) {
+        const auto entry = json::parse(line, nullptr, false);
+        if (entry.is_discarded() || !entry.is_object()) continue;
+        if (entry.value("method", std::string()) == "agent.run.stop" &&
+            entry.value("hasId", false) && entry.contains("params") &&
+            entry.at("params").is_object() &&
+            entry.at("params").value("runId", std::string()) == "run_timeout_probe") {
+          saw_stop = true;
+        }
+      }
+      if (saw_stop) break;
+      std::this_thread::sleep_for(std::chrono::milliseconds(50));
+    }
+    check(saw_stop,
+          "a timed-out agent.run.start must send agent.run.stop for the same run");
+    timeout_client.stop(std::chrono::milliseconds(5000));
+  }
 
   return 0;
 }

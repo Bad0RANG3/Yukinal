@@ -5,6 +5,14 @@
 > approvals, and every `host.*` RPC. The milestone notes below are kept as the
 > migration record of how that was reached. Where they still say "Rust still
 > hosts" or "Tauri development", read them as the state at that time.
+>
+> **Test-count drift:** the milestone sections frequently say "all six CTest
+> targets passed". That was the registered count when they were written; the
+> suite has since grown to **13** targets (the Python client and service
+> integration modules are no longer separate targets and now run inside
+> `python_agent_tests`). Counts inside this log are historical evidence, not the
+> current suite; see `native/README.md` and `docs/acceptance-handoff.md` for the
+> current registration.
 
 > **Current scope:** the standalone C++ SSH service and Python caller are in
 > place. The Python Agent Runtime has bounded LangGraph tool execution, stdio and
@@ -368,7 +376,7 @@ hexadecimal nonce used to delimit its fixed collector results; `docker_ps`
 accepts only a boolean `all` filter. `docker_logs` validates its container
 reference and caps its tail to 500 lines; `docker_inspect` accepts only a safe
 container reference. `systemd_inspect` accepts only a safe `.service` unit;
-`package_inspect` accepts only `apt` or `dnf` and a safe package name.
+`package_inspect` accepts only `apt`, `dnf`, or `yum` and a safe package name.
 `server_logs` accepts an optional time
 range from 1 second to 7 days and an optional bounded
 `.service` name; its result is capped at 500 lines. When either filter is set,
@@ -386,6 +394,12 @@ the desktop host remains responsible for exact approval, task scope, critical
 command checks, and command budgets.
 Service command output is capped at 64 KiB per stream; SFTP responses have
 operation-specific limits.
+
+A configurable `server.exec` command blacklist (`server_exec_denylist`) is now an
+additional deny layer on top of the approval chain, enforced independently by the
+C++ desktop host and the C++ SSH service. The key, the entry schema and both
+enforcement points are described under "The `server.exec` command blacklist"
+below; the operator-facing rules are in [`docs/security.md`](./security.md).
 
 The desktop service panel and supported file browser calls launch a short-lived
 one-target C++ service. Its temporary configuration contains only target
@@ -1810,3 +1824,143 @@ only because a tenant declared it safe, because there is no catalogue that resol
 it from the MCP server the way the host's supervisor does, so the declaration is
 the whole answer; there is no server-initiated ping timer, and `/v1/metrics` is a
 small JSON summary rather than a Prometheus exporter.
+
+## The `server.exec` command blacklist
+
+`server.exec` already had a one-shot capability gate (`allow_server_exec`) and the
+approval chain. Operator sites also need to refuse a known-dangerous command
+outright, so the C++ SSH service config gained one optional key,
+`server_exec_denylist`, valid at the root (service-level) and inside each
+`targets[i]`. `parse_config` (`native/src/config.cpp:562,570-572,597-604`)
+keeps the service-level list in `ServiceConfig::server_exec_denylist` unmerged and
+gives every target the merged list: service-level entries first, then that
+target's own entries, so a target without the key still receives the service
+list and a target-level list can only add. An entry is a bare string (a
+case-sensitive literal) or an object `{"pattern","regex","case_insensitive"}`
+where both flags default to `false`; `parse_server_exec_denylist`
+(`native/src/config.cpp:461-522`) enforces at most
+`kMaxServerExecDenyEntries = 256` entries and at most
+`kMaxServerExecDenyPatternBytes = 1024` bytes per pattern, rejects a non-array, a
+non-string pattern, an unknown key, a non-boolean flag, an embedded NUL and a
+whitespace-only pattern, and compiles regex entries with
+`std::regex::ECMAScript | std::regex::optimize` (plus `std::regex::icase` when
+flagged). Any of those throws, so `load_config` fails and the service exits
+rather than starting with the blacklist silently missing.
+
+Matching (`native/src/config.cpp:534-557`, normalization at `:320-340`) never
+throws and never expands shell syntax. The pattern and the incoming command are
+normalized identically — each maximal run of space/tab/CR/LF/FF/VT becomes one
+space, then leading and trailing spaces are trimmed — literals are substring
+matches on that normalized string (both sides lowercased when
+`case_insensitive`), and regex entries are a `regex_search` over it.
+`matched_pattern`, when requested, receives the stored pattern of the first
+matching entry, which is a service-level entry when several match. All of that
+shared logic is one implementation, `native/src/config.cpp`
+(`native/include/yukinal/config.hpp:21-82`), consumed by both the service and the
+desktop host.
+
+The SSH service enforces the merged list in `server_exec_operation`
+(`native/src/ssh.cpp:2192-2203`): after the unchanged `!target.allow_server_exec`
+check (`:2187-2191`) and before the command string is built by the local `quote`
+lambda (`:2204`) or any SSH connection is attempted, a match returns
+`fail(&result, "denied_by_policy", "the server.exec command is blocked by the
+configured command blacklist")`. Matching reads `request.command` only, so
+`workdir` and `env` cannot influence the decision, and the message deliberately
+contains neither the command nor the matched pattern.
+`http_service.cpp:96-105` maps `denied_by_policy` to HTTP 403 as the first rule of
+the exported `error_status_for` (`native/include/yukinal/http_service.hpp:16-19`),
+with the anonymous-namespace `error_status` forwarder at `:92`; the other mappings
+are unchanged.
+
+The desktop host enforces the same operator list separately, because it is the
+component that owns the approval ticket. `native/desktop_host/src/ipc_router.cpp`
+defines the loader in the named namespace `yukinal::desktop_host::denylist_detail`
+(`:54-233`; named rather than anonymous so the desktop-host test can call it) and
+reads the file named by the existing `YUKINAL_SSH_SERVICE_CONFIG` environment
+variable (`:173-191`), root key only: unset, blank or whitespace-only means no
+operator file and therefore an empty list, and a configured file is re-read on
+every effectful `server.exec` request (`:137-167`) so an operator edit lands
+without restarting the host. A configured file that cannot be honored — not a
+regular file, larger than 1 MiB (`kMaxServerExecDenylistConfigBytes`, `:75`),
+unreadable, bad JSON, a non-object root, or a malformed `server_exec_denylist`
+entry — returns `loaded_ok = false` (`:85-90`), which the caller turns into a
+fail-closed `host_tool_failed("denied_by_policy", "the configured server.exec
+command blacklist could not be loaded", …)` (`:4353-4362`). A **present-but-null**
+`server_exec_denylist` is treated as absent rather than as an error (`:154`): the
+file configures no entries and the command is not denied by this layer. No parser
+message is surfaced, because it would originate in operator config.
+
+For `server.exec` only (`:4354`), a matching command is denied at `:4364-4379`
+with `host_tool_failed("denied_by_policy", "the server.exec command is blocked by
+the configured command blacklist", …)`; that block sits ahead of
+`approvals.consume(binding, …)` at `:4463-4467`, so a blacklisted command never
+burns the one-shot approval ticket. The other effectful tools
+(`systemd.restart`, `docker.restart`, `package.install`) never enter the loader at
+all. After `resolved_target["allow_server_exec"] = true` (`:4491`), a non-empty
+list is stamped into the ephemeral one-target `targetData.target` (`:4495-4498`)
+through `server_exec_denylist_to_json` (`native/src/config.cpp:524-532`), which
+emits one `{"pattern","regex","case_insensitive"}` object per entry with all
+three keys always present; the list comes from the operator's file, never from
+model input. That stamp is what the Python Agent validates and forwards verbatim
+(`agent/src/yukinal_agent/ssh_service_process.py:198-220,446-493`), so the SSH
+service re-applies the same policy on the child process. Two asymmetries are
+deliberate and worth knowing: the host reads **only the root key** (it ignores
+`targets[*].server_exec_denylist` in that same file, so a per-target list reaches
+the service only), and the packaging manifest's launch section
+(`scripts/package.mjs:467`) forwards only `YUKINAL_AGENT_ENTRY`,
+`YUKINAL_SSH_SERVICE_BINARY` and `YUKINAL_DATA_DIR`, so a stock packaged launch
+does not forward `YUKINAL_SSH_SERVICE_CONFIG` at all: the host-side list is then
+empty and only the service-side list applies, while dev/CLI launches that export
+the variable get both. The loader and its fail-closed cases are covered by
+`check_server_exec_denylist_loader` in
+`native/desktop_host/tests/test_ipc_router.cpp:86-219`, invoked from `main` at
+`:506`; that test also exercises the load-then-match decision directly through
+`server_exec_denylist_decision_for_test` (`ipc_router.cpp:225-231`).
+
+One sharp edge is worth stating because it is not obvious from the two enforcement
+points looking symmetric. On the pre-configured long-lived service (the one
+`agent/src/yukinal_agent/ssh_service_process.py:52` starts from
+`YUKINAL_SSH_SERVICE_BINARY` + `YUKINAL_SSH_SERVICE_CONFIG`) the HTTP handler
+consumes the target's one-shot slot in `native/src/http_service.cpp:156-167`
+*before* it calls `runner(...)` at `:171`, and the blacklist deny is inside that
+runner at `native/src/ssh.cpp:2197-2203`. A denied `server.exec` therefore still
+burns the one-shot slot, and every later `server.exec` for that same target id is
+answered `409 operation_not_allowed` until the service restarts; a denied attempt
+is not free. The desktop path does not have this edge: the host denies at
+`ipc_router.cpp:4349-4380`, ahead of `approvals.consume(...)` at `:4463-4467` and
+before any request reaches the service, so the service never sees the blacklisted
+command and no slot is spent.
+
+The failure reaches the UI on the existing error-code chain:
+`agent/src/yukinal_ssh/client.py:754-785` turns a 403 body carrying
+`{"error":{"code","message"}}` into `SshServiceError("denied_by_policy", …)`,
+`agent/src/yukinal_agent/ssh_tools.py:888-891` re-raises it as
+`ToolCallError(error.code, str(error))`, and `_event_error_code`
+(`agent/src/yukinal_agent/model_agent.py:967-990`) already lists
+`denied_by_policy` in its `allowed` set, so the event carries the policy code
+itself instead of falling through to `internal`. The blacklist is a pure
+additional deny layer: `allow_server_exec` and its one-shot consumption are
+unchanged, an empty or absent list changes nothing, and a human typing a command
+in their own terminal never passes through this path.
+
+Coverage lives with each half: `native/tests/test_config.cpp`
+(`config_parses_server_exec_denylist_literal_and_regex_entries`,
+`config_normalizes_server_exec_denylist_literal_and_regex_sources`,
+`config_rejects_malformed_server_exec_denylist_entries`,
+`config_server_exec_denylist_errors_are_stable_and_label_prefixed`,
+`config_rejects_malformed_server_exec_denylist_in_config`,
+`config_merges_service_level_denylist_into_every_target`,
+`config_probe_only_target_may_carry_a_denylist`), `native/tests/test_policy.cpp`
+(`policy_denylist_denies_server_exec_before_any_connection_attempt`,
+`policy_denylist_denies_whitespace_obfuscated_command`,
+`policy_denylist_denies_through_a_regex_entry`,
+`policy_denylist_never_masks_the_one_shot_capability_gate`,
+`policy_denylist_only_inspects_the_command_not_workdir_or_env`,
+`policy_denylist_reports_the_matched_pattern_to_its_caller`) and
+`native/desktop_host/tests/test_ipc_router.cpp:86-219`.
+
+**Honest limitation:** the match is on the raw command string with whitespace
+normalization and optional case-insensitivity only. It is a guardrail, not a
+sandbox: `r''m -rf /`, `rm${IFS}-rf${IFS}/`, `$(printf 'rm') -rf /` and base64
+piping are not expanded and therefore are not caught. Re-ordering `workdir`/`env`
+around a command does not dodge it, but shell-level obfuscation does.

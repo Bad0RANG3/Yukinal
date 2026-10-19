@@ -101,7 +101,7 @@ test("deleting a conversation confirms inside the row instead of blocking the wi
 });
 
 test("a row is never disabled while a write is in flight, so focus stays in the list", () => {
-  // 这条按源码断言，理由和上面一样：行只在有数据时才渲染，而这个视图的数据来自 Tauri。
+  // 这条按源码断言，理由和上面一样：行只在有数据时才渲染，而这个视图的数据来自宿主。
   //
   // `disabled` 会让正在聚焦的元素立刻失焦（焦点掉到 body），于是键盘用户每归档一条
   // 就要重新 Tab 回列表。待写入状态改用 `aria-disabled` + 事件里的 early return 表达。

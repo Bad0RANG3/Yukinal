@@ -18,6 +18,17 @@ class SshServiceProcessError(RuntimeError):
     """A configured local SSH service could not be started safely."""
 
 
+class ServerExecDenylistError(ValueError):
+    """A configured server.exec command denylist is malformed.
+
+    Always names the offending offset and never echoes the pattern text.
+    """
+
+
+MAX_SERVER_EXEC_DENYLIST_ENTRIES = 256
+MAX_SERVER_EXEC_DENYLIST_PATTERN_BYTES = 1024
+
+
 class SshServiceProcess:
     """Own the optional C++ SSH service used by the Python Agent runtime."""
 
@@ -59,6 +70,13 @@ class SshServiceProcess:
             raise SshServiceProcessError("the configured SSH service file could not be read") from None
         if not isinstance(document, dict):
             raise SshServiceProcessError("the configured SSH service file must contain a JSON object")
+        try:
+            if "server_exec_denylist" in document:
+                _validate_server_exec_denylist(
+                    document["server_exec_denylist"], label="the configured SSH service file"
+                )
+        except ServerExecDenylistError as error:
+            raise SshServiceProcessError(str(error)) from None
         port = document.get("listen_port")
         token_env = document.get("api_token_env")
         targets = document.get("targets")
@@ -79,6 +97,14 @@ class SshServiceProcess:
         for target in targets:
             if not isinstance(target, dict):
                 raise SshServiceProcessError("the SSH service target allowlist is invalid")
+            try:
+                if "server_exec_denylist" in target:
+                    _validate_server_exec_denylist(
+                        target["server_exec_denylist"],
+                        label="the configured SSH service target",
+                    )
+            except ServerExecDenylistError as error:
+                raise SshServiceProcessError(str(error)) from None
             auth = target.get("auth")
             if not isinstance(auth, dict):
                 raise SshServiceProcessError("the SSH service target authentication configuration is invalid")
@@ -171,6 +197,7 @@ class SshServiceProcess:
         required_target_fields = {"target_id", "host", "port", "username", "auth"}
         optional_target_fields = {
             "host_key_fingerprint", "host_certificate_authority", "proxy", "allow_server_exec",
+            "server_exec_denylist",
         }
         trust_sources = {"host_key_fingerprint", "host_certificate_authority"} & set(target)
         if (
@@ -180,6 +207,17 @@ class SshServiceProcess:
             or ("allow_server_exec" in target and not isinstance(target["allow_server_exec"], bool))
         ):
             raise SshServiceProcessError("the desktop host returned an invalid SSH target")
+        try:
+            if "server_exec_denylist" in payload:
+                _validate_server_exec_denylist(
+                    payload["server_exec_denylist"], label="the desktop SSH target payload"
+                )
+            if "server_exec_denylist" in target:
+                _validate_server_exec_denylist(
+                    target["server_exec_denylist"], label="the desktop SSH target"
+                )
+        except ServerExecDenylistError:
+            raise SshServiceProcessError("the desktop host returned an invalid SSH target") from None
         target_id = target.get("target_id")
         host = target.get("host")
         username = target.get("username")
@@ -403,6 +441,55 @@ def _valid_credential_env_name(value: object) -> bool:
         return False
     reserved = {name.upper() for name in SshServiceProcess._RUNTIME_ENV}
     return value.upper() not in reserved
+
+
+def _validate_server_exec_denylist(value: object, *, label: str) -> None:
+    """Validate a `server_exec_denylist` array without echoing any pattern text."""
+    if not isinstance(value, list):
+        raise ServerExecDenylistError(f"{label} server_exec_denylist must be a JSON array")
+    if len(value) > MAX_SERVER_EXEC_DENYLIST_ENTRIES:
+        raise ServerExecDenylistError(
+            f"{label} server_exec_denylist must contain at most "
+            f"{MAX_SERVER_EXEC_DENYLIST_ENTRIES} entries"
+        )
+    for index, entry in enumerate(value):
+        if isinstance(entry, str):
+            pattern = entry
+        elif isinstance(entry, dict):
+            unknown = set(entry) - {"pattern", "regex", "case_insensitive"}
+            if unknown:
+                raise ServerExecDenylistError(
+                    f"{label} server_exec_denylist[{index}] contains an unsupported key"
+                )
+            pattern = entry.get("pattern")
+            for boolean_key in ("regex", "case_insensitive"):
+                if boolean_key in entry and not isinstance(entry[boolean_key], bool):
+                    raise ServerExecDenylistError(
+                        f"{label} server_exec_denylist[{index}].{boolean_key} must be a boolean"
+                    )
+        else:
+            raise ServerExecDenylistError(
+                f"{label} server_exec_denylist[{index}] must be a string or an object"
+            )
+        if not isinstance(pattern, str) or not pattern.strip():
+            raise ServerExecDenylistError(
+                f"{label} server_exec_denylist[{index}].pattern must be a non-empty string"
+            )
+        if "\x00" in pattern:
+            raise ServerExecDenylistError(
+                f"{label} server_exec_denylist[{index}].pattern must not contain NUL"
+            )
+        try:
+            pattern_bytes = len(pattern.encode("utf-8"))
+        except UnicodeEncodeError:
+            raise ServerExecDenylistError(
+                f"{label} server_exec_denylist[{index}].pattern must be encodable as UTF-8"
+            ) from None
+        if pattern_bytes > MAX_SERVER_EXEC_DENYLIST_PATTERN_BYTES:
+            raise ServerExecDenylistError(
+                f"{label} server_exec_denylist[{index}].pattern must contain at most "
+                f"{MAX_SERVER_EXEC_DENYLIST_PATTERN_BYTES} UTF-8 bytes"
+            )
 
 
 def _validate_cpp_proxy(value: object) -> str | None:

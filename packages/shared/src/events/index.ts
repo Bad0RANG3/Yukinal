@@ -1,12 +1,20 @@
 /**
- * System logical event names. These are the *only* event types the UI may
- * subscribe to and the only names Rust may emit; adding one means updating this map.
+ * System logical event names — the declared event vocabulary.
  *
- * Rust -> UI events travel over Tauri's event system; agent -> UI events are
- * mapped from `AgentStreamEvent` onto the same names so the UI has one code path.
+ * These names **are** the channel names. The C++ host keys its subscriber map on the
+ * exact string the UI passes to `listen`, and `BridgeContext::publish_event`
+ * (`native/desktop_host/src/main.cpp:67-71`) hands the emitter's own string straight to
+ * `__YUKINAL_HOST__.dispatchEvent(event, payload)`; a sidecar notification is routed
+ * under `params.type` unchanged (`native/desktop_host/src/ipc_router.cpp:8988-8990`).
+ * There is no separator rewriting between this list and the wire, so a name here is a
+ * name the UI can subscribe to verbatim.
  *
- * These are logical names: `tauriEventName` below is the single place that turns
- * them into the channel Tauri actually accepts.
+ * The vocabulary is *not* a producer census. Several names are declared with no emitter
+ * anywhere in this repository: see the annotations on each entry below, and
+ * `schemas/event-vocabulary.test.ts`, which records which names have a producer, which
+ * have a subscriber, and which have neither. Keeping a declared name with no producer is
+ * a decision (a reserved name for a capability that is not implemented yet) and is
+ * written down as one rather than left to be discovered.
  */
 
 import type { Activity } from "../types/activity.js";
@@ -15,15 +23,34 @@ import type { ServerStatus } from "../types/server.js";
 import type { InvestigationNotificationPolicy } from "../types/schedule.js";
 import type { LocalFileDropEvent, TransferSnapshot } from "../types/file.js";
 
+/*
+ * Per-name producer state, verified by literal scan of `native/**`, `agent/src/**` (the
+ * only two emitters) and recorded here because a declared-but-unemitted name used to be
+ * indistinguishable from a live one. "No producer" is a state, not an oversight, and each
+ * one below says why it is kept. `schemas/event-vocabulary.test.ts` pins the partition.
+ */
 export const EVENT_NAMES = [
+  // 无生产者：`server_connect` / `server_disconnect` 只改数据库里的状态
+  // （`ipc_router.cpp:8837`、`:8807`），从不发事件。保留是因为宿主已经有这两个命令，
+  // 补发事件是增量改动；删掉会让将来接线变成契约破坏。
   "server.connected",
   "server.disconnected",
+  // 无生产者：全仓库没有任何 emit，`consistency.ts` 曾断言「Rust 在发」是错的。
   "server.updated",
+  // 无生产者：宿主侧不存在 `auth_prompt`/`auth_challenge` 字面量，`server_auth_respond`
+  // 也没有把回答写回 PTY 的路径；UI 的挑战弹窗（`ServerAuthChallengeModal.tsx:26`）
+  // 因此在等到超时之前什么都收不到。空洞的通道见 C-1/C-2 —— 要么补生产者，要么连同
+  // 弹窗一起撤掉，两种都要显式决定，不能维持现状。
   "server.auth_challenge",
   "mcp.oauth_device_code",
   "agent.started",
+  // 无生产者：Python sidecar 只会发 started/text/tool_call/tool_result/waiting_approval/
+  // approval_expired/completed/failed（`sidecar.py:1019` 转发 `params.type`），没有
+  // thinking/usage。UI 有分支（`useAgentRun.ts`），所以这是「界面等待一个从不出现的
+  // 增量」，保留是为了让补发成为增量改动，而不是让 UI 的既有分支变成死代码。
   "agent.thinking",
   "agent.text",
+  // 无生产者：同上，`agent.usage` 在 sidecar 里没有任何 emit。
   "agent.usage",
   "agent.tool_call",
   "agent.tool_result",
@@ -34,8 +61,15 @@ export const EVENT_NAMES = [
   "terminal.opened",
   "terminal.data",
   "terminal.closed",
+  // 无生产者：`native/` 里没有 `output_lost`，终端的广播通道也没有任何 `Lagged`
+  // 处理，所以「丢帧要告知用户」这条语义目前只存在于类型和 UI 文案里。
   "terminal.output_lost",
+  // 无生产者：宿主写入 `activity_list` 表，但从不发这条事件。UI 有 4 个订阅者
+  // （ActivityFeed / InfrastructureDashboard / ServerOverview / useWorkpageOperations），
+  // 它们各自轮询兜底，所以缺的不是消费者而是生产者。
   "activity.created",
+  // 无生产者：调度器只在 `investigation_schedule_*` 的响应里回话，从不推事件；
+  // `InvestigationsPane.tsx:102` 的订阅目前收不到任何东西。
   "investigation.schedule_notification",
   "file.local_dropped",
   "file.transfer_updated",
@@ -44,14 +78,17 @@ export const EVENT_NAMES = [
 export type EventName = (typeof EVENT_NAMES)[number];
 
 /**
- * Convert a logical event name to the channel accepted by Tauri.
+ * The channel name the host expects for a logical event name.
  *
- * Payload discriminators intentionally keep their dotted names (for example,
- * `agent.started`), while Tauri event channels only allow `:`, `/`, `_`, `-`
- * and alphanumeric characters.
+ * It is the identity function, and that is the point: the C++ host keys subscriptions on
+ * the exact string it is given and `publish_event` passes the emitter's own string to
+ * `dispatchEvent`, so a name in `EVENT_NAMES` is already the channel. This exists so the
+ * one place that used to *rewrite* the name (a `.`→`:` substitution inherited from a
+ * retired event system) is visible as a deliberate no-op rather than something callers
+ * have to remember not to do.
  */
-export function tauriEventName(name: string): string {
-  return name.replace(/\./g, ":");
+export function eventChannelName(name: EventName): EventName {
+  return name;
 }
 
 export interface ServerConnectedEvent {

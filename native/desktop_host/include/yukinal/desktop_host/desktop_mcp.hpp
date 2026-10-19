@@ -28,6 +28,12 @@ class McpSupervisor {
   // Explicit lifecycle for the settings UI.
   [[nodiscard]] nlohmann::json start(const std::string& server_id);
   [[nodiscard]] nlohmann::json stop(const std::string& server_id);
+  // Read-only status of one server, in the shared `McpServerStatus` shape. Only a
+  // live session has a status: a server that was never started, was stopped, or
+  // whose child already exited reports `nullopt`, so the caller answers with the
+  // stopped shape instead of inventing a process id. Never starts a server and
+  // never mutates a session.
+  [[nodiscard]] std::optional<nlohmann::json> status(const std::string& server_id);
   // Executes one internal `mcp.<segment>.<tool>` call. When `cancel` is set and
   // becomes true, the blocking wait is abandoned and a cancellation is raised.
   [[nodiscard]] nlohmann::json call(const std::string& internal_name,

@@ -17,7 +17,7 @@ import { readFileSync } from "node:fs";
  *
  * 这条规则拦的是指向「未发布文档」的指针 —— 读者打不开、编号还会随我们的文档变动。
  * `FIPS 180-4` 的章节号正好相反：它是公开的、编号固定、读者可以自己去核对，
- * `crates/filesystem/src/revision.rs` 里手写的 SHA-256 常量正是靠它才能被验证。
+ * `native/desktop_host/src/content_hash.cpp` 里手写的 SHA-256 常量正是靠它才能被验证。
  * 删掉那个指针对读者毫无好处，只会让常量少一个来源。
  *
  * 所以例外要求**标准名 + 编号**同时出现；`§4` 这种没有出处的裸编号仍然会被拦下，

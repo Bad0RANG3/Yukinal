@@ -71,6 +71,17 @@ test("the task switcher reports context only from backend turn counts", () => {
   assert.equal(markup.includes("%"), false);
 });
 
+test("a running task keeps the switcher focusable and explains why it is inert", () => {
+  const markup = renderToStaticMarkup(<AgentHeader
+    running runState="thinking" tokenUsage={null} agentReady agentOpen shell historyOpen={false}
+    historyButtonRef={{ current: null }} closeButtonRef={{ current: null }} onToggleHistory={() => {}} onToggle={() => {}}
+    workspace taskTitle="当前任务"
+  />);
+  assert.equal(markup.includes('disabled=""'), false, "a disabled button would drop focus mid-run");
+  assert.match(markup, /class="agent-task-trigger [^"]*"[^>]*aria-disabled="true"/u);
+  assert.ok(markup.includes('title="运行中，结束后可切换任务"'));
+});
+
 test("compact header controls retain explicit names and keyboard buttons", () => {
   // The workpage launcher moved out of this row into `WorkspaceTabStrip`; what is
   // pinned here is that whatever a workspace passes in keeps its own accessible

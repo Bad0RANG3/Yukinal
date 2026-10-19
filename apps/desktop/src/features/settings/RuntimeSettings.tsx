@@ -286,7 +286,7 @@ export function ProviderEditor({ provider, existingProviderIds, onSaved }: { pro
       //      下面那句中文提示根本没有机会执行；
       //   2. 它不检查内嵌凭据，所以 `https://user:pass@host` 在界面上是合法的，
       //      提交后却被 IPC 层的 schema 拒掉 —— 一个说不清来源的错误。
-      // `HttpBaseUrlSchema` 两条都管，而且和 Rust 侧、和 IPC 层用的是同一份定义。
+      // `HttpBaseUrlSchema` 两条都管，而且和宿主侧、和 IPC 层用的是同一份定义。
       if (!HttpBaseUrlSchema.safeParse(baseUrl).success) {
         throw new Error("Base URL 必须是 http(s) 地址，且不能内嵌账号密码。");
       }

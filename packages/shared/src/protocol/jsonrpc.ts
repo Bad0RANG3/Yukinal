@@ -1,8 +1,8 @@
 /**
- * Sidecar protocol: React/UI  <->  apps/agent (standalone Node process, ADR 0001).
+ * Sidecar protocol: the C++ desktop host  <->  the Python agent sidecar (ADR 0001).
  *
- * Transport: newline-delimited JSON-RPC 2.0 over the Tauri sidecar's stdio
- * (ADR 0006). stdout carries frames only — logs go to stderr, never stdout.
+ * Transport: newline-delimited JSON-RPC 2.0 over the sidecar's stdio (ADR 0006).
+ * stdout carries frames only — logs go to stderr, never stdout.
  */
 
 export const YUKINAL_RPC_VERSION = "1.0" as const;
@@ -85,7 +85,7 @@ export interface InitializeParams {
   protocolVersion: typeof YUKINAL_RPC_VERSION;
   /** Yukinal desktop version, for capability negotiation + audit. */
   clientVersion: string;
-  /** Absolute path of the per-user data directory supplied by Rust. */
+  /** Absolute path of the per-user data directory supplied by the host. */
   dataDir: string;
 }
 

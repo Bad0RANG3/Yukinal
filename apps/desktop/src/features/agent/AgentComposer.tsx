@@ -631,6 +631,15 @@ export function AgentComposer({
 
             <section className="agent-settings-group">
               <p className="agent-settings-title">目标策略</p>
+              {/* 这一整段**不可选**，而不是「可选但发不出去」。原因不是界面还没做完：
+                  这个 Python Agent Node 没有策略引擎（`permissionPolicyIds` 为空），而
+                  `agent_run_start` 只要收到 `policyId` 就以 `-32602` 拒绝整次运行。于是
+                  每一个可点的选项都只对应一个结果——启动失败。把按钮禁用并说明，是把
+                  「失败」换成了「诚实的不可用」；留着能点则是把失败伪装成可选项。 */}
+              <p className="agent-settings-warning" role="status">
+                本节点暂不支持策略选择：它没有策略引擎，请求里带上策略标识会让整次运行被拒绝。
+                本次运行只由「运行模式」与「访问权限」约束。
+              </p>
               {policyWarning ? <p className="agent-settings-warning" role="status">{policyWarning}</p> : null}
               <ul className="agent-settings-options">
                 {RUN_POLICY_ORDER.map((key) => {
@@ -641,9 +650,10 @@ export function AgentComposer({
                       type="button"
                       className={`agent-settings-option ${spec.value === runPolicy ? "is-selected" : ""}`}
                       aria-pressed={spec.value === runPolicy}
-                      // 与运行模式同一条理由：策略随请求发出，中途改变会让「这次运行
-                      // 受哪套策略约束」说不清。
-                      disabled={running}
+                      aria-disabled={true}
+                      // 不可选：见本节开头的说明。`disabled` 而不是「点了不做事」，
+                      // 是为了让键盘与辅助技术也读得出「现在用不了」。
+                      disabled
                       onClick={() => onRunPolicyChange(spec.value)}
                     >
                       <span className="agent-settings-option-label">{spec.label}</span>

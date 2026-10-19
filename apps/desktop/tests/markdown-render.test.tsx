@@ -14,7 +14,10 @@ import { renderToStaticMarkup } from "react-dom/server";
 
 import {
   approvedRemoteImageSource,
+  headingSlug,
   MarkdownText,
+  markdownLinkTarget,
+  openMarkdownExternalLink,
 } from "../src/components/MarkdownText.js";
 
 const render = (text: string): string =>
@@ -54,6 +57,28 @@ test("links use the external opener path, never an in-WebView anchor", () => {
   assert.equal(markup.includes("href"), false);
   assert.equal(markup.includes("<button"), true);
   assert.equal(markup.includes('title="https://example.test/a"'), true);
+});
+
+test("headings carry deduplicated ids and #links jump in-page instead of opening externally", () => {
+  const markup = render("# 结论\n\n## 结论\n\n回到 [结论](#结论)");
+  assert.match(markup, /<h1 class="md-heading" id="结论">/u);
+  assert.match(markup, /<h2 class="md-heading" id="结论-2">/u, "a repeat heading needs a distinct id");
+  assert.ok(markup.includes('data-anchor="结论"'), "the anchor link must be marked as an in-page jump");
+  assert.ok(markup.includes('title="#结论"'));
+  // The shape stays the same as any other link: a button, never a navigable anchor.
+  assert.equal(markup.includes("<a "), false);
+  assert.equal(markup.includes("href"), false);
+  assert.equal(markdownLinkTarget("#结论").kind, "anchor");
+  assert.deepEqual(markdownLinkTarget("https://example.test/a"), { kind: "external", url: "https://example.test/a" });
+  assert.equal(headingSlug("结论", new Set(["结论"])), "结论-2");
+});
+
+test("a failed external open becomes a visible notice, not an unhandled rejection", async () => {
+  const notice = await openMarkdownExternalLink("https://example.test", async () => {
+    throw new Error("opener unavailable");
+  });
+  assert.equal(notice, "无法打开链接：opener unavailable");
+  assert.equal(await openMarkdownExternalLink("https://example.test", async () => undefined), null);
 });
 
 test("an unknown scheme stays plain text", () => {
@@ -103,11 +128,12 @@ test("footnotes render as structured text, never as HTML", () => {
 
 test("the body stays a single selectable block, and labels stay outside it", () => {
   const markup = render("第一段\n\n第二段");
-  assert.equal(markup.startsWith('<div class="agent-entry-body agent-markdown">'), true);
+  assert.equal(markup.startsWith('<div class="agent-entry-body agent-markdown" data-markdown-root="">'), true);
   assert.equal(markup.endsWith("</div>"), true);
 });
 
 test("empty and whitespace-only bodies render an empty container instead of throwing", () => {
-  assert.equal(render(""), '<div class="agent-entry-body agent-markdown"></div>');
-  assert.equal(render("\n\n   \n"), '<div class="agent-entry-body agent-markdown"></div>');
+  // `data-markdown-root` scopes in-page anchor lookups to the message that owns the link.
+  assert.equal(render(""), '<div class="agent-entry-body agent-markdown" data-markdown-root=""></div>');
+  assert.equal(render("\n\n   \n"), '<div class="agent-entry-body agent-markdown" data-markdown-root=""></div>');
 });

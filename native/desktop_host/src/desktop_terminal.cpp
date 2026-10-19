@@ -1,5 +1,7 @@
 #include "yukinal/desktop_host/desktop_terminal.hpp"
 
+#include "terminal_exit.hpp"
+
 #include "yukinal/desktop_host/credential_store.hpp"
 #include "yukinal/desktop_host/database.hpp"
 #include "yukinal/desktop_host/desktop_target.hpp"
@@ -10,8 +12,10 @@
 #include <chrono>
 #include <cstdint>
 #include <cstdlib>
+#include <ctime>
 #include <filesystem>
 #include <fstream>
+#include <limits>
 #include <map>
 #include <mutex>
 #include <random>
@@ -37,6 +41,26 @@ namespace {
 constexpr std::size_t kMaxFrameBytes = 1024 * 1024;
 constexpr std::size_t kMaxLogLines = 40;
 constexpr std::size_t kMaxLogLineBytes = 4000;
+// A terminal session owns a child process, two pipe handles and a reader thread.
+// Bound the number that may exist at once so a UI loop cannot exhaust the host;
+// the count includes sessions whose reader has ended but whose process has not
+// been reaped yet, because those still hold those resources.
+constexpr std::size_t kMaxTerminalSessions = 8;
+
+// The desktop event schema takes `expiresAt` as an ISO-8601 UTC instant; it is
+// display metadata, so a fixed second-resolution rendering is enough.
+std::string iso8601_utc(std::chrono::system_clock::time_point when) {
+  const auto seconds = std::chrono::system_clock::to_time_t(when);
+  std::tm parts{};
+#ifdef _WIN32
+  gmtime_s(&parts, &seconds);
+#else
+  gmtime_r(&seconds, &parts);
+#endif
+  char buffer[32] = {};
+  if (std::strftime(buffer, sizeof(buffer), "%Y-%m-%dT%H:%M:%SZ", &parts) == 0) return {};
+  return buffer;
+}
 
 int base64_value(char character) {
   if (character >= 'A' && character <= 'Z') return character - 'A';
@@ -181,11 +205,25 @@ std::string quote_argument(const std::string& value) { return value; }
 struct TerminalManager::Impl {
   struct Session {
     std::string server_id;
+    // The target metadata the service was started with; the challenge event is
+    // the only place the UI sees them, so they are kept here at spawn time.
+    std::string username;
+    std::string host;
     int cols = 0;
     int rows = 0;
     std::filesystem::path config_path;
     std::mutex mutex;
     std::atomic<bool> closed{false};
+    // The service's own `closed` frame is the only authoritative source for the
+    // remote shell's exit status; it distinguishes a frame that carried null
+    // from no frame at all. The wrapper process exits with its own status and
+    // must never be reported as the remote result. Guarded by `mutex`.
+    terminal_detail::TerminalExitTracker remote_exit;
+    // Cleared exactly once, by the reader after it reaps the process or by
+    // `stop_session`, whichever happens first. Guarantees the live-session
+    // counter is released once even when a session ends on its own and is never
+    // explicitly closed before the manager is destroyed.
+    std::atomic<bool> slot_held{true};
     std::vector<std::string> diagnostics;
 #ifdef _WIN32
     HANDLE process = nullptr;
@@ -205,6 +243,12 @@ struct TerminalManager::Impl {
   EventSink sink;
   std::mutex mutex;
   std::map<std::string, std::shared_ptr<Session>> sessions;
+  // Guarded by `mutex`. Counts every session that owns a child process or a
+  // reader thread, including ones already erased from `sessions` by `close()`
+  // while `stop_session` is still reaping them.
+  std::size_t live_sessions = 0;
+  // Guarded by `mutex`, like `sessions`.
+  AuthChallenges challenges;
 
   ~Impl() {
     std::map<std::string, std::shared_ptr<Session>> snapshot;
@@ -227,6 +271,22 @@ struct TerminalManager::Impl {
     } catch (...) {
       // A UI delivery failure must not tear down the terminal transport.
     }
+  }
+
+  // Releases the session's slot exactly once. The reader calls this as soon as
+  // the wrapper process has been reaped; `stop_session` calls it as well, and
+  // the atomic makes the second call a no-op. Counting until the reap (not
+  // until `close`) is what keeps the bound real under open/close churn.
+  void release_session_slot(const std::shared_ptr<Session>& session) noexcept {
+    if (!session || !session->slot_held.exchange(false)) return;
+    std::lock_guard lock(mutex);
+    if (live_sessions > 0) --live_sessions;
+  }
+
+  // For a slot claimed by `open_session` before a `Session` exists.
+  void release_unclaimed_slot() noexcept {
+    std::lock_guard lock(mutex);
+    if (live_sessions > 0) --live_sessions;
   }
 
   void record_diagnostic(const std::shared_ptr<Session>& session, const std::string& line) {
@@ -322,6 +382,9 @@ struct TerminalManager::Impl {
     session->stdout_read = nullptr;
     session->process = nullptr;
 #endif
+    // The process has been reaped and the reader joined, so this session no
+    // longer occupies a slot in the live-session bound.
+    release_session_slot(session);
   }
 
   void reader_loop(const std::shared_ptr<Session>& session) {
@@ -344,26 +407,42 @@ struct TerminalManager::Impl {
     }
     if (!buffer.empty()) handle_frame(session, buffer);
 
-    int exit_code = -1;
+    // Reap the wrapper so it does not linger, but do not read its exit status:
+    // that status belongs to `yukinal-ssh-service`, not to the remote shell.
+    // The service writes its `closed` frame before exiting, so only that frame
+    // (stored by `handle_frame`) may fill `exitCode`.
+    bool reaped = false;
 #ifdef _WIN32
-    if (session->process != nullptr &&
-        WaitForSingleObject(session->process, 5000) == WAIT_OBJECT_0) {
-      DWORD code = 0;
-      if (GetExitCodeProcess(session->process, &code)) exit_code = static_cast<int>(code);
+    if (session->process != nullptr) {
+      reaped = WaitForSingleObject(session->process, 5000) == WAIT_OBJECT_0;
     }
 #else
     if (session->pid > 0) {
       int status = 0;
       if (waitpid(session->pid, &status, 0) == session->pid) {
-        exit_code = WIFEXITED(status) ? WEXITSTATUS(status) : -1;
         session->pid = -1;
+        reaped = true;
       }
     }
 #endif
+    // Only a reaped process frees its slot. If the wrapper is still alive here,
+    // `stop_session` will reap it and release the slot; otherwise an exhausted
+    // cap could outlive the processes it was protecting. The release is
+    // idempotent, so `stop_session` may also call it.
+    if (reaped) release_session_slot(session);
+    // Resolve the id before taking `session->mutex`: `session_id_of` locks the
+    // manager mutex, and no path may take the two in both orders.
+    const auto session_id = session_id_of(session);
+    nlohmann::json exit_payload;
+    {
+      std::lock_guard lock(session->mutex);
+      // Absence of the frame means "unknown", which the shared schema
+      // represents as null. Guessing zero here is what made a failed remote
+      // shell look clean.
+      exit_payload = session->remote_exit.payload(session_id);
+    }
     session->closed.store(true);
-    emit("terminal.closed",
-         {{"terminalSessionId", session_id_of(session)}, {"exitCode", exit_code < 0 ? nlohmann::json(nullptr)
-                                                                                    : nlohmann::json(exit_code)}});
+    emit("terminal.closed", std::move(exit_payload));
   }
 
   std::string session_id_of(const std::shared_ptr<Session>& session) {
@@ -399,8 +478,69 @@ struct TerminalManager::Impl {
       emit("terminal.data", {{"terminalSessionId", session_id}, {"data", utf8_lossy(bytes)}});
       return;
     }
+    if (type == "closed") {
+      // The service writes this frame before it exits. Its `exit_code` is the
+      // remote shell's status, or null when the peer closed without sending
+      // one. The wrapper's own process exit status is never substituted.
+      std::string warning;
+      bool accepted = false;
+      {
+        std::lock_guard lock(session->mutex);
+        accepted = session->remote_exit.observe_frame(frame, warning);
+      }
+      // Diagnostics are recorded outside `session->mutex`: the helper takes it.
+      if (!accepted) {
+        record_diagnostic(session, "dropped a terminal closed frame without a valid exit code");
+      } else if (!warning.empty()) {
+        record_diagnostic(session, warning);
+      }
+      return;
+    }
     if (type == "error") {
       record_diagnostic(session, frame.value("message", std::string("terminal error")));
+      return;
+    }
+    if (type == "auth_prompt") {
+      // Keyboard-interactive: the worker is waiting for credentials. Register the
+      // challenge and hand it to the UI; the answer comes back through
+      // `server_auth_respond` as a separate IPC command.
+      auto prompts = nlohmann::json::array();
+      std::size_t expected = 0;
+      if (frame.contains("prompts") && frame.at("prompts").is_array()) {
+        for (const auto& prompt : frame.at("prompts")) {
+          if (!prompt.is_object()) continue;
+          prompts.push_back({{"prompt", prompt.value("prompt", std::string())},
+                             {"echo", prompt.value("echo", false)}});
+          ++expected;
+        }
+      }
+      if (expected == 0) {
+        // Nothing to ask means nothing the UI could answer; say so instead of
+        // registering a challenge that can never be completed.
+        record_diagnostic(session, "dropped an authentication prompt without prompts");
+        return;
+      }
+      std::string auth_id;
+      {
+        std::lock_guard lock(mutex);
+        auth_id = challenges.begin(session_id, expected, std::chrono::steady_clock::now());
+      }
+      const auto name = frame.value("name", std::string());
+      const auto instructions = frame.value("instructions", std::string());
+      emit("server.auth_challenge",
+           {{"authId", auth_id},
+            {"serverId", session->server_id},
+            // The schema wants non-empty display strings. Fall back to the
+            // server's own metadata, then to the worker's prompt name, then to a
+            // literal — never to an empty string the UI would render as blank.
+            {"username", !session->username.empty() ? session->username
+                                                     : (!name.empty() ? name : std::string("unknown"))},
+            {"host", !session->host.empty() ? session->host : session->server_id},
+            {"name", name},
+            {"instructions", instructions},
+            {"prompts", std::move(prompts)},
+            {"expiresAt",
+             iso8601_utc(std::chrono::system_clock::now() + AuthChallenges::kLifetime)}});
       return;
     }
   }
@@ -455,10 +595,50 @@ struct TerminalManager::Impl {
 #endif
   }
 
+  // Releases a live-session slot on every failure path. It starts out covering
+  // the bare claim and is re-armed with the `Session` once one exists, so a
+  // throw anywhere between spawn and thread start cannot leak a slot. Both
+  // releases are idempotent, so it may coexist with `stop_session`.
+  struct SessionSlot {
+    Impl* owner = nullptr;
+    std::shared_ptr<Session> session;
+    bool active = true;
+    ~SessionSlot() {
+      if (!active) return;
+      if (session) {
+        owner->release_session_slot(session);
+      } else {
+        owner->release_unclaimed_slot();
+      }
+    }
+    void arm(std::shared_ptr<Session> spawned) noexcept {
+      session = std::move(spawned);
+    }
+    void dismiss() noexcept {
+      active = false;
+      session.reset();
+    }
+  };
+
   std::string open_session(const std::string& server_id, int cols, int rows) {
     if (cols < 1 || cols > 1000 || rows < 1 || rows > 1000) {
       throw std::runtime_error("the terminal dimensions are invalid");
     }
+    // The bound is claimed before the worker is spawned so two concurrent opens
+    // cannot both pass the check. Sessions that were closed but not yet reaped
+    // still hold a process and a thread, so they keep their slot until the
+    // process is reaped by `stop_session` or the reader.
+    {
+      std::lock_guard lock(mutex);
+      if (live_sessions >= kMaxTerminalSessions) {
+        throw std::runtime_error(
+            "the desktop host already has the maximum number of terminal sessions");
+      }
+      ++live_sessions;
+    }
+    // Armed only after the claim: a refused open must not release a slot it
+    // never took.
+    SessionSlot slot{this};
     const auto binary = resolve_binary();
     if (binary.empty() || !std::filesystem::is_regular_file(binary)) {
       throw std::runtime_error("the packaged C++ SSH service executable is unavailable");
@@ -477,7 +657,12 @@ struct TerminalManager::Impl {
     }
 
     auto session = std::make_shared<Session>();
+    // Ownership of the claimed slot moves to the session here, whose
+    // `slot_held` flag makes every later release path idempotent.
+    slot.arm(session);
     session->server_id = server_id;
+    session->username = payload.at("target").value("username", std::string());
+    session->host = payload.at("target").value("host", std::string());
     session->cols = cols;
     session->rows = rows;
     session->config_path = config_path;
@@ -488,11 +673,26 @@ struct TerminalManager::Impl {
       std::filesystem::remove(config_path, error);
       throw;
     }
-    {
-      std::lock_guard lock(mutex);
-      sessions[session_id] = session;
+    // Registration and thread start are one failure unit: if either throws, the
+    // child that was already spawned must be stopped and the slot released here
+    // rather than leaking a process the manager no longer tracks.
+    try {
+      {
+        std::lock_guard lock(mutex);
+        sessions[session_id] = session;
+      }
+      session->reader = std::thread([this, session] { reader_loop(session); });
+    } catch (...) {
+      {
+        std::lock_guard lock(mutex);
+        sessions.erase(session_id);
+      }
+      // `stop_session` reaps the spawned process and releases the slot; the
+      // guard's release is then a no-op.
+      stop_session(session);
+      throw;
     }
-    session->reader = std::thread([this, session] { reader_loop(session); });
+    slot.dismiss();
     return session_id;
   }
 
@@ -660,6 +860,57 @@ bool TerminalManager::close(const std::string& session_id) {
     impl_->sessions.erase(found);
   }
   impl_->stop_session(session);
+  // A challenge belonging to a session that no longer exists can never be
+  // completed; drop it instead of leaving an answerable id pointing at a dead PTY.
+  {
+    std::lock_guard lock(impl_->mutex);
+    impl_->challenges.forget_session(session_id);
+  }
+  return true;
+}
+
+bool TerminalManager::respond_auth(const std::string& auth_id,
+                                   const std::vector<std::string>& responses, std::string& error) {
+  // The service requires the answer to carry exactly as many strings as the
+  // challenge had prompts, and marks the session invalid otherwise — so the count
+  // is checked here, before anything reaches the child.
+  AuthChallenges::Entry entry;
+  {
+    std::lock_guard lock(impl_->mutex);
+    const auto taken =
+        impl_->challenges.take(auth_id, responses.size(), std::chrono::steady_clock::now(), error);
+    if (!taken.has_value()) return false;
+    entry = *taken;
+  }
+  std::shared_ptr<Impl::Session> session;
+  {
+    std::lock_guard lock(impl_->mutex);
+    const auto found = impl_->sessions.find(entry.session_id);
+    if (found == impl_->sessions.end() || found->second->closed.load()) {
+      error = "the terminal session that asked for credentials has ended";
+      return false;
+    }
+    session = found->second;
+  }
+  if (!impl_->write_frame(session, {{"type", "auth_response"}, {"responses", responses}})) {
+    error = "the authentication answer could not be delivered to the terminal";
+    return false;
+  }
+  return true;
+}
+
+bool TerminalManager::cancel_auth(const std::string& auth_id, std::string& error) {
+  std::string session_id;
+  {
+    std::lock_guard lock(impl_->mutex);
+    impl_->challenges.sweep(std::chrono::steady_clock::now());
+    if (!impl_->challenges.cancel(auth_id, session_id)) {
+      error = "no authentication challenge is waiting for that id";
+      return false;
+    }
+  }
+  // Cancelling must not leave the terminal hanging in the authentication phase.
+  (void)close(session_id);
   return true;
 }
 

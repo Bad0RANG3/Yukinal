@@ -1,4 +1,4 @@
-/** Pins the TS consts to the JSON fixture (the same file the Rust core compiles in). */
+/** Pins the TS consts to the JSON fixture, which the Python agent's tests assert against too. */
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import test from "node:test";
@@ -9,7 +9,7 @@ const fixture = JSON.parse(
   readFileSync(new URL("../../fixtures/health_thresholds.json", import.meta.url), "utf8"),
 ) as typeof HEALTH_THRESHOLDS;
 
-test("health thresholds match the shared fixture (Rust mirror guard)", () => {
+test("health thresholds match the shared fixture", () => {
   assert.deepEqual(HEALTH_THRESHOLDS, fixture);
 });
 

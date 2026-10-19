@@ -1,16 +1,18 @@
 # 交付与发布
 
+**候选版本（2026-10-20）：`2.0.0-perview`。** 应用版本源为 `packages/shared/src/version.ts`，JavaScript workspace 清单、IPC fixture 和 README 由 `version.test.ts` 对齐。此候选仍未具备完整公开发布条件：当前 workflow 只运行 `pnpm check`，没有跨平台发布打包/上传任务；C++ 打包脚本生成的是带 SHA-256 清单的目录载荷，不生成安装器或压缩发布包。签名、公证和本候选的三平台安装后验收也未完成。完成这些步骤前，不应把它描述为经过安装验收的公开发行版。
+
 > **状态更新（2026-10-15）：Rust/Tauri 宿主与 legacy Node agent 已删除，安装包/打包尚未实现。** 本页下方关于 Tauri、cargo、NSIS/MSI/DMG/deb、release manifest 与随包 Node runtime 的记录都是**历史证据**，不再描述当前源码，也不能作为当前交付的证据。当前代码验证只剩 `pnpm check`（CTest + JS 契约/类型/单测/打包前端 + Python sidecar smoke）；下一步实现与打包指导见 [C++ 接管与 Rust 移除计划](./rust-removal-plan.md)。**2026-10-17 补充：C++ 宿主的分发布局与完整性清单已实现（`pnpm package` / `pnpm package -- --verify`），但安装器、签名与三平台真机验收仍未做，见下文“当前状态：C++ 宿主打包”。**
 
 本页的表格和“远端 CI 快照”记录已经取得的实现与安装包证据；后续 Windows 构建记录按日期保存旧产物与环境证据。新的产品目标与尚需完成的业务验收以[目标架构与施工交接](./architecture-and-build-plan.md)为准。历史段落中“待首次远端验收”或旧“三条路径”描述的是当时状态，不能作为新目标已完成的证明。
 
-当前 C++/Python 重写第一阶段已在 Windows 11 / Visual Studio 2022 上完成本机 CMake 配置和编译，最近一次 CTest 的十个目标全部通过，包含 Python caller、C++ HTTP 服务集成、Paramiko SSH mock、Agent 到 C++ SSH 集成，以及 C++ 桌面宿主。mock 覆盖成功只读调用、认证失败、超时、输出上限及未知/变更 host key。OpenSSH 容器测试因没有 Docker CLI 尚未运行，因此 OpenSSH 服务端兼容性仍需验证。详细记录见[重写方案](./rewrite-cpp-python.md)。
+当前 C++/Python 重写第一阶段已在 Windows 11 / Visual Studio 2022 上完成本机 CMake 配置和编译，最近一次 CTest 的 **13 个目标**全部通过，包含 Python caller、C++ HTTP 服务集成、Paramiko SSH mock、Agent 到 C++ SSH 集成，以及 C++ 桌面宿主。mock 覆盖成功只读调用、认证失败、超时、输出上限及未知/变更 host key。OpenSSH 容器测试因没有 Docker CLI 尚未运行，因此 OpenSSH 服务端兼容性仍需验证。详细记录见[重写方案](./rewrite-cpp-python.md)。
 
 2026-10-15 源码迁移移除了旧 Rust SSH crate、桌面测试专用 Rust SSH 连接器以及 Rust `server.exec` 测试回退。下方旧交付记录中的 `yukinal-ssh` 测试命令仅作历史证据，不再适用于当前源码；现在通过 CTest 验证 C++ SSH 与 Python caller。
 
 ## 当前状态：C++ 宿主打包（2026-10-17）
 
-C++ 宿主已接替旧的 Tauri 打包路径：`scripts/package.mjs` 把 C++ 桌面宿主、冻结 Python Agent（PyInstaller onedir）和 C++ SSH 服务暂存到 `target/release/bundle/yukinal-<version>-<platform>-<arch>/`，并写出 `SHA256SUMS.txt` 与 `release-manifest.json`（应用版本、Agent 版本、平台/架构、源码修订、工作区是否脏、每个文件的 SHA-256 与字节数、启动所需的 `YUKINAL_AGENT_ENTRY`/`YUKINAL_SSH_SERVICE_BINARY` 约定）。`pnpm release:manifest` 重建清单，`pnpm package -- --verify` 逐字节复核，任何不一致都非零退出；缺少宿主/Agent/SSH 服务产物时 fail-closed，不会产出部分载荷。
+C++ 宿主已接替旧的 Tauri 打包路径：`scripts/package.mjs` 把 C++ 桌面宿主、已构建的桌面 UI（默认 `apps/desktop/dist`，可用 `--ui-dir` 或 `YUKINAL_DESKTOP_UI_DIR` 覆盖）、冻结 Python Agent（PyInstaller onedir）和 C++ SSH 服务暂存到 `target/release/bundle/yukinal-<version>-<platform>-<arch>/`，并写出 `SHA256SUMS.txt` 与 `release-manifest.json`（应用版本、Agent 版本、平台/架构、源码修订、工作区是否脏、每个文件的 SHA-256 与字节数、每件可执行产物的来源与构建时间（`inputs` 段）、启动所需的 `--ui-dir <payload>/ui` 与 `YUKINAL_AGENT_ENTRY`/`YUKINAL_SSH_SERVICE_BINARY` 约定）。`pnpm release:manifest` 重建清单，`pnpm package -- --verify` 逐字节复核，任何不一致都非零退出；缺少宿主/UI/Agent/SSH 服务产物时一律 fail-closed，不会产出部分载荷。**打包输入要够新**：三件可执行产物中任何一件的修改时间早于「最后一次改动其源码目录的提交」时，`pnpm package` 默认拒绝暂存（旧清单只会把整份载荷归因于 `HEAD`，`dirty: true` 并不能说明二进制陈旧）；确需暂存旧产物时用 `--allow-stale-inputs`，该豁免会连同每件输入的 sha256/构建时间写进 `manifest.notes`。**UI 目录必须存在 `index.html`**，否则打包失败——C++ 宿主在不含可读入口文档时以退出码 2 静默拒绝启动，所以“清单全绿却起不来”的载荷不再是可能状态。
 
 **仍未实现**：NSIS/MSI/DMG/deb 安装器、升级与用户数据保留、代码签名与公证、三平台真实 UI 冒烟，以及 `package.yml` workflow（仓库目前只有 `check.yml`）。因此本页下方的 Tauri/cargo/Node-runtime 记录依旧只是**历史证据**，新的 C++ 分发布局尚未做安装后验收。完整性校验只证明载荷未被改动，不证明发布者身份。
 
@@ -20,7 +22,7 @@ C++ 宿主已接替旧的 Tauri 打包路径：`scripts/package.mjs` 把 C++ 桌
 
 2026-10-15 起的当前源码配置已把安装包资源切换为冻结 Python Agent、C++ SSH 服务和 `NOTICE`，移除了 Node Agent 与 Node runtime 的发行资源及下载步骤。安装版 smoke 会从 Tauri 资源映射暂存文件，在受限 PATH 下启动 Python Agent 并完成协议检查。当前工作树尚未生成或安装这一新布局的 Tauri 安装器；下表、历史快照和旧产物哈希记录的是先前携带 Node runtime 的版本，不能当作新布局的验收证据。
 
-仓库版本为 `1.0.0`，用于标记当前跨层接口基线。三平台安装包已在 CI runner 完成限定范围的安装/复制冒烟；这不代表用户干净环境、完整桌面 GUI 或真实 Provider、MCP 和远端维护场景都已验收。版本号以 `packages/shared/src/version.ts` 为源，并由测试检查各清单与 IPC fixture。
+当前候选版本为 `2.0.0-perview`，用于标记 Yukinal 2.0 预览版。此前三平台安装包的 CI 冒烟属于旧版 Tauri 布局的历史证据，不覆盖当前 C++ 宿主载荷。版本号以 `packages/shared/src/version.ts` 为源，并由测试检查各 JavaScript 清单与 IPC fixture。
 
 | 项目 | 已有证据 | 发布前仍需完成 |
 | --- | --- | --- |
@@ -101,11 +103,15 @@ pnpm desktop:dev:cpp
 macOS/Linux 上将安装命令中的 `agent/.venv/Scripts/python.exe` 换成
 `agent/.venv/bin/python`，控制平面同理换成 `services/control-plane/.venv/bin/python`。
 
-只开发界面时可运行 `pnpm desktop:dev`；浏览器预览没有 SQLite、SSH、PTY、系统凭据库或原生 Agent 能力。`pnpm package` 现在只暂存 C++ 宿主分发布局并写出完整性清单（先运行 `pnpm build:python-agent`、`pnpm build:ssh-service` 并构建 C++ 宿主），产物位于 `target/release/bundle/`；它不再下载 Node runtime，也不生成安装器。本地构建成功只证明该平台分发布局生成，不代替安装后的验收。
+只开发界面时可运行 `pnpm desktop:dev`；浏览器预览没有 SQLite、SSH、PTY、系统凭据库或原生 Agent 能力。`pnpm package` 现在只暂存 C++ 宿主分发布局并写出完整性清单（先运行 `pnpm build:python-agent`、`pnpm build:ssh-service`、`pnpm --filter @yukinal/desktop build` 并构建 C++ 宿主），产物位于 `target/release/bundle/`；它不再下载 Node runtime，也不生成安装器。本地构建成功只证明该平台分发布局生成，不代替安装后的验收。
 
-成功运行 `pnpm package` 会在 `target/release/bundle/` 生成 `SHA256SUMS.txt` 与 `release-manifest.json`，记录可分发布载荷的 SHA-256、字节数、应用版本与随包 Python Agent 版本、平台/架构、源码修订和工作区是否有未提交改动（含未忽略的新文件）。冻结 Python Agent 的第三方许可证文本随包写入 `python-agent/THIRD_PARTY_LICENSES.txt`。单独重建或替换载荷后可运行 `pnpm release:manifest` 更新清单；交付或上传前用 `pnpm package -- --verify` 复核哈希、文件大小、清单覆盖范围和路径安全。清单未签名，不能证明发布者身份，也不替代安装验收或代码签名；安装器与 CI 发布作业尚未实现。
+成功运行 `pnpm package` 会在 `target/release/bundle/` 生成 `SHA256SUMS.txt` 与 `release-manifest.json`，记录可分发布载荷的 SHA-256、字节数、应用版本与随包 Python Agent 版本、平台/架构、源码修订和工作区是否有未提交改动（含未忽略的新文件），以及 `inputs` 段：三件可执行产物加桌面 UI 入口文档各自的 sha256、构建时间、其源码目录的最后一个提交，以及该源码目录是否还有未提交改动（`dirty`）——新鲜度是拿产物与目录的**最后一次提交**比较的，所以工作区里的未提交编辑对这道检查不可见，manifest 必须把这一点写出来而不是暗示「产物等于该修订」。暂存前会逐件比较产物 mtime 与该目录的 `git log -1 --format=%cI`，产物更旧则默认失败并给出 `--allow-stale-inputs` 豁免开关（豁免写进 `notes`）；若 git 不可用或该目录没有任何提交，比较根本无法进行，此时会打印明确的「新鲜度未验证」警告，而不是静默当成新鲜。冻结 Python Agent 的第三方许可证文本随包写入 `python-agent/THIRD_PARTY_LICENSES.txt`——它是按**冻结载荷**里的 `.dist-info` 枚举生成的，不再读构建 venv，因此声明集合与实际随包的 21 个发行版一致；文本按 `License-File` 元数据与文件名双轨收录（旧的后缀白名单会丢掉 `cryptography` 已声明的 `LICENSE.APACHE`/`LICENSE.BSD`），且路径相对载荷根，绝对 `--payload` 不再把构建机目录烧进随包文件。这份通知**是硬性要求**：缺失即 fail-closed，并且暂存前会把它声明的 `## 发行版 版本` 列表与将要暂存的 onedir 里的 `.dist-info` 逐条对账，用 `--agent-runtime` 指向另一棵树时不会再出现「通知描述别的载荷」；载荷内删掉该文件也会被 `--verify` 拒绝（它挂在 `launch.agentEntry` 同目录这一不变式上）。构建好的桌面 UI 写入 `ui/`。单独重建或替换载荷后可运行 `pnpm release:manifest` 更新清单；交付或上传前用 `pnpm package -- --verify` 复核哈希、文件大小、清单覆盖范围和路径安全。复核同时覆盖两个方向：清单里的每个文件必须逐字节一致，磁盘上出现的**任何**未声明文件都会让校验失败并列出路径；载荷内出现符号链接/NTFS 联接、或清单路径含 Windows 保留设备名、尾点/尾空格或冒号（ADS）时也一律拒绝，不会跟随这些条目去验证载荷之外的字节。校验会同时输出清单条目数与磁盘实际枚举数（`files` 与 `scanned`），两者不等即视为异常。`inputs` 段不是装饰性的审计注记：`--verify` 会拿它与清单里同路径的载荷条目逐条比对 sha256，重复 role、指向清单外路径、sha256 与载荷不一致都会失败；`pnpm release:manifest` 重建清单时也做同一检查，所以伪造的 provenance 不能被「刷新」洗白，`inputs` 字段类型不对时会拒绝刷新而不是静默清空。**注意输出根要一次只保留一个版本**：升级 `APP_VERSION` 后，输出根下遗留的旧 `yukinal-<旧版本>-<平台>-<架构>/` 目录会被判为未声明文件而使校验失败——这正是期望行为（旧载荷不应与新清单混放），清理旧目录或改用新的 `--out` 即可。清单未签名，不能证明发布者身份，也不替代安装验收或代码签名；安装器与 CI 发布作业尚未实现。
 
-`pnpm check` 现在还包含控制平面测试（`services/control-plane/tests/`，129 项，跑在 SQLite 上，覆盖 API、租户隔离、节点 Ed25519 签名与重放拒绝、节点通道与断连 `unknown`、任务状态机、偏唯一索引并发控制、审批指纹绑定与派发前复议、审批有效期/撤销/使用预算、按租户策略（风险表、档位模式、环境默认、`deny` 的绝对性、声明边界）、条件 UPDATE 原子领取、凭据边界与 Alembic 迁移一致性）。该步骤只在 `services/control-plane/.venv` 存在时执行，缺失时会打印明确的 skip 原因而不是静默通过。控制平面自身的 PostgreSQL 部署、TLS/`wss://` 终结、真正第二个 worker 进程的分配竞态与按 MCP 目录解析风险仍未验证，见 [`services/control-plane/README.md`](../services/control-plane/README.md)。
+`pnpm check` 现在还包含控制平面测试（`services/control-plane/tests/`，跑在 SQLite 上，覆盖 API、租户隔离、节点 Ed25519 签名与重放拒绝、节点通道与断连 `unknown`、任务状态机、偏唯一索引并发控制、审批指纹绑定与派发前复议、审批有效期/撤销/使用预算、按租户策略（风险表、档位模式、环境默认、`deny` 的绝对性、声明边界）、条件 UPDATE 原子领取、凭据边界与 Alembic 迁移一致性）与 **Python Agent 全量 unittest**（`agent/tests/test_*.py`）。这两个 Python 步骤只在「解释器与依赖在本机确实一处都不存在」时才允许跳过并打印明确原因；**「装了但不可用」一律是硬失败**（退出码 2 并给出修复命令）——依赖装好却没有可用解释器、显式指定的 `YUKINAL_CONTROL_PLANE_PYTHON` 不可用、或 CI 上设置了 `YUKINAL_CONTROL_PLANE_REQUIRED=1` 这三种情况都会让门禁变红，而不是打印一行被忽略的 skip。
+
+原生 CTest 步骤同理：**自动发现**不到任何已配置的测试构建时会打印跳过原因，但显式设置了 `YUKINAL_SSH_CMAKE_BUILD_DIR` 而该目录不是可运行的测试构建时，门禁以退出码 2 停下并给出 `cmake -S native -B ... -DYUKINAL_BUILD_TESTS=ON` 修复命令——曾经一个拼错的路径会让 13 个原生目标全部消失，而门禁仍打印 `check: green`。这条不变式由 `scripts/lib/gate.test.mjs` 钉住（它也断言门禁仍声明那些拦截过真实缺陷的步骤）。
+
+控制平面自身的 PostgreSQL 部署、TLS/`wss://` 终结、真正第二个 worker 进程的分配竞态与按 MCP 目录解析风险仍未验证，见 [`services/control-plane/README.md`](../services/control-plane/README.md)。
 
 ## 发布验收
 

@@ -22,6 +22,7 @@ import { Icon } from "../../components/Icon.js";
 import { KeywordText } from "../../components/KeywordText.js";
 import { MarkdownText } from "../../components/MarkdownText.js";
 import { approvalSourceLabel, decisionLabel, resultLabel, riskLabel } from "../../lib/labels.js";
+import { printableContent } from "../workpages/workpage-model.js";
 import { imageAttachmentUrl } from "./image-attachments.js";
 import { targetLabel, type Entry } from "./transcript.js";
 
@@ -148,6 +149,18 @@ export const AgentEntryView = memo(function AgentEntryView({
           </div>
           <p>{entry.approval.reason}</p>
           <p className="approval-target">{targetLabel(entry.approval.target)}</p>
+          {(entry.approval.factsSummary?.length ?? 0) > 0 ? (
+            <ul className="approval-facts" aria-label="审批依据">
+              {(entry.approval.factsSummary ?? []).map((fact, index) => (
+                <li key={`${index}-${fact}`}>{fact}</li>
+              ))}
+            </ul>
+          ) : null}
+          <details className="approval-input">
+            <summary>查看具体输入</summary>
+            <pre className="approval-input-json"><code>{printableContent(entry.approval.input)}</code></pre>
+          </details>
+          <ApprovalReference approval={entry.approval} />
           {entry.approval.sessionGrantable === false ? (
             <p className="approval-note">此操作每次都需要单独批准，不能记住到本次运行。</p>
           ) : null}
@@ -172,6 +185,33 @@ export const AgentEntryView = memo(function AgentEntryView({
       );
   }
 });
+
+/**
+ * 审计对账行：只展示指纹 / 调用 ID 的短前缀，完整值放在 `title` 里。
+ *
+ * 这两个字段由宿主在审批账本里登记，用户拿它去运行日志里对同一笔审批；
+ * 卡片本身不需要把 64 字符的指纹全铺开。
+ */
+function ApprovalReference({ approval }: { approval: ApprovalRequest }) {
+  const callId = approval.callId?.slice(0, 12);
+  const fingerprint = approval.inputFingerprint?.slice(0, 12);
+  if (!callId && !fingerprint) return null;
+  return (
+    <p className="approval-reference">
+      审批标识：
+      {callId ? (
+        <span title={approval.callId}>
+          调用 <code>{callId}</code>
+        </span>
+      ) : null}
+      {fingerprint ? (
+        <span title={approval.inputFingerprint}>
+          指纹 <code>{fingerprint}</code>
+        </span>
+      ) : null}
+    </p>
+  );
+}
 
 /**
  * 一次工具调用 —— 调用与结果合成一张卡片。

@@ -120,7 +120,7 @@ bool valid_container_ref(const std::string& value) {
 }
 
 bool valid_package_manager(const std::string& value) {
-  return value == "apt" || value == "dnf";
+  return value == "apt" || value == "dnf" || value == "yum";
 }
 
 bool valid_package_ref(const std::string& value) {
@@ -333,7 +333,7 @@ bool parse_exec_request(const nlohmann::json& value, ExecRequest* request, ApiEr
     package_manager = manager_it->get<std::string>();
     package = package_it->get<std::string>();
     if (!valid_package_manager(package_manager) || !valid_package_ref(package)) {
-      set_error(error, 422, "invalid_parameters", "package_inspect requires apt or dnf and a safe package name");
+      set_error(error, 422, "invalid_parameters", "package_inspect requires apt, dnf, or yum and a safe package name");
       return false;
     }
   } else if (operation == "systemd_restart") {
@@ -383,7 +383,7 @@ bool parse_exec_request(const nlohmann::json& value, ExecRequest* request, ApiEr
     package_manager = manager_it->get<std::string>();
     package = package_it->get<std::string>();
     if (!valid_package_manager(package_manager) || !valid_package_ref(package)) {
-      set_error(error, 422, "invalid_parameters", "package_install requires apt or dnf and a safe package name");
+      set_error(error, 422, "invalid_parameters", "package_install requires apt, dnf, or yum and a safe package name");
       return false;
     }
     if (version_it != parameters_it->end() && !version_it->is_null()) {

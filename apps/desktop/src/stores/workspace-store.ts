@@ -2,7 +2,8 @@
  * Main navigation skeleton:
  *
  *   Servers | Agent NIST | Tasks | Activity | Settings <- primary nav
- *   Overview | Terminal | Files | Logs | Services  <- server-scoped pages
+ *   Overview | Activity <- server reference pages
+ *   Files | Terminal | Logs | Services <- server-scoped workpages in the center
  *   AI workspace (persistent center) | Dashboard / selected server (right)
  *
  * The fleet dashboard is the default reference view; a selected server opens its overview.
@@ -15,7 +16,7 @@ import type { AgentPromptPart } from "@yukinal/shared";
 export const PRIMARY_NAV = ["servers", "agents", "tasks", "activity", "settings"] as const;
 export type PrimaryNav = (typeof PRIMARY_NAV)[number];
 
-export const SERVER_PAGES = ["overview", "terminal", "files", "logs", "services", "activity"] as const;
+export const SERVER_PAGES = ["overview", "activity"] as const;
 export type ServerPage = (typeof SERVER_PAGES)[number];
 
 export interface WorkspaceState {

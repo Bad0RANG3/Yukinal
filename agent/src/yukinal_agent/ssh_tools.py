@@ -61,7 +61,14 @@ _DOCKER_RESTART_INPUT_SCHEMA = {
 _PACKAGE_INSTALL_INPUT_SCHEMA = {
     "type": "object",
     "properties": {
-        "manager": {"type": "string", "enum": ["apt", "dnf"]},
+        "manager": {
+            "type": "string",
+            "enum": ["apt", "dnf", "yum"],
+            "description": (
+                "Use apt for Debian/Ubuntu, dnf for Fedora and modern RHEL, "
+                "and yum for CentOS/RHEL 7."
+            ),
+        },
         "package": {"type": "string", "pattern": "^[A-Za-z0-9][A-Za-z0-9+._:-]{0,127}$"},
         "version": {"type": "string", "pattern": "^[A-Za-z0-9][A-Za-z0-9+._:~^-]{0,127}$"},
         "timeoutSeconds": {"type": "integer", "minimum": 1, "maximum": 25},
@@ -259,11 +266,18 @@ def register_desktop_ssh_tools(
         ),
         (
             "package.inspect",
-            "Read whether one apt or dnf package is installed and its normalized version.",
+            "Read whether one apt, dnf, or yum package is installed and its normalized version.",
             {
                 "type": "object",
                 "properties": {
-                    "manager": {"type": "string", "enum": ["apt", "dnf"]},
+                    "manager": {
+                        "type": "string",
+                        "enum": ["apt", "dnf", "yum"],
+                        "description": (
+                            "Use apt for Debian/Ubuntu, dnf for Fedora and modern RHEL, "
+                            "and yum for CentOS/RHEL 7."
+                        ),
+                    },
                     "package": {"type": "string", "pattern": "^[A-Za-z0-9][A-Za-z0-9+._:-]{0,127}$"},
                 },
                 "required": ["manager", "package"],
@@ -638,7 +652,7 @@ def register_desktop_ssh_tools(
         registry.register(ToolSpec(
             name="package.install",
             description=(
-                "Install one apt or dnf package after exact per-call approval and host plan checks. "
+                "Install one apt, dnf, or yum package after exact per-call approval and host plan checks. "
                 "Python runs the structured operation through the C++ SSH service."
             ),
             input_schema=_PACKAGE_INSTALL_INPUT_SCHEMA,

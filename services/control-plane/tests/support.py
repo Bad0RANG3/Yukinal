@@ -317,10 +317,14 @@ class ControlPlaneTestCase(unittest.TestCase):
     ) -> dict:
         """Sign one node request: the contract a node driver implements.
 
-        The node id is the caller's identity and is not derived from the key, so
-        it is sent alongside the signature as a separate header.
+        The node id is signed *and* sent as a header. Signing it is what binds
+        the signature to the node the key was registered for, so the helper
+        cannot fake a request for another node by editing the header afterwards
+        (the header must stay the id that was signed).
         """
-        headers = nodeauth.sign_headers(key, method=method, path=path, body=body, **kwargs)
+        headers = nodeauth.sign_headers(
+            key, node_id=node_id, method=method, path=path, body=body, **kwargs
+        )
         headers[nodeauth.HEADER_NODE] = node_id
         return headers
 

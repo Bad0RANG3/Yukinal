@@ -1584,6 +1584,40 @@ void download_batch(const TransferExecutionContext& context,
 using JobWork = std::function<void(TransferBackend&, const std::shared_ptr<SnapshotCell>&,
                                    const std::shared_ptr<std::atomic<bool>>&, Job&)>;
 
+// Releases the parallel-transfer permit on every path out of run_job, including
+// exceptions thrown by the work function. A leaked permit would permanently
+// reduce the parallel-transfer capacity of the whole host.
+class PermitGuard {
+ public:
+  explicit PermitGuard(Semaphore& permits) : permits_(permits) {}
+  ~PermitGuard() { permits_.release(); }
+  PermitGuard(const PermitGuard&) = delete;
+  PermitGuard& operator=(const PermitGuard&) = delete;
+
+ private:
+  Semaphore& permits_;
+};
+
+// Runs on a detached worker. Any exception that escaped run_job is a bug or a
+// resource failure (bad_alloc, json, filesystem_error), not a per-item transfer
+// error. It must still leave a terminal row and release the permit, so the
+// thread entry points call this instead of silently swallowing it.
+void fail_job_after_unhandled_exception(const std::shared_ptr<TransferManagerImpl>& inner,
+                                        const std::string& transfer_id,
+                                        const std::shared_ptr<Job>& job,
+                                        const std::string& message) {
+  try {
+    push_failure(job->snapshot,
+                 TransferItemFailure{std::nullopt, "transfer", TransferFailureKind::LocalIo,
+                                     message, std::nullopt});
+    job->snapshot->finalize_status(TransferStatus::Failed);
+    remove_terminal_job(*inner, transfer_id);
+  } catch (...) {
+    // A terminal write must never be able to escape the worker; the permit is
+    // released by run_job's guard before this helper runs.
+  }
+}
+
 void run_job(const std::shared_ptr<TransferManagerImpl>& inner, const std::string& transfer_id,
              const std::shared_ptr<Job>& job, const JobWork& work) {
   if (!inner->permits.acquire(job->cancel)) {
@@ -1591,6 +1625,7 @@ void run_job(const std::shared_ptr<TransferManagerImpl>& inner, const std::strin
     remove_terminal_job(*inner, transfer_id);
     return;
   }
+  const PermitGuard permit_guard(inner->permits);
   bool cancelled_early = false;
   {
     auto guard = job->snapshot->write();
@@ -1606,7 +1641,6 @@ void run_job(const std::shared_ptr<TransferManagerImpl>& inner, const std::strin
   if (!cancelled_early) {
     work(*inner->backend, job->snapshot, job->cancel, *job);
   }
-  inner->permits.release();
   if (cancelled_early) {
     remove_terminal_job(*inner, transfer_id);
     return;
@@ -1771,7 +1805,13 @@ std::string TransferManager::start_upload(const std::string& server_id,
             TransferExecutionContext context{&backend, id, server_id, cell, cancel, policy};
             upload_batch(context, remote_dir, local_paths, worker_job);
           });
+    } catch (const std::exception& error) {
+      fail_job_after_unhandled_exception(
+          inner, id, job,
+          std::string("the upload worker failed unexpectedly: ") + error.what());
     } catch (...) {
+      fail_job_after_unhandled_exception(
+          inner, id, job, "the upload worker failed unexpectedly");
     }
     inner->active_workers.fetch_sub(1);
     inner->workers_cv.notify_all();
@@ -1807,7 +1847,13 @@ std::string TransferManager::start_download(const std::string& server_id,
             TransferExecutionContext context{&backend, id, server_id, cell, cancel, policy};
             download_batch(context, remote_paths, local_dir, worker_job);
           });
+    } catch (const std::exception& error) {
+      fail_job_after_unhandled_exception(
+          inner, id, job,
+          std::string("the download worker failed unexpectedly: ") + error.what());
     } catch (...) {
+      fail_job_after_unhandled_exception(
+          inner, id, job, "the download worker failed unexpectedly");
     }
     inner->active_workers.fetch_sub(1);
     inner->workers_cv.notify_all();

@@ -1,6 +1,6 @@
 # SSH + Agent 验收交接手册
 
-本文档面向**接手验收的人**，目标是在一台干净机器上复现构建与测试，并完成本机（开发机）无法完成的真实环境验收。任务输入是工作区的 `ssh_agent_development_brief.md`（**不要提交它**，它是任务输入，不是仓库文件）。
+本文档面向**接手验收的人**，目标是在一台干净机器上复现构建与测试，并完成本机（开发机）无法完成的真实环境验收。任务输入是工作区里的 `ssh_agent_development_brief.md`；**它不在仓库内**，也**不要提交它**（仓库的构建和门禁都不依赖它的存在）。
 
 > **变更提示（Rust/Tauri 已删除）**：`crates/`、`apps/desktop/src-tauri/`、`Cargo.*`、`rust-toolchain.toml`、`.cargo/` 和 legacy Node agent（`apps/agent/`）已从仓库移除；`pnpm check` 不再跑 cargo，桌面宿主只有 C++。本文中失效的命令（`cargo test`/`pnpm --filter @yukinal/agent test:live`/`yukinal-desktop --lib`）已在下文标注；后续实现指导见 [`rust-removal-plan.md`](./rust-removal-plan.md)。
 
@@ -12,11 +12,11 @@
 
 | 项 | 值 |
 | --- | --- |
-| 分支 | `main` |
-| HEAD | `e8a6363`（`Map Python tool names at the provider boundary`） |
-| 本地领先 `origin/main` | 2 个提交：`47f6071`、`e8a6363`（**未推送**） |
+| 分支 | `codex/ui-layout-direction` |
+| HEAD | `736f06a`（`chore(ci): drop the temporary native crash diagnostics`） |
+| 本地领先 `origin/main` | 30 个提交（**未推送**） |
 | 基线检查点 | `d2594ff`（`Move schema migrations to C++ desktop host`） |
-| 未跟踪文件 | `ssh_agent_development_brief.md`（任务输入，禁止提交） |
+| 未跟踪文件 | `ssh_agent_development_brief.md`（工作区任务输入，不在仓库内，禁止提交） |
 
 这轮的验收对象是任务书 `ssh_agent_development_brief.md` 的四阶段。仓库同时并行进行 **C++ 桌面宿主迁移**（见 `docs/cpp-desktop-handoff.md`、`docs/native-desktop-host.md`），它是另一条工作线，不属本任务书的验收范围，但改动会影响仓库整体门禁，本文一并说明。
 
@@ -32,6 +32,9 @@
 | 真实 OpenSSH 容器验收 | **未跑**（本机无 Docker） |
 | 真实云 Provider live | **未跑**（本机无 API key；Python 侧也没有 live harness） |
 | `yukinal-desktop --lib` 单元测试 | **无法启动**（`STATUS_ENTRYPOINT_NOT_FOUND`，环境问题，见 第 7 节） |
+
+> 2026-10-18 复核：上表是那一轮的记录。当前实测 CTest 为 **13/13**（`ctest --test-dir native/build-nmake -C Release --output-on-failure`），Python Agent 为 **153 passed / 4 skipped**；Rust 相关行随宿主删除已无对应目标。
+> 2026-10-18 二次复核：CTest 由 15 降为 **13**，原因是删除了 `test_client.py` / `test_service_integration.py` 的**重复注册**（详见 第 4.1 节的修正说明），覆盖不降反升 —— 原 15 个目标里有 2 个是重复计数，同时有 4 个测试模块不在任何目标里。
 
 ---
 
@@ -98,20 +101,33 @@ cmake --build native/build-nmake --config Release --parallel
 ctest --test-dir native/build-nmake -C Release --output-on-failure
 ```
 
-预期 10 个测试全过：
+预期 13 个测试全过（下面这份清单与 `ctest -N` 的实际顺序一致，即 `native/CMakeLists.txt` 的注册顺序）：
 
 1. `yukinal_ssh_tests`（C++ 配置/策略/host key/网络）
-2. `python_client_tests`（`yukinal_ssh` 客户端）
-3. `service_http_integration`（Python→C++ HTTP 真实路径）
-4. `ssh_container_harness_tests`（容器 harness 自身的解析测试）
-5. `python_agent_tests`（Python Agent Runtime，`test_agent_*.py`）
-6. `ssh_mock_integration`（Paramiko mock：成功/鉴权失败/超时/输出上限/host key）
-7. `agent_ssh_mock_integration`（Agent→C++ mock：选中目标绑定、越权拒绝）
+2. `ssh_container_harness_tests`（容器 harness 自身的解析测试）
+3. `python_agent_tests`（**Python Agent 全量**：`agent/tests/test_*.py`，153 tests）
+4. `ssh_mock_integration`（Paramiko mock：成功/鉴权失败/超时/输出上限/host key）
+5. `agent_ssh_mock_integration`（Agent→C++ mock：选中目标绑定、越权拒绝）
+6. `window_context_tests`
+7. `caption_hit_test_tests`
 8. `desktop_host_tests`
-9. `desktop_host_database_tests`
-10. `desktop_host_self_check`
+9. `transfer_tests`
+10. `transfer_manager_tests`
+11. `desktop_host_database_tests`
+12. `desktop_host_self_check`
+13. `desktop_host_sidecar_tests`
 
-> 若第 5–7 个没出现，说明 Python extra 没装全，不要当作通过。
+> 修正（2026-10-18）：此清单原先写「10 个测试」，并把 `python_client_tests` /
+> `service_http_integration` 列为独立目标。这两个目标是 `test_client.py` /
+> `test_service_integration.py` 的重复注册 —— 它们与 `test_agent_*.py` glob 一起造成了
+> 「同一批测试被计两次、而 `test_network_snapshot.py` / `test_provider_store.py` /
+> `test_reasoning_effort.py` / `test_system_snapshot.py` 四个模块不被任何门禁执行」。
+> 现在 `native/CMakeLists.txt` 只保留一个 glob 为 `test_*.py` 的 `python_agent_tests`
+> 目标来覆盖全部 Agent 测试（`test_client.py` 与 `test_service_integration.py` 在内），
+> 并给该目标注入了 `YUKINAL_SSH_SERVICE_BINARY`，使 `test_service_integration` 的 4 个
+> 用例真正执行而不再静默 skip。
+
+> 若第 3–5 个没出现，说明 Python extra 没装全，不要当作通过。
 
 ### 4.2 Python Agent 全量测试
 
@@ -121,7 +137,9 @@ export YUKINAL_SSH_SERVICE_BINARY="D:/yukinal/native/build-nmake/yukinal-ssh-ser
 agent/.venv/Scripts/python.exe -m unittest discover -s agent/tests -p "test_*.py"
 ```
 
-预期：`Ran 132 tests ... OK`。
+预期：`Ran 153 tests ... OK (skipped=4)`（2026-10-18 实测；此前的 132 是旧快照）。
+`skipped=4` 是本机缺少 Docker/真实云 Provider 时才出现的用例；`test_service_integration`
+的 4 个用例在设好 `YUKINAL_SSH_SERVICE_BINARY` 后会真正执行，不再是 skip。
 
 ### 4.3 Rust 工作区
 
@@ -154,7 +172,7 @@ cargo test -p yukinal-core --test sidecar_agent -- --test-threads=1
 | 任务书要求 | 实现位置 | 验收证据 | 状态 |
 | --- | --- | --- | --- |
 | C++ SSH service，仅监听 127.0.0.1，host key 必须验证 | `native/src` | `yukinal_ssh_tests`、`ssh_mock_integration` | 通过 |
-| Python 通过本机 HTTP/JSON 调用 C++ | `agent/src/yukinal_ssh` | `python_client_tests`、`service_http_integration` | 通过 |
+| Python 通过本机 HTTP/JSON 调用 C++ | `agent/src/yukinal_ssh` | `python_agent_tests` 内的 `test_client`、`test_service_integration` | 通过 |
 | 结构化只读操作（`service_status`/`disk_usage` 等）、白名单目标 | `native/src/policy.cpp`、`agent/src/yukinal_ssh` | `test_client`、`test_policy` | 通过 |
 | 参数校验 / 超时 / 输出上限 / 错误分类 / 脱敏 | 同上 | `test_config`、`test_policy`、mock | 通过 |
 | Tool Registry：全局唯一、schema 校验、目标授权、审批绑定、审计脱敏 | `agent/src/yukinal_agent/tools.py`、`audit.py` | `test_agent_tools` | 通过 |
@@ -237,8 +255,8 @@ pnpm --filter @yukinal/agent test:live
 2. **`cargo` 不在 PATH**：`.cargo/bin` 缺失；用 `~/.rustup/toolchains/stable-x86_64-pc-windows-msvc/bin`。
 3. **NMake 需要 MSVC 环境**：不先 `vcvars64.bat` 会报找不到 `nmake`/`cl`。
 4. **CMake 依赖下载**：首次 configure 会拉取 libssh2 / nlohmann_json / cpp-httplib / webview / sqlite / bundled OpenSSL，需要网络；Windows 上 bundled OpenSSL 还需要完整 Perl（Strawberry Perl）。
-5. **测试静默跳过**：缺 Python extra 或 Paramiko 时 CMake 会不注册测试。核对 `ctest -N` 数量与预期一致（当前 14 个）。
-6. **`ssh_agent_development_brief.md`** 保持未跟踪、不提交。
+5. **测试静默跳过**：缺 Python extra 或 Paramiko 时 CMake 会不注册测试。核对 `ctest -N` 数量与预期一致（2026-10-18 实测 **13 个**；见 第 4.1 节的修正说明）。
+6. **`ssh_agent_development_brief.md`** 是工作区里的任务输入，不在仓库内；保持未跟踪、不提交。
 7. **Git 身份**：提交 author/committer 必须是 `Bad0RANG3 <badorangeovo@Outlook.com>`。
 
 ---
@@ -269,12 +287,12 @@ cmake -S native -B native/build-nmake -G "NMake Makefiles" `
   -DYUKINAL_BUNDLE_WINDOWS_OPENSSL=ON -DYUKINAL_ENABLE_SSH_MOCK_TEST=ON `
   -DPython3_EXECUTABLE="$PWD/agent/.venv/Scripts/python.exe"
 cmake --build native/build-nmake --config Release --parallel
-ctest --test-dir native/build-nmake -C Release --output-on-failure      # 期望 10/10
+ctest --test-dir native/build-nmake -C Release --output-on-failure      # 期望 15/15
 
 # 3. Python Agent 全量
 $env:PYTHONPATH = "$PWD/agent/src"
 $env:YUKINAL_SSH_SERVICE_BINARY = "$PWD/native/build-nmake/yukinal-ssh-service.exe"
-& "$PWD/agent/.venv/Scripts/python.exe" -m unittest discover -s agent/tests -p "test_*.py"   # 期望 132 OK
+& "$PWD/agent/.venv/Scripts/python.exe" -m unittest discover -s agent/tests -p "test_*.py"   # 期望 153 OK（4 skipped）
 
 # 4. Rust（cargo 不在 PATH 时）
 $env:PATH = "$env:USERPROFILE\.rustup\toolchains\stable-x86_64-pc-windows-msvc\bin;$env:PATH"
@@ -301,7 +319,7 @@ pnpm --filter @yukinal/agent test:live
 
 ## 10. 并行工作线：C++ 桌面宿主（不属本任务书）
 
-状态：C++ 宿主已能打开 React UI、提供本机 IPC、初始化并迁移 SQLite（1→36）、服务器 CRUD、OS 凭据、活动/聊天记录、网络代理设置（`network_proxy_get`/`network_proxy_save`，凭据只进 OS 库，PAC/内嵌凭据失败关闭），以及终端、文件传输与拖拽、MCP（含 OAuth 与进程监督）和 Agent↔host 的 `host.*` RPC（含 `host.tool.execute` 两条路由）。`ctest` 当前有 14 个目标。
+状态：C++ 宿主已能打开 React UI、提供本机 IPC、初始化并迁移 SQLite（1→36）、服务器 CRUD、OS 凭据、活动/聊天记录、网络代理设置（`network_proxy_get`/`network_proxy_save`，凭据只进 OS 库，PAC/内嵌凭据失败关闭），以及终端、文件传输与拖拽、MCP（含 OAuth 与进程监督）和 Agent↔host 的 `host.*` RPC（含 `host.tool.execute` 两条路由）。`ctest` 当前有 15 个目标。
 
 未迁入 C++ 的命令返回 `NOT_IMPLEMENTED`，不会回退 Tauri（Tauri 宿主已删除）。剩余迁移顺序见 `docs/cpp-desktop-handoff.md`。
 
@@ -311,7 +329,7 @@ pnpm --filter @yukinal/agent test:live
 
 ## 11. 接手后的建议顺序
 
-1. 按 第 9 节 复现本机结果，确认 CTest 全部通过（当前 14 个目标）、Python Agent 测试全绿；Rust 目标已随宿主删除而移除。
+1. 按 第 9 节 复现本机结果，确认 CTest 全部通过（2026-10-18 实测 **13 个目标**）、Python Agent 测试全绿；Rust 目标已随宿主删除而移除。
 2. 跑 第 6.1 节 真实 OpenSSH，补齐真实协议兼容性证据。
 3. 跑 第 6.2 节 真实 Provider（明确区分 Node SDK 与 Python LangChain 两条路径）。
 4. 把结果写回 `docs/rewrite-cpp-python.md`（带日期、版本、通过/失败组合），再更新 `docs/changelog.md`。

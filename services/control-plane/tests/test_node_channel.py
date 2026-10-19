@@ -7,13 +7,14 @@ all observed rather than simulated.
 
 from __future__ import annotations
 
+import base64
 import unittest
 
 from starlette.websockets import WebSocketDisconnect
 
 from support import AUTH, CHANNEL_PATH, ControlPlaneTestCase, new_key
 
-from yukinal_control_plane import channel
+from yukinal_control_plane import channel, nodeauth
 
 
 class NodeChannelTests(ControlPlaneTestCase):
@@ -181,6 +182,34 @@ class NodeChannelHandshakeTests(ControlPlaneTestCase):
             with self.client.websocket_connect(CHANNEL_PATH) as socket:
                 socket.receive_json()
         self.assertEqual(raised.exception.code, channel.CLOSE_UNAUTHORIZED)
+
+    def test_a_handshake_that_fails_after_the_nonce_is_burned_stays_burned(self) -> None:
+        """A refused handshake is still one attempt with one nonce.
+
+        The signature is wrong, so the socket is closed unauthorized. Retrying
+        the *same* nonce with a valid signature must not get a second chance at
+        the handshake: an attacker who captured one handshake would otherwise
+        have the whole signature window to keep guessing.
+        """
+        tenant_id = self.create_tenant()
+        node_id, key = self.provision_node(tenant_id)
+        nonce = "channel-burned-nonce"
+        headers = self.node_headers(key, "GET", CHANNEL_PATH, node_id=node_id, nonce=nonce)
+        headers[nodeauth.HEADER_SIGNATURE] = base64.b64encode(b"\x00" * 64).decode("ascii")
+        with self.assertRaises(WebSocketDisconnect) as refused:
+            with self.client.websocket_connect(CHANNEL_PATH, headers=headers):
+                pass
+        self.assertEqual(refused.exception.code, channel.CLOSE_UNAUTHORIZED)
+
+        with self.assertRaises(WebSocketDisconnect) as replayed:
+            with self.client.websocket_connect(
+                CHANNEL_PATH,
+                headers=self.node_headers(
+                    key, "GET", CHANNEL_PATH, node_id=node_id, nonce=nonce
+                ),
+            ):
+                pass
+        self.assertEqual(replayed.exception.code, channel.CLOSE_UNAUTHORIZED)
 
     def test_a_handshake_with_a_replayed_nonce_is_closed(self) -> None:
         tenant_id = self.create_tenant()

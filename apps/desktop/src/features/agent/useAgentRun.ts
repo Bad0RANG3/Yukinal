@@ -1,9 +1,9 @@
 /**
- * 一次 Agent 运行的全部机制：Tauri 事件流、run 生命周期握手、审批簿记。
+ * 一次 Agent 运行的全部机制：宿主事件流、run 生命周期握手、审批簿记。
  *
  * 这个模块存在的理由，是 panel 里最难写对、也最难用界面验证的那部分：
  *
- *  - Rust 可能在 `agent_run_start` 命令 resolve *之前* 就发出 started/completed，
+ *  - 宿主可能在 `agent_run_start` 命令 resolve *之前* 就发出 started/completed，
  *    所以「claim 一个 run 槽位」必须先于命令发生，并且只接受自己期望的那个 runId。
  *  - 一个 dying sidecar 会在没人看事件流的时候断开，因此轮询到的存活信号
  *    也必须能把在途运行判死。
@@ -28,8 +28,10 @@ import {
 } from "@yukinal/shared";
 import { useCallback, useEffect, useRef, useState } from "react";
 
+import { errorMessage } from "../../lib/format.js";
 import { callDesktop, isDesktopShell, subscribeDesktop, type AgentEventName, type DesktopEventPayload, type DesktopSubscription } from "../../lib/ipc.js";
-import { RunLifecycle } from "./run-lifecycle.js";
+import { resetAdmissionOnFailure, RunLifecycle, type AdmissionRef, type PendingAdmission } from "./run-lifecycle.js";
+import { ASSISTANT_REPLY_NOT_SAVED, assistantReplyNotSaved } from "./session-persistence.js";
 import {
   appendAssistantDelta,
   appendEntries,
@@ -120,7 +122,11 @@ export function useAgentRun(options: {
    * 运行以终态回复结束时的回调 —— 落库的唯一入口。
    * 通过 ref 读取，因此订阅只建立一次也不会拿到过期的闭包。
    */
-  onAssistantMessage?: (text: string, identity: ReplyIdentity) => void;
+  /**
+   * 一次回复结束后的落库回调。返回 false 表示没写进任何会话；
+   * 运行模块会把这件事变成一条可见提示，而不是假装成功。
+   */
+  onAssistantMessage?: (text: string, identity: ReplyIdentity) => boolean | void | Promise<boolean | void>;
   /** 运行开始等待审批；面板据此把 Agent 面板带到前景。 */
   onApprovalRequested?: () => void;
   /** sidecar 存活信号；false 表示进程已经不在了。 */
@@ -151,15 +157,7 @@ export function useAgentRun(options: {
    * This is the UI half of the durable admission contract: a retry reuses the same
    * `messageId` and `runId` instead of inserting another user message or forking a run.
    */
-  const pendingAdmission = useRef<{
-    runId: string;
-    messageId: string;
-    sessionId: string;
-    prompt: string;
-    parts: AgentPromptPart[];
-    taskId?: string | null;
-    routingKey: string;
-  } | null>(null);
+  const pendingAdmission: AdmissionRef = useRef<PendingAdmission | null>(null);
 
   const [entries, setEntries] = useState<Entry[]>([]);
   const [running, setRunning] = useState(false);
@@ -268,8 +266,18 @@ export function useAgentRun(options: {
       setRunState(event.result.state);
       setContextUsage(event.result.context ?? null);
       if (!event.result.text) return;
-      onAssistantMessage.current?.(event.result.text, replyIdentity.current);
-      setEntries((current) => settleAssistantText(current, event.result.text, replyIdentity.current));
+      const text = event.result.text;
+      const identity = replyIdentity.current;
+      setEntries((current) => settleAssistantText(current, text, identity));
+      void Promise.resolve(onAssistantMessage.current?.(text, identity))
+        .then((persisted) => {
+          if (!disposed && assistantReplyNotSaved(persisted)) {
+            setEntries((current) => appendEntries(current, [{ kind: "error", text: ASSISTANT_REPLY_NOT_SAVED }]));
+          }
+        })
+        .catch((error: unknown) => {
+          if (!disposed) setEntries((current) => appendEntries(current, [{ kind: "error", text: errorMessage(error) }]));
+        });
     });
     on("agent.failed", (event) => {
       if (!lifecycle.current.finish(event.runId)) return;
@@ -284,7 +292,7 @@ export function useAgentRun(options: {
         if (!disposed) setListening(true);
       })
       .catch((error) => {
-        if (!disposed) setEntries([{ kind: "error", text: `无法接收 Agent 事件：${String(error)}` }]);
+        if (!disposed) setEntries([{ kind: "error", text: `无法接收 Agent 事件：${errorMessage(error)}` }]);
       });
 
     return () => {
@@ -297,6 +305,9 @@ export function useAgentRun(options: {
   useEffect(() => {
     if (!running || sidecarRunning !== false) return;
     lifecycle.current.fail();
+    // The process that held the admission is gone; reusing its runId/messageId on the
+    // next send would target a run the new sidecar has never heard of.
+    resetAdmissionOnFailure(pendingAdmission);
     setRunning(false);
     setRunId(null);
     setStopping(false);
@@ -322,6 +333,8 @@ export function useAgentRun(options: {
     seenRestart.current = next;
     if (!running) return;
     lifecycle.current.fail();
+    // Same reasoning as the exit signal above: the restart proves the old process died.
+    resetAdmissionOnFailure(pendingAdmission);
     setRunning(false);
     setRunId(null);
     setStopping(false);
@@ -422,9 +435,12 @@ export function useAgentRun(options: {
       return "started";
     } catch (error) {
       lifecycle.current.fail();
+      // A thrown start (IPC error, failed message record, rejected resume) leaves no
+      // usable admission behind. Keeping it would make the retry reuse a dead pairing.
+      resetAdmissionOnFailure(pendingAdmission);
       setRunning(false);
       setRunState("failed");
-      setEntries((current) => appendEntries(current, [{ kind: "error", text: String(error) }]));
+      setEntries((current) => appendEntries(current, [{ kind: "error", text: errorMessage(error) }]));
       return "failed";
     }
   }, []);
@@ -441,7 +457,7 @@ export function useAgentRun(options: {
         throw new Error("停止请求未被接受，请重试。");
       }
     } catch (error) {
-      setEntries((current) => appendEntries(current, [{ kind: "error", text: String(error) }]));
+      setEntries((current) => appendEntries(current, [{ kind: "error", text: errorMessage(error) }]));
     } finally {
       setStopping(false);
     }
@@ -475,7 +491,7 @@ export function useAgentRun(options: {
         }));
       } catch (error) {
         approvalLocks.current.delete(approval.approvalId);
-        setEntries((current) => appendEntries(current, [{ kind: "error", text: String(error) }]));
+        setEntries((current) => appendEntries(current, [{ kind: "error", text: errorMessage(error) }]));
       } finally {
         setPendingApprovalIds((current) => current.filter((id) => id !== approval.approvalId));
       }

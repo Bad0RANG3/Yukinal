@@ -6,10 +6,13 @@ LICENSE. This notice is supplemental attribution information and does not add
 restrictions to the MIT License.
 
 Third-party components remain under their own licenses. In particular, the
-bundled font files under apps/desktop/src/assets/fonts include JetBrains Mono
-and a Nerd Font variant. They are distributed under the SIL Open Font License
-1.1; see https://scripts.sil.org/OFL for the license text and
-https://github.com/JetBrains/JetBrainsMono for the upstream project.
+bundled font files under apps/desktop/src/assets/fonts include JetBrains Mono,
+a Nerd Font variant, and Orbitron. They are distributed under the SIL Open Font
+License 1.1; see https://scripts.sil.org/OFL for the license text and
+https://github.com/JetBrains/JetBrainsMono and
+https://github.com/googlefonts/Orbitron for the upstream projects. The Orbitron
+license text ships beside the font as
+`apps/desktop/src/assets/fonts/Orbitron-OFL.txt`.
 
 The remaining dependencies are governed by the license files and notices
 provided by their respective authors and package distributions.
@@ -25,11 +28,12 @@ configure time:
 The OpenSSL license text is packaged beside the C++ SSH service as
 `$RESOURCE/ssh-service/OPENSSL-LICENSE.txt`.
 
-The packaged desktop application includes the official Node.js v24.21.0 runtime.
-Its distribution license is included beside the executable as
-`$RESOURCE/runtime/LICENSE`. The runtime is downloaded from nodejs.org during the
-package build and checked against the SHA-256 value recorded in
-`scripts/node-runtime.json`.
+The packaged desktop application does not bundle a JavaScript runtime. The
+desktop host is C++ and the Agent is Python, so no Node.js runtime is downloaded,
+staged or referenced during the package build. `scripts/node-runtime.json` no
+longer exists and no `$RESOURCE/runtime` directory is produced; an earlier
+version of this notice described a Node runtime that the packaging pipeline has
+since dropped.
 
 The packaged Python Agent includes third-party Python distributions. Their license
 metadata and available license texts are collected into

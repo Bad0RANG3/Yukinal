@@ -27,7 +27,7 @@
  *
  * `hostKeyGateDecision` 不在组件里写成一串 `&&`：这条规则决定「放行还是拦下」，是这里
  * 唯一会出安全问题的地方，所以它和 `hostKeyTrustEligibility` 一样被抽成纯函数单独测
- * （不依赖 Tauri、不依赖 react-query，也就不依赖测试环境里有没有 `window`）。
+ * （不依赖桌面宿主、不依赖 react-query，也就不依赖测试环境里有没有 `window`）。
  */
 
 import { useId, type ReactNode } from "react";
@@ -46,7 +46,7 @@ export type HostKeyGateDecision = "children" | "loading" | "error" | "gate";
  * 「放行还是拦下」的纯规则。
  *
  * 输入是闸门需要的**全部**事实，没有隐含状态：
- * - 没有目标、或不在 Tauri 壳里 → 放行（让面板显示它自己的空状态/预览态）；
+ * - 没有目标、或不在桌面宿主里 → 放行（让面板显示它自己的空状态/预览态）；
  * - 还没读到本机指纹 → loading（绝不在这时先放行：那会在状态未知时建立连接）；
  * - 读状态失败 → error（fail closed，不放行）；
  * - 显式 CA 证书链，或已有钉子 → 放行；

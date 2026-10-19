@@ -3,8 +3,10 @@
  *
  * Rules:
  * - No UI code, no Node-only APIs, no LLM SDK imports in here.
- * - Types are the contract; zod schemas are the runtime gate; Rust mirrors these
- *   shapes with serde (snake_case fields, dot-free enum strings).
+ * - Types are the contract; zod schemas are the runtime gate. The C++ desktop host and the
+ *   Python sidecar are kept aligned with these shapes by `packages/shared/fixtures` and by
+ *   the pins in `schemas/consistency.ts` — there is no generator and no shared serializer
+ *   between the three languages, so a field that changes here has to change there too.
  */
 
 export * from "./types/enums.js";

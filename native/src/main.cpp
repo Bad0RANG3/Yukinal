@@ -1,3 +1,4 @@
+#include <csignal>
 #include <cstdlib>
 #include <charconv>
 #include <cstdint>
@@ -40,6 +41,22 @@ bool valid_token(const std::string& token) {
 }  // namespace
 
 int main(int argc, char** argv) {
+#ifndef _WIN32
+  // A peer reset (RST) on a socket that still has buffered output delivers
+  // SIGPIPE, whose default disposition terminates the process without running
+  // cleanup. Every user of this binary owns a long-lived local service or
+  // worker -- the HTTP listener, or a `--terminal` / `--sftp-*` worker on
+  // stdin/stdout -- so one reset remote host would otherwise kill the whole
+  // process and, for the HTTP listener, every in-flight operation. Ignoring
+  // SIGPIPE turns those writes into an ordinary `EPIPE`/`ECONNRESET` error
+  // return, which the existing socket and TLS error paths already surface.
+  // Installed before any socket or OpenSSL state is created. Windows has no
+  // SIGPIPE concept (writes fail with WSAECONNRESET instead), so the call is
+  // compiled out there; `SO_NOSIGPIPE`/`MSG_NOSIGNAL` in ssh.cpp only cover
+  // the direct ssh.cpp socket sends, not OpenSSL's own TLS writes.
+  std::signal(SIGPIPE, SIG_IGN);
+#endif
+
   std::string config_path;
   std::optional<std::uint64_t> parent_pid;
   bool terminal_mode = false;

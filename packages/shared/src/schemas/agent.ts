@@ -53,7 +53,7 @@ const AgentTokenUsageSchema = z.strictObject({
  * The loop's outcome for one run.
  *
  * Exported because it is not only embedded in `agent.completed`: a `delivery: "sync"`
- * run request answers with the same object, and that crossing (sidecar -> Rust ->
+ * run request answers with the same object, and that crossing (sidecar -> host ->
  * IPC) needs the same runtime gate as the streaming one.
  */
 export const AgentRunResultSchema = z.strictObject({
@@ -85,13 +85,14 @@ export const AgentRunResultSchema = z.strictObject({
  * Deriving the union **from** this map, rather than carving members out of the union,
  * keeps one source of truth: a channel schema and the union member are the same object.
  *
- * This is safe to narrow because of how the Rust side emits, verified at
- * `apps/desktop/src-tauri/src/commands/mod.rs:470,504`: the Tauri channel name is read
- * from `params.type` and emitted as `tauri_event_name(event_type)`. The channel and the
- * payload's discriminator are literally the same field, so a payload arriving on
- * `agent.completed` cannot carry `type: "agent.started"`. Per-channel validation
- * therefore cannot reject anything the transport actually delivers — it only stops
- * accepting what the transport cannot produce.
+ * This is safe to narrow because of how the emitter names the channel. The Python sidecar
+ * publishes an `agent.stream` notification whose `type` is the discriminator
+ * (`agent/src/yukinal_agent/sidecar.py:1015-1019`), and the C++ host routes it under that
+ * same string (`native/desktop_host/src/ipc_router.cpp:8988-8990`) without rewriting it.
+ * The channel and the payload's discriminator are literally the same field, so a payload
+ * arriving on `agent.completed` cannot carry `type: "agent.started"`. Per-channel
+ * validation therefore cannot reject anything the transport actually delivers — it only
+ * stops accepting what the transport cannot produce.
  */
 export const AGENT_EVENT_MEMBER_SCHEMAS = {
   "agent.started": z.strictObject({ type: z.literal("agent.started"), runId: RunIdSchema, taskId: RunIdSchema.optional(), at: TimestampSchema }),
@@ -169,9 +170,12 @@ export const AGENT_EVENT_MEMBER_SCHEMAS = {
 /**
  * Every member of the stream union, in the map's declared order.
  *
- * Every member now has an `EVENT_SCHEMAS` channel and an agent-loop producer. The
- * vocabulary remains a separate view so consumers that need the union do not depend
- * on the UI subscription table.
+ * Every member has an `EVENT_SCHEMAS` channel, but *not* every member has a producer: this
+ * is the shape vocabulary, not a producer census. The Python sidecar emits eight of the
+ * ten (`agent.thinking` and `agent.usage` have no emitter anywhere), which the per-name
+ * annotations in `../events/index.ts` record and `event-vocabulary.test.ts` pins. The
+ * vocabulary remains a separate view so consumers that need the union do not depend on the
+ * UI subscription table.
  */
 export const AGENT_EVENT_TYPES = Object.keys(AGENT_EVENT_MEMBER_SCHEMAS) as Array<
   keyof typeof AGENT_EVENT_MEMBER_SCHEMAS

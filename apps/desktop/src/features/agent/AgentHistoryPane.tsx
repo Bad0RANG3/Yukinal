@@ -40,6 +40,7 @@ import {
   groupSessionsByDay,
   historyFilterParam,
   historyFilterTotal,
+  sameHistoryQuery,
   type HistoryFilter,
 } from "./history.js";
 
@@ -147,7 +148,8 @@ export function AgentHistoryPane({
     },
     // 打字时保留上一份结果，列表不会每敲一个字就清空重画。`isPlaceholderData` 为真时
     // 计数与「还有多少段」一律不显示 —— 那是**上一个关键字**的数字，不能拿来充数。
-    placeholderData: (previous, previousQuery) => previousQuery?.queryKey[1] === serverId ? previous : undefined,
+    placeholderData: (previous, previousQuery) =>
+      sameHistoryQuery(previousQuery?.queryKey, serverId, query, filter) ? previous : undefined,
   });
 
   const refresh = useCallback(

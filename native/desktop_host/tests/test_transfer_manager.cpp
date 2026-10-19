@@ -145,6 +145,7 @@ class FakeBackend : public TransferBackend {
   [[nodiscard]] bool supports_atomic_replace() const override { return atomic_; }
 
   void set_read_delay(int milliseconds) { read_delay_.store(milliseconds); }
+  void fail_next_open_read() { fail_open_reads_.fetch_add(1); }
   [[nodiscard]] std::size_t peak_reads() const { return peak_reads_.load(); }
   [[nodiscard]] std::size_t live_reads() const { return live_reads_.load(); }
   [[nodiscard]] std::size_t recovered_removals() const { return recovered_removals_.load(); }
@@ -278,6 +279,7 @@ class FakeBackend : public TransferBackend {
   std::atomic<std::size_t> live_reads_{0};
   std::atomic<std::size_t> peak_reads_{0};
   std::atomic<std::size_t> recovered_removals_{0};
+  std::atomic<int> fail_open_reads_{0};
 };
 
 class FakeReader : public TransferReader {
@@ -329,6 +331,13 @@ std::unique_ptr<TransferWriter> FakeBackend::create_exclusive(const std::string&
 
 std::unique_ptr<TransferReader> FakeBackend::open_read(const std::string&,
                                                        const std::string& path) {
+  int pending_failures = fail_open_reads_.load();
+  while (pending_failures > 0 &&
+         !fail_open_reads_.compare_exchange_weak(pending_failures, pending_failures - 1)) {
+  }
+  if (pending_failures > 0) {
+    throw std::runtime_error("injected non-TransferError backend failure");
+  }
   std::string content;
   {
     std::lock_guard<std::mutex> lock(mutex_);
@@ -896,6 +905,49 @@ void run_parallelism_checks() {
     check(backend->peak_reads() == 1, "a single permit must serialise backend reads");
     manager.shutdown();
   }
+}
+
+// REGRESSION TEST: a non-TransferError escaping a worker used to be swallowed by
+// the detached thread, leaking one of the parallel permits forever and leaving
+// the row Running. The catch-all must finalize Failed and return the permit so a
+// manager with a single permit can still run the next transfer.
+void run_unexpected_exception_permit_check() {
+  TemporaryDirectory temporary;
+  const auto downloads = temporary.path / "unexpected-exception";
+  std::filesystem::create_directories(downloads);
+
+  auto backend = std::make_shared<FakeBackend>();
+  backend->add_directory("/srv");
+  backend->add_file("/srv/throwing.bin", "payload");
+  backend->add_file("/srv/after-one.bin", "first success");
+  backend->add_file("/srv/after-two.bin", "second success");
+
+  // A single permit makes a leak fatal: the test would time out instead of
+  // reaching the next completed transfer.
+  TransferManager manager(backend, 1);
+  backend->fail_next_open_read();
+  const std::string thrown_id =
+      manager.start_download("srv_1", {"/srv/throwing.bin"}, downloads, ConflictPolicy::Skip);
+  const auto failed = wait_terminal(manager, thrown_id, 5000);
+  check(failed.status == TransferStatus::Failed && !failed.failures.empty() &&
+            failed.failures.front().kind == TransferFailureKind::LocalIo,
+        "an unexpected worker exception must finalize the transfer as Failed");
+  check(failed.failures.front().message.find(
+            "the download worker failed unexpectedly") != std::string::npos,
+        "an unexpected worker exception should record a generic worker failure");
+
+  const std::string after_id =
+      manager.start_download("srv_1", {"/srv/after-one.bin"}, downloads, ConflictPolicy::Skip);
+  const auto after = wait_terminal(manager, after_id, 5000);
+  check(after.status == TransferStatus::Completed,
+        "a transfer after an unexpected worker exception must still complete");
+
+  const std::string after_two_id = manager.start_download(
+      "srv_1", {"/srv/after-two.bin"}, downloads, ConflictPolicy::Skip);
+  const auto after_two = wait_terminal(manager, after_two_id, 5000);
+  check(after_two.status == TransferStatus::Completed,
+        "the leaked single permit must be available for repeated later transfers");
+  manager.shutdown();
 }
 
 void run_recovery_checks() {
@@ -1584,6 +1636,7 @@ int main() {
   run_conflict_checks();
   run_cancellation_checks();
   run_parallelism_checks();
+  run_unexpected_exception_permit_check();
   run_recovery_checks();
   run_fail_closed_history_check();
   run_query_checks();
