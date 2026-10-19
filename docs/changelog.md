@@ -2,6 +2,10 @@
 
 本文件记录对用户有意义的版本变化和交付状态。详细实现与历史讨论可通过 Git 记录追溯。
 
+## 2.0.0-rc.3 — 2026-10-20
+
+发布候选工作流现在会在三个操作系统上分别创建并填充 `agent/.venv`，保证全量门禁与 PyInstaller 构建使用同一安装好的 Python 环境。此前 Windows 干净 runner 完成门禁后，在冻结 Agent 构建时因该虚拟环境不存在而退出；macOS/Linux 的 Windows 路径模拟测试也已在 rc.2 修复。rc.3 等待新的三平台安装器 smoke 结果。
+
 ## 2.0.0-rc.2 — 2026-10-20
 
 修复首轮跨平台 CI 暴露的问题：macOS/Linux 跑门禁时，对 Windows 工具链的模拟测试错误地使用 runner 本机的 POSIX 路径拼接，导致三个 guardrail 测试失败。路径解析现在按目标平台选择；Windows 本地完整门禁及对应 guardrail 测试通过。新一轮三平台安装器 CI 正在运行。

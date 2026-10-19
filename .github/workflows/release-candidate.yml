@@ -68,8 +68,20 @@ jobs:
           sudo apt-get update
           sudo apt-get install -y libwebkit2gtk-4.1-dev librsvg2-dev libsecret-1-dev build-essential curl wget file libssl-dev
 
-      - name: Install Python build and test dependencies
-        run: python -m pip install -e "agent[agent,models,test,package]"
+      - name: Create Python Agent build environment (Windows)
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          python -m venv agent/.venv
+          $python = Join-Path $PWD 'agent/.venv/Scripts/python.exe'
+          & $python -m pip install -e "agent[agent,models,test,package]"
+
+      - name: Create Python Agent build environment (Unix)
+        if: runner.os != 'Windows'
+        shell: bash
+        run: |
+          python -m venv agent/.venv
+          ./agent/.venv/bin/python -m pip install -e "agent[agent,models,test,package]"
 
       - name: Install control-plane test dependencies
         run: python -m pip install -e "services/control-plane[test]"
