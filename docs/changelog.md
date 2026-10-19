@@ -4,7 +4,7 @@
 
 ## 2.0.0-rc.7 — 2026-10-20
 
-新增 Python Agent 的显式 opt-in live Provider 工具循环探针与本机 OpenAI-compatible stub 测试；远程自定义 endpoint 限定为 HTTPS，loopback stub 可免 API key。该候选用于复核真实 Provider adapter 的单工具调用，不代表真实 MCP/SSH 目标任务、A/O/F/R 全路径或安装版三平台 GUI 验收已经完成。RC.7 跨平台构建和安装 smoke 待本次 tag workflow 验证。
+新增 Python Agent 的显式 opt-in live Provider 工具循环探针与本机 OpenAI-compatible stub 测试；远程自定义 endpoint 限定为 HTTPS，loopback stub 可免 API key。离线探针回归 6/6 通过。GitHub Actions [Run 39319681035](https://github.com/Bad0RANG3/Yukinal/actions/runs/39319681035) 的 Windows NSIS、Ubuntu DEB、macOS DMG 构建、完整 gate 与安装 smoke 全部通过；Ubuntu CTest 9/9，含 OpenSSH 容器集成。该候选结果不代表真实 MCP/SSH 目标任务、A/O/F/R 全路径或安装版三平台 GUI 验收已经完成。
 
 ## 2.0.0-rc.6 — 2026-10-20
 

@@ -8,20 +8,21 @@
 
 ---
 
-## 1. 已验证检查点（RC.6，2026-10-20）
+## 1. 已验证检查点（RC.7，2026-10-20）
 
 | 项 | 值 |
 | --- | --- |
-| 分支 / HEAD | `feat/workspace-tab-strip` / `15e6d70` |
-| RC 标签 | `v2.0.0-rc.6` 指向 `613a2c3` |
-| 跨平台安装 CI | [Run 39309839659 attempt 2](https://github.com/Bad0RANG3/Yukinal/actions/runs/39309839659)：Windows、Ubuntu、macOS jobs 全部成功 |
-| OpenSSH 容器集成 | Ubuntu 24.04 CTest `openssh_container_integration` 通过，覆盖认证、只读调用、超时、输出上限、未知/变更 host key、SFTP hardlink no-replace |
-| Live Provider 凭据 | 本机未配置；GitHub Actions repository secrets 列表为空（只检查名称，未读取秘密值） |
-| 工作树 | 干净 |
+| 分支 / RC 源提交 | `feat/workspace-tab-strip` / `170a30b` |
+| RC 标签 | `v2.0.0-rc.7` 指向 `170a30b` |
+| 跨平台安装 CI | [Run 39319681035](https://github.com/Bad0RANG3/Yukinal/actions/runs/39319681035)：Windows、Ubuntu、macOS jobs 全部成功 |
+| OpenSSH 容器集成 | Ubuntu 24.04 CTest **9/9** 通过；`openssh_container_integration` 11.86 秒通过，覆盖认证、只读调用、超时、输出上限、未知/变更 host key、SFTP hardlink no-replace |
+| 安装包 smoke | Windows NSIS、Ubuntu DEB、macOS DMG 均构建并安装/启动/移除 smoke 成功；用户数据保留检查通过 |
+| 本地 Provider 探针回归 | loopback stub 与配置安全测试 **6/6** 通过；未发起云端计费请求 |
+| Live Provider 凭据 | 未配置；Actions repository secrets 列表检查未发现可用 secret 名称（未读取任何秘密值） |
+| 稳定版状态 | 未发布；真实 Provider/MCP/目标机任务、三平台安装版 GUI 与签名/公证仍未验收 |
+| 工作树 | 验收记录提交后干净 |
 
-RC.6 第一次 macOS job 在 DMG 创建步骤失败，同一提交的 attempt 2 重新构建并通过 DMG 安装 smoke。该重试只证明候选包构建与隔离安装生命周期；Provider/MCP 目标任务、三平台系统拖放和真实业务 GUI 尚无证据。
-
-RC.7 新增的 Provider 探针与版本更新记录在 [`changelog.md`](./changelog.md)；对应三平台 tag workflow 结果发布后，将在本节追加新的检查点。
+RC.7 三平台作业均在 [Run 39319681035](https://github.com/Bad0RANG3/Yukinal/actions/runs/39319681035) 首次完成并成功。artifact 名称为 `yukinal-release-windows-latest-X64`（94,948,723 bytes）、`yukinal-release-ubuntu-24.04-X64`（210,264,275 bytes）和 `yukinal-release-macos-15-intel-X64`（125,290,431 bytes），可从 run 页面下载（保留 30 天）。RC.6 第一次 macOS job 在 DMG 创建步骤失败，同一提交的 attempt 2 重新构建并通过 DMG 安装 smoke；该历史重试不影响 RC.7 结果。
 
 ## 2. 历史任务书检查点（2026-10-18）
 
