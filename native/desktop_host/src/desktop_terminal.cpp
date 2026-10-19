@@ -494,6 +494,11 @@ struct TerminalManager::Impl {
       } else if (!warning.empty()) {
         record_diagnostic(session, warning);
       }
+      // The worker's terminal loop has ended. Close our write end so its stdin
+      // reader can observe EOF and the child can finish exiting; otherwise the
+      // reader thread can keep the worker alive after the remote shell closes.
+      session->closed.store(true);
+      close_stdin(session);
       return;
     }
     if (type == "error") {

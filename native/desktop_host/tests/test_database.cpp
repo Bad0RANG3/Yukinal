@@ -366,7 +366,8 @@ int run_mcp_slow_mock() {
 // A stand-in for `yukinal-ssh-service --terminal`, used as the terminal
 // fixtures' child process. It speaks the same JSON-lines protocol. The `--cols`
 // value selects the behaviour:
-//   80  -> a `closed` frame carrying the remote exit code 7, then exit
+//   80  -> a `closed` frame carrying the remote exit code 7, then wait for the
+//          host to close stdin so it can reap the worker after remote exit
 //   100 -> no `closed` frame at all, then exit (the report must be null)
 //   else-> stay alive until the host sends `close`, so the session cap can be
 //          exercised with real live sessions.
@@ -378,6 +379,12 @@ int run_terminal_mock(int argc, char** argv) {
   std::cout << R"({"type":"ready"})" << '\n' << std::flush;
   if (cols == 80) {
     std::cout << R"({"type":"closed","exit_code":7})" << '\n' << std::flush;
+    // A real terminal worker has an input reader blocked on stdin while the
+    // remote shell exits. The desktop host must close this pipe after the
+    // `closed` frame so the worker can terminate and be reaped.
+    std::string line;
+    while (std::getline(std::cin, line)) {
+    }
     return 0;
   }
   if (cols == 100) return 0;

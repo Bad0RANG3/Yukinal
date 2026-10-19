@@ -13,4 +13,4 @@
  * file and the manifests that gate names; it does not know about any prose, so a release
  * note has to be updated by hand.
  */
-export const APP_VERSION = "2.0.0-rc.3";
+export const APP_VERSION = "2.0.0-rc.4";
