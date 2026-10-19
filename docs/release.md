@@ -1,6 +1,6 @@
 # 交付与发布
 
-**候选版本（2026-10-20）：`2.0.0-perview`。** 应用版本源为 `packages/shared/src/version.ts`，JavaScript workspace 清单、IPC fixture 和 README 由 `version.test.ts` 对齐。此候选仍未具备完整公开发布条件：当前 workflow 只运行 `pnpm check`，没有跨平台发布打包/上传任务；C++ 打包脚本生成的是带 SHA-256 清单的目录载荷，不生成安装器或压缩发布包。签名、公证和本候选的三平台安装后验收也未完成。完成这些步骤前，不应把它描述为经过安装验收的公开发行版。
+**候选版本（2026-10-20）：`2.0.0-perview`。** 应用版本源为 `packages/shared/src/version.ts`，JavaScript workspace 清单、IPC fixture 和 README 由 `version.test.ts` 对齐。新增的 [release-candidate workflow](../.github/workflows/release-candidate.yml) 在 `v*` 标签或手动触发时，对 Windows、Linux、macOS 运行项目门禁、构建冻结 Agent、生成并复核带 SHA-256 清单的目录载荷，再将每个平台作为独立的 GitHub Actions artifact 保存 30 天。它不会创建 GitHub Release，也不生成 NSIS/MSI/DMG/deb 安装器；代码签名、公证、真实安装后验收尚未完成。这个 workflow 尚未在远端执行，本机已生成并复核 Windows 候选载荷；三平台远端产物和安装验收通过后，才能评估公开发布。
 
 > **状态更新（2026-10-15）：Rust/Tauri 宿主与 legacy Node agent 已删除，安装包/打包尚未实现。** 本页下方关于 Tauri、cargo、NSIS/MSI/DMG/deb、release manifest 与随包 Node runtime 的记录都是**历史证据**，不再描述当前源码，也不能作为当前交付的证据。当前代码验证只剩 `pnpm check`（CTest + JS 契约/类型/单测/打包前端 + Python sidecar smoke）；下一步实现与打包指导见 [C++ 接管与 Rust 移除计划](./rust-removal-plan.md)。**2026-10-17 补充：C++ 宿主的分发布局与完整性清单已实现（`pnpm package` / `pnpm package -- --verify`），但安装器、签名与三平台真机验收仍未做，见下文“当前状态：C++ 宿主打包”。**
 
