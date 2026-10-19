@@ -897,10 +897,11 @@ ssize_t proxy_tls_write(libssh2_socket_t, const void* buffer, std::size_t length
 class SshResources {
  public:
   ~SshResources() {
-    if (bounded_metadata_cleanup_ && session_) {
-      // Metadata requests have already received their operation reply. Do not
-      // wait for another peer acknowledgement during cleanup, especially after
-      // a phase timed out; shutting down our socket makes libssh2 free locally.
+    if (shutdown_socket_before_cleanup_ && session_) {
+      // One-shot requests have already received their result. Do not wait for
+      // another peer acknowledgement during cleanup; shutting down our socket
+      // makes libssh2 free locally, including when the remote peer is slow to
+      // complete its close handshake.
 #ifdef _WIN32
       if (socket_ != kInvalidSocket) shutdown(socket_, SD_BOTH);
 #else
@@ -942,7 +943,7 @@ class SshResources {
     return true;
   }
 
-  bool bounded_metadata_cleanup_ = false;
+  bool shutdown_socket_before_cleanup_ = false;
   Socket socket_ = kInvalidSocket;
   SslPtr proxy_tls_{nullptr, SSL_free};
   Libssh2SessionContext session_context_;
@@ -1062,7 +1063,7 @@ bool connect_authenticated(const TargetConfig& target, Clock::time_point deadlin
                            detail::SftpMetadataDeadline* metadata_deadline = nullptr) {
   using Phase = detail::SftpMetadataDeadline::Phase;
   if (metadata_deadline) {
-    resources->bounded_metadata_cleanup_ = true;
+    resources->shutdown_socket_before_cleanup_ = true;
     deadline = metadata_deadline->enter(Phase::host_key);
   }
   if (initialize_libssh2() != 0) {
@@ -1656,6 +1657,9 @@ int run_terminal_session(const TargetConfig& target, std::uint16_t columns,
                                            : connection_result.error_message}});
     return 2;
   }
+  // The terminal process is one-shot; its final frame is the last data the
+  // caller needs from this SSH session.
+  resources.shutdown_socket_before_cleanup_ = true;
   if (!set_session_timeout(resources.session_, deadline)) {
     emit_terminal_message({{"type", "error"}, {"code", "timeout"}, {"message", "SSH terminal startup timed out"}});
     return 2;
@@ -2141,6 +2145,9 @@ static ExecResult run_ssh_command_with_limits(const TargetConfig& target,
   const auto deadline = started + timeout;
   SshResources resources;
   if (!connect_authenticated(target, deadline, &resources, &result)) return result;
+  // This session serves one structured request. The result has no further use
+  // for the connection, so release the socket locally after the result is read.
+  resources.shutdown_socket_before_cleanup_ = true;
 
   if (!set_session_timeout(resources.session_, deadline)) {
     fail(&result, "timeout", "SSH command timed out");

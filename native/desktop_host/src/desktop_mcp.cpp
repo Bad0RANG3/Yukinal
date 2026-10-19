@@ -47,7 +47,7 @@ constexpr std::size_t kMaxFrameBytes = 8 * 1024 * 1024;
 constexpr std::size_t kMaxStderrLines = 40;
 constexpr const char* kProtocolVersion = "2024-11-05";
 constexpr const char* kClientName = "yukinal-desktop";
-constexpr const char* kClientVersion = "2.0.0-rc.7";
+constexpr const char* kClientVersion = "2.0.0";
 
 std::string sanitize_segment(const std::string& value) {
   std::string out;

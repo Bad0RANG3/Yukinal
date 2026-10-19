@@ -2,6 +2,10 @@
 
 本文件记录对用户有意义的版本变化和交付状态。详细实现与历史讨论可通过 Git 记录追溯。
 
+## 2.0.0 — 2026-10-20
+
+重写后首个正式发行目标：采用 C++ WebView 桌面宿主、独立结构化 SSH 服务、Python Agent 和 React 界面，并提供 Windows NSIS、macOS DMG 与 Debian Linux 安装包。此提交的全平台门禁与安装器 smoke 正在 GitHub Actions 验证；安装包未签名，macOS 未公证，真实 Provider/MCP/用户 SSH 主机与安装后 GUI 文件传输仍需实际环境验收。发布资产应以对应的成功 workflow 为准。
+
 ## 2.0.0-rc.7 — 2026-10-20
 
 新增 Python Agent 的显式 opt-in live Provider 工具循环探针与本机 OpenAI-compatible stub 测试；远程自定义 endpoint 限定为 HTTPS，loopback stub 可免 API key。离线探针回归 6/6 通过。GitHub Actions [Run 39319681035](https://github.com/Bad0RANG3/Yukinal/actions/runs/39319681035) 的 Windows NSIS、Ubuntu DEB、macOS DMG 构建、完整 gate 与安装 smoke 全部通过；Ubuntu CTest 9/9，含 OpenSSH 容器集成。该候选结果不代表真实 MCP/SSH 目标任务、A/O/F/R 全路径或安装版三平台 GUI 验收已经完成。
