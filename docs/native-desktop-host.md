@@ -182,7 +182,7 @@ as a mismatch rather than silently replaced. Unmigrated commands return
 The application can be launched with `--dev-url
 http://127.0.0.1:1420` or `--ui-dir <directory-containing-index.html>`. Pass
 `--data-dir <absolute-path>` to select a data directory for development.
-On Windows, double-click `启动Yukinal.bat` to restart this checkout's desktop
+On Windows, run `scripts/start-desktop-preview.bat` to restart this checkout's desktop
 preview with mock data. It closes matching desktop processes and their children,
 updates the existing native build, restarts this checkout's Vite service in the
 background, and opens a visible window with a separate profile under
