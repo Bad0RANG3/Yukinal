@@ -25,8 +25,8 @@ import {
   type NetworkProxyForm,
 } from "../../lib/network.js";
 
-export function NetworkSettings() {
-  const query = useNetworkProxy();
+export function NetworkSettings({ active = true }: { active?: boolean } = {}) {
+  const query = useNetworkProxy({ enabled: active });
   const queryClient = useQueryClient();
   const formId = useId();
   const field = (name: string) => `${formId}-${name}`;

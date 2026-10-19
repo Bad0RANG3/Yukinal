@@ -60,6 +60,8 @@ enum class TransferErrorCode {
   SourceChanged,
   Verification,
   Cancelled,
+  Busy,
+  ShuttingDown,
 };
 
 class TransferError : public std::runtime_error {

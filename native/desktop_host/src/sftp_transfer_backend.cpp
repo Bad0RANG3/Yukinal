@@ -44,7 +44,11 @@ namespace {
 // base64 data chunk is ~43.7 KiB). A longer line is treated as invalid framing.
 constexpr std::size_t kMaxStreamFrameBytes = 48 * 1024;
 constexpr std::size_t kMaxStreamChunkBytes = 32 * 1024;
-constexpr int kTransferOperationTimeoutSeconds = 10;
+#ifdef YUKINAL_DESKTOP_HOST_WITH_SSH_CORE
+// Match the streaming worker's 30-second startup ceiling. Metadata must also
+// cover a fresh TCP/SSH/authentication sequence before the file operation.
+constexpr int kTransferOperationTimeoutSeconds = yukinal::ssh_service::kSftpMetadataTimeoutSeconds;
+#endif
 
 // ── Base64 (standard alphabet, padded) ───────────────────────────────────────
 
@@ -730,45 +734,6 @@ std::shared_ptr<SftpStreamChannel> spawn_process_sftp_stream_channel(
 
 // ── Production remote-operation seam ─────────────────────────────────────────
 
-// Restores the process environment when it goes out of scope. The C++ SSH core
-// reads password/key/passphrase/proxy secrets from the environment by name; the
-// transfer worker runs on its own thread, so the values are held only for the
-// duration of one blocking SFTP call.
-class ScopedEnvironment {
- public:
-  explicit ScopedEnvironment(
-      const std::vector<std::pair<std::string, std::string>>& values) {
-    for (const auto& [name, value] : values) {
-      const char* previous = std::getenv(name.c_str());
-      saved_.emplace_back(name, previous == nullptr ? std::nullopt
-                                                    : std::optional<std::string>(previous));
-#ifdef _WIN32
-      _putenv_s(name.c_str(), value.c_str());
-#else
-      setenv(name.c_str(), value.c_str(), 1);
-#endif
-    }
-  }
-  ~ScopedEnvironment() {
-    for (const auto& [name, previous] : saved_) {
-#ifdef _WIN32
-      _putenv_s(name.c_str(), previous.has_value() ? previous->c_str() : "");
-#else
-      if (previous.has_value()) {
-        setenv(name.c_str(), previous->c_str(), 1);
-      } else {
-        unsetenv(name.c_str());
-      }
-#endif
-    }
-  }
-  ScopedEnvironment(const ScopedEnvironment&) = delete;
-  ScopedEnvironment& operator=(const ScopedEnvironment&) = delete;
-
- private:
-  std::vector<std::pair<std::string, std::optional<std::string>>> saved_;
-};
-
 std::vector<std::pair<std::string, std::string>> credential_values(
     const nlohmann::json& payload) {
   std::vector<std::pair<std::string, std::string>> values;
@@ -814,7 +779,7 @@ class SshServiceSftpRemoteOps : public SftpRemoteOps {
   std::optional<RemoteStat> lstat(const std::string& server_id,
                                   const std::string& path) override {
     const auto payload = resolve_payload(server_id);
-    ScopedEnvironment environment(credential_values(payload));
+    yukinal::ssh_service::ScopedCredentialOverride credentials_scope(credential_values(payload));
     const auto result = yukinal::ssh_service::sftp_lstat_optional(
         build_target_config(payload), path, kTransferOperationTimeoutSeconds);
     const auto stdout_text = require_completed(result);
@@ -852,7 +817,7 @@ class SshServiceSftpRemoteOps : public SftpRemoteOps {
   std::vector<RemoteTransferEntry> list_dir(const std::string& server_id,
                                             const std::string& path) override {
     const auto payload = resolve_payload(server_id);
-    ScopedEnvironment environment(credential_values(payload));
+    yukinal::ssh_service::ScopedCredentialOverride credentials_scope(credential_values(payload));
     const auto result = yukinal::ssh_service::sftp_list(
         build_target_config(payload), path, kTransferOperationTimeoutSeconds);
     nlohmann::json entries;
@@ -897,7 +862,7 @@ class SshServiceSftpRemoteOps : public SftpRemoteOps {
 
   void create_dir(const std::string& server_id, const std::string& path) override {
     const auto payload = resolve_payload(server_id);
-    ScopedEnvironment environment(credential_values(payload));
+    yukinal::ssh_service::ScopedCredentialOverride credentials_scope(credential_values(payload));
     const auto result = yukinal::ssh_service::sftp_create_dir(
         build_target_config(payload), path, kTransferOperationTimeoutSeconds);
     const auto stdout_text = require_completed(result);
@@ -916,7 +881,7 @@ class SshServiceSftpRemoteOps : public SftpRemoteOps {
 
   void remove_file(const std::string& server_id, const std::string& path) override {
     const auto payload = resolve_payload(server_id);
-    ScopedEnvironment environment(credential_values(payload));
+    yukinal::ssh_service::ScopedCredentialOverride credentials_scope(credential_values(payload));
     const auto result = yukinal::ssh_service::sftp_remove_file(
         build_target_config(payload), path, kTransferOperationTimeoutSeconds);
     const auto stdout_text = require_completed(result);
@@ -936,7 +901,7 @@ class SshServiceSftpRemoteOps : public SftpRemoteOps {
   void publish_no_replace(const std::string& server_id, const std::string& source,
                           const std::string& destination) override {
     const auto payload = resolve_payload(server_id);
-    ScopedEnvironment environment(credential_values(payload));
+    yukinal::ssh_service::ScopedCredentialOverride credentials_scope(credential_values(payload));
     const auto result = yukinal::ssh_service::sftp_publish_no_replace(
         build_target_config(payload), source, destination, kTransferOperationTimeoutSeconds);
     if (!result.error_code.empty() || !result.completed) {

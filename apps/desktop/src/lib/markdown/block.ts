@@ -20,7 +20,7 @@
  */
 
 import { normalizeReference, parseInline, type MarkdownReferences } from "./inline.js";
-import type { Block, ColumnAlign, Inline, ListItem } from "./types.js";
+import type { Block, ColumnAlign, Inline, ListItem, MarkdownParseOptions } from "./types.js";
 
 /**
  * 嵌套深度上限。列表与引用都会递归重排自己的内容，深度不设上界时一段恶意缩进
@@ -35,16 +35,56 @@ const MAX_DEPTH = 6;
  * 这种行即便长得像列表标记、标题或围栏，也一个字都不能当语法用 —— 否则标记会从正文里
  * 消失，而「没认出来的东西一个字都不能丢」正是这里最硬的那条约束。
  */
-type Line = { text: string; lazy: boolean };
+type SourceLine = { text: string; ending: string; codeText?: string };
+type Line = { text: string; lazy: boolean; source?: SourceLine[] };
 
-function plainLines(lines: string[]): Line[] {
-  return lines.map((text) => ({ text, lazy: false }));
+function sourceLines(source: string): SourceLine[] {
+  const parts = source.split(/(\r\n|\r|\n)/);
+  const lines: SourceLine[] = [];
+  for (let index = 0; index < parts.length; index += 2) {
+    lines.push({ text: parts[index] ?? "", ending: parts[index + 1] ?? "" });
+  }
+  return lines;
 }
 
-export function parseMarkdown(source: string): Block[] {
+/** Normalize uses four spaces per tab; translate only removed structure columns back to source. */
+function stripSourceColumns(text: string, columns: number): string {
+  let index = 0;
+  while (columns > 0 && index < text.length) {
+    const width = text[index] === "\t" ? 4 : 1;
+    index += 1;
+    if (columns < width) return " ".repeat(width - columns) + text.slice(index);
+    columns -= width;
+  }
+  return text.slice(index);
+}
+
+function strippedLine(line: Line, columns: number, text = line.text.slice(columns), lazy = line.lazy, codeColumns = columns): Line {
+  return {
+    text, lazy,
+    ...(line.source ? { source: line.source.map((row) => ({
+      text: stripSourceColumns(row.text, columns), ending: row.ending,
+      ...(codeColumns !== columns ? { codeText: stripSourceColumns(row.text, codeColumns) } : {}),
+    })) } : {}),
+  };
+}
+
+function codeSource(lines: Line[], columns = 0): string {
+  return lines.map((line) => (line.source ?? [{ text: line.text, ending: "" }])
+    .map((row) => stripSourceColumns(row.codeText ?? row.text, columns) + row.ending).join("")).join("");
+}
+
+function plainLines(lines: string[], source?: SourceLine[]): Line[] {
+  return lines.map((text, index) => ({
+    text, lazy: false,
+    ...(source ? { source: [source[index] ?? { text, ending: "" }] } : {}),
+  }));
+}
+
+export function parseMarkdown(source: string, options: MarkdownParseOptions = {}): Block[] {
   const extracted = extractReferences(normalize(source));
   const footnotes = extractFootnoteDefinitions(extracted.lines);
-  const blocks = parseBlocks(plainLines(footnotes.lines), 0, extracted.references);
+  const blocks = parseBlocks(plainLines(footnotes.lines, options.preserveCodeSource ? sourceLines(source) : undefined), 0, extracted.references);
   if (footnotes.items.length > 0) {
     blocks.push({
       kind: "footnotes",
@@ -211,6 +251,7 @@ function readFence(lines: Line[], start: number, fence: FenceMarker): [Block, nu
   const text: string[] = [];
   let index = start + 1;
   const closer = new RegExp(`^ {0,3}\\${fence.char}{${fence.count},}[ \\t]*$`);
+  let contentEnd = index;
   while (index < lines.length) {
     const line = lines[index]?.text ?? "";
     if (closer.test(line)) {
@@ -219,9 +260,13 @@ function readFence(lines: Line[], start: number, fence: FenceMarker): [Block, nu
     }
     text.push(line);
     index += 1;
+    contentEnd = index;
   }
   // 没有闭合就是流式输出走到这里：到哪儿算哪儿，剩下的全是代码。
-  return [{ kind: "code", language: fence.language, text: text.join("\n") }, index];
+  return [{
+    kind: "code", language: fence.language, text: text.join("\n"),
+    ...(lines[start]?.source ? { copyText: codeSource(lines.slice(start + 1, contentEnd)) } : {}),
+  }, index];
 }
 
 function matchHeading(
@@ -279,7 +324,10 @@ function readIndentedCode(lines: Line[], start: number): [Block, number] {
     index += 1;
   }
   while (text.at(-1) === "") text.pop();
-  return [{ kind: "code", language: null, text: text.join("\n") }, index];
+  return [{
+    kind: "code", language: null, text: text.join("\n"),
+    ...(lines[start]?.source ? { copyText: codeSource(lines.slice(start, index), 4) } : {}),
+  }, index];
 }
 
 function matchRule(line: string): boolean {
@@ -308,13 +356,13 @@ function readQuote(
     const line = lines[index] ?? { text: "", lazy: false };
     const stripped = line.lazy ? null : matchQuoteMarker(line.text);
     if (stripped !== null) {
-      inner.push({ text: stripped, lazy: false });
+      inner.push(strippedLine(line, line.text.length - stripped.length, stripped, false));
       index += 1;
       continue;
     }
     const following = lines[index + 1];
     if (!line.lazy && isBlank(line.text) && following && !following.lazy && matchQuoteMarker(following.text) !== null) {
-      inner.push({ text: "", lazy: false });
+      inner.push({ ...line, text: "", lazy: false });
       index += 1;
       continue;
     }
@@ -325,7 +373,7 @@ function readQuote(
       quoteEndsInParagraph(inner)
     ) {
       // 引用标记可以省略，但省略的那一行只当上一段的续行（规范里的 lazy continuation）。
-      inner.push({ text: line.text, lazy: true });
+      inner.push({ ...line, lazy: true });
       index += 1;
       continue;
     }
@@ -493,7 +541,8 @@ function readList(
     if (marker === null || lines[index]?.lazy || !sameType(marker)) break;
     const contentColumn = marker.contentColumn;
 
-    const content: Line[] = [{ text: marker.content, lazy: false }];
+    const firstLine = lines[index] ?? { text: "", lazy: false };
+    const content: Line[] = [strippedLine(firstLine, firstLine.text.length - marker.content.length, marker.content, false)];
     const checked = marker.checked;
     index += 1;
 
@@ -509,7 +558,10 @@ function readList(
         // 空行之后要缩进到内容列才算本项的内容。`1. a\n\n  2. b\n\n    3. c` 的最后一行
         // 因此落到列表外面，被上一层的「四空格缩进代码」接住 —— 规范就是这么分的。
         if (following && !following.lazy && indentOf(following.text) >= contentColumn) {
-          content.push({ text: "", lazy: false });
+          content.push({
+            text: "", lazy: false,
+            ...(line.source ? { source: lines.slice(index, followingIndex).flatMap((blank) => blank.source ?? []) } : {}),
+          });
           index = followingIndex;
           continue;
         }
@@ -517,7 +569,7 @@ function readList(
       }
       if (!line.lazy && indentOf(line.text) >= contentColumn) {
         // 缩进到内容列：这是本项的内容，下一层可以照常认块（嵌套列表、代码块、引用…）。
-        content.push({ text: line.text, lazy: false });
+        content.push({ ...line, lazy: false });
         index += 1;
         continue;
       }
@@ -528,11 +580,11 @@ function readList(
       // 规范里的 laziness 只适用于「段落续行文字」：`- foo\n***\n- bar` 中间那条分隔线
       // 是新块，不能被上一项吞掉（吞掉就变成正文里的三个星号）。
       if (startsExplicitBlock(line.text)) break;
-      content.push({ text: line.text, lazy: true });
+      content.push({ ...line, lazy: true });
       index += 1;
     }
 
-    const parsed = parseBlocksDetailed(dedent(content), depth + 1, references);
+    const parsed = parseBlocksDetailed(dedent(content, contentColumn), depth + 1, references);
     if (parsed.blankBetweenBlocks) tight = false;
     items.push({ checked, blocks: parsed.blocks });
 
@@ -550,7 +602,7 @@ function readList(
   return [{ kind: "list", ordered, start: startNumber, tight, items }, index];
 }
 
-function dedent(lines: Line[]): Line[] {
+function dedent(lines: Line[], contentColumn: number): Line[] {
   // 逐个比较而不是 `Math.min(...indents)`：后者在长列表上会把参数铺成上万个实参。
   let common = Number.POSITIVE_INFINITY;
   for (const line of lines.slice(1)) {
@@ -558,11 +610,16 @@ function dedent(lines: Line[]): Line[] {
     common = Math.min(common, indentOf(line.text));
   }
   if (!Number.isFinite(common)) common = 0;
-  return lines.map((line, position) => ({
-    text: position === 0 || isBlank(line.text) ? line.text.trim() : line.text.slice(common),
+  return lines.map((line, position) => strippedLine(
+    line,
+    position === 0 ? indentOf(line.text) : common,
+    position === 0 || isBlank(line.text) ? line.text.trim() : line.text.slice(common),
     // 续行的身份跟着行走：去掉缩进不能让它变回一个「合法的块开头」。
-    lazy: line.lazy,
-  }));
+    line.lazy,
+    // A streaming fence may have no less-indented closing line yet. Keep payload
+    // indentation after the list's content column even when display dedent is wider.
+    position === 0 ? 0 : Math.min(common, contentColumn),
+  ));
 }
 
 /* ── 段落 ───────────────────────────────────────────────────────────────── */

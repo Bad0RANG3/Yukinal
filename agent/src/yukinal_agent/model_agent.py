@@ -9,7 +9,7 @@ from dataclasses import asdict, dataclass
 from datetime import UTC, datetime
 from typing import Any, TypedDict
 
-from langchain_core.messages import AIMessage, HumanMessage, SystemMessage, ToolMessage
+from langchain_core.messages import AIMessage, AIMessageChunk, HumanMessage, SystemMessage, ToolMessage, message_chunk_to_message
 from langgraph.checkpoint.memory import InMemorySaver
 from langgraph.graph import END, START, StateGraph
 
@@ -36,6 +36,33 @@ results concise; use concrete findings and evidence instead of explaining the UI
 # provider boundary uses `__`, and the mapping is applied in both directions so a
 # trace never shows a name the registry does not know.
 _PROVIDER_TOOL_NAME_PATTERN = re.compile(r"^[A-Za-z0-9_-]{1,64}$")
+
+
+# Private model guidance: never add it to user messages, public events or metadata.
+_UI_DISPLAY_GUIDE = """For useful presentation, prefer ordinary Markdown. When it materially helps,
+you may include a fenced `yukinal-ui` JSON block: {"version":1,"widgets":[...]}.
+Widgets are display-only, never tool calls, actions, HTML or executable/external resources.
+Supported objects (type is the literal name):
+card: {type:"card",title,body,tone?}; tone is neutral (default), info, success, warning or error.
+steps: {type:"steps",title,items:[{title,status,detail?}]}; status is pending, active, done or error.
+metrics: {type:"metrics",title,items:[{label,value,unit?,trend?}]}; value is a string or finite number; trend is finite numbers.
+progress: {type:"progress",title,value,max,detail?}; finite numbers, max>0 and 0<=value<=max.
+details: {type:"details",title,body}.
+Use valid JSON with quoted keys. At most 12 widgets, 20 steps/widget, 8 metrics/widget,
+40 trend points/metric; title/label<=160 characters, body/detail<=8000, unit<=32,
+metric string value<=120; keep the whole JSON within 64 KiB of text.
+Use only actual known data; never invent progress, percentages, token usage or execution status.
+Omit unavailable values and use Markdown to explain uncertainty. Do not force widgets into short replies.
+"""
+_SYSTEM_POLICY += "\n\n" + _UI_DISPLAY_GUIDE
+
+
+class _InvalidModelResponse(ValueError):
+    pass
+
+
+class _StreamOutputExceeded(ValueError):
+    pass
 
 
 def _to_provider_tool_name(internal_name: str) -> str:
@@ -127,6 +154,7 @@ class _AgentState(TypedDict, total=False):
     model_rounds: int
     tool_call_count: int
     output_bytes: int
+    streamed_bytes: int
     answer: str
     tool_results: list[dict[str, Any]]
     approval_requests: list[dict[str, Any]]
@@ -293,6 +321,7 @@ class ModelDrivenAgent:
             "model_rounds": 0,
             "tool_call_count": 0,
             "output_bytes": 0,
+            "streamed_bytes": 0,
             "answer": "",
             "tool_results": [],
             "approval_requests": [],
@@ -474,9 +503,13 @@ class ModelDrivenAgent:
         if message_bytes + self._tool_definition_bytes > self._budget.max_model_input_bytes:
             return {"status": "failed", "error_code": "model_input_budget_exceeded"}
         try:
-            response = await asyncio.wait_for(
-                self._model.ainvoke(state["messages"]), timeout=min(90.0, self._budget.max_total_seconds)
+            response, streamed_bytes = await asyncio.wait_for(
+                self._stream_model(state), timeout=min(90.0, self._budget.max_total_seconds)
             )
+        except _InvalidModelResponse:
+            return {"status": "failed", "error_code": "invalid_model_response"}
+        except _StreamOutputExceeded:
+            return {"status": "failed", "error_code": "output_budget_exceeded"}
         except asyncio.TimeoutError:
             return {"status": "failed", "error_code": "model_timeout"}
         except Exception as error:
@@ -501,6 +534,7 @@ class ModelDrivenAgent:
                 "model_rounds": next_round,
                 "answer": answer,
                 "output_bytes": state["output_bytes"] + answer_size,
+                "streamed_bytes": streamed_bytes,
                 "status": "succeeded",
                 "error_code": None,
             }
@@ -536,11 +570,71 @@ class ModelDrivenAgent:
         return {
             "messages": [*state["messages"], response],
             "calls": clean_calls,
+            "streamed_bytes": streamed_bytes,
             "call_index": 0,
             "model_rounds": next_round,
             "status": "running",
             "error_code": None,
         }
+
+    async def _stream_model(self, state: _AgentState) -> tuple[AIMessage, int]:
+        streamed_bytes = state.get("streamed_bytes", 0)
+
+        async def publish(content: Any) -> None:
+            nonlocal streamed_bytes
+            for event_type, value in _public_content_parts(content):
+                # JS validates UTF-16 units; 8k code points are at most 16k units.
+                for offset in range(0, len(value), 8000):
+                    delta = value[offset:offset + 8000]
+                    size = len(delta.encode("utf-8"))
+                    if streamed_bytes + size > self._budget.max_output_bytes:
+                        raise _StreamOutputExceeded()
+                    streamed_bytes += size
+                    if self._event_sink is not None:
+                        self._event_sink({"type": event_type, "runId": state.get("run_id", ""),
+                                          "textDelta": delta, "at": datetime.now(UTC).isoformat()})
+                    # stdio notifications flush on the event loop, including for
+                    # SDKs/fakes that can yield consecutive chunks without I/O.
+                    await asyncio.sleep(0)
+
+        stream = getattr(self._model, "astream", None)
+        if not callable(stream):
+            # Compatibility for non-streaming local adapters. Never retry a
+            # partially consumed stream with a second model request.
+            response = await self._model.ainvoke(state["messages"])
+            if not isinstance(response, AIMessage):
+                raise _InvalidModelResponse()
+            await publish(response.content)
+            return response, streamed_bytes
+
+        iterator = stream(state["messages"])
+        combined: AIMessageChunk | AIMessage | None = None
+        try:
+            async for chunk in iterator:
+                if isinstance(chunk, AIMessageChunk):
+                    if combined is not None and not isinstance(combined, AIMessageChunk):
+                        raise _InvalidModelResponse()
+                    combined = chunk if combined is None else combined + chunk
+                elif isinstance(chunk, AIMessage) and combined is None:
+                    combined = chunk
+                else:
+                    raise _InvalidModelResponse()
+                # Only explicit public content is displayable. Tool argument
+                # fragments and provider-private additional_kwargs stay private.
+                await publish(chunk.content)
+        finally:
+            close = getattr(iterator, "aclose", None)
+            if callable(close):
+                try:
+                    await close()
+                except Exception:
+                    pass  # Cleanup cannot replace the original failure/cancel.
+        if combined is None:
+            raise _InvalidModelResponse()
+        response = message_chunk_to_message(combined) if isinstance(combined, AIMessageChunk) else combined
+        if not isinstance(response, AIMessage):
+            raise _InvalidModelResponse()
+        return response, streamed_bytes
 
     async def _execute_tool(self, state: _AgentState) -> dict[str, Any]:
         request = state["calls"][state["call_index"]]
@@ -878,12 +972,38 @@ def _failed_result(task_id: str, error_code: str, *, status: str = "failed") -> 
     return ModelAgentResult(task_id, status, "", (), (), 0, 0, error_code)
 
 
-def _message_text(content: Any) -> str:
+def _public_content_parts(content: Any) -> list[tuple[str, str]]:
     if isinstance(content, str):
-        return content
-    if isinstance(content, list):
-        return "\n".join(block["text"] for block in content if isinstance(block, dict) and isinstance(block.get("text"), str))
-    return ""
+        return [("agent.text", content)] if content else []
+    if not isinstance(content, list):
+        return []
+    result: list[tuple[str, str]] = []
+    for block in content:
+        if isinstance(block, str):
+            if block:
+                result.append(("agent.text", block))
+        elif isinstance(block, dict):
+            kind = block.get("type")
+            if kind in (None, "text", "output_text") and isinstance(block.get("text"), str):
+                result.append(("agent.text", block["text"]))
+            elif kind == "thinking" and isinstance(block.get("thinking"), str):
+                result.append(("agent.thinking", block["thinking"]))
+            elif kind == "reasoning":
+                reasoning = block.get("reasoning")
+                if isinstance(reasoning, str):
+                    result.append(("agent.thinking", reasoning))
+                # OpenAI exposes a public reasoning summary separately from its
+                # encrypted/private reasoning state. Never inspect opaque fields.
+                summary = block.get("summary")
+                if isinstance(summary, list):
+                    result.extend(("agent.thinking", item["text"]) for item in summary
+                                  if isinstance(item, dict) and item.get("type") == "summary_text"
+                                  and isinstance(item.get("text"), str))
+    return result
+
+
+def _message_text(content: Any) -> str:
+    return "".join(value for event_type, value in _public_content_parts(content) if event_type == "agent.text")
 
 
 def _redact_arguments(arguments: dict[str, Any]) -> dict[str, Any]:

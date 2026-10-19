@@ -3,6 +3,7 @@ import { test } from "node:test";
 
 import { shortModelLabel } from "../src/features/agent/ModelPicker.js";
 import { resolveAgentModels } from "../src/features/agent/useAgentModels.js";
+import { defaultAgentRoles, roleBinding, roleModelChoices } from "../src/features/agent-nist/agent-nist.js";
 import type { AiProviderConfig } from "@yukinal/shared";
 
 /**
@@ -52,7 +53,57 @@ test("model resolution keeps enabled provider order, catalog labels and legacy f
   for (const id of [null, "deleted", "disabled"]) {
     const missing = resolveAgentModels(providers, id, "legacy:model");
     assert.equal(missing.selectedProvider, undefined);
+    assert.equal(missing.selectedModelKey, null);
     assert.equal(missing.selectedModelLabel, null);
   }
   assert.deepEqual(resolveAgentModels([], null, null).modelChoices, []);
+});
+
+const deepseek: AiProviderConfig = {
+  id: "deepseek", enabled: true, kind: "openai-compatible", label: "DeepSeek", model: "deepseek-chat",
+  baseUrl: "https://api.example.test/v1", createdAt: "", updatedAt: "",
+  models: [{ id: "deepseek-flash", label: "deepseek-flash", supportsStreaming: true, supportsToolCalling: true }],
+};
+
+test("a current model outside a refreshed catalog remains the same request, key and display without changing saved providers", () => {
+  const providers = [structuredClone(deepseek)];
+  const before = structuredClone(providers);
+  const modelOverride = "deepseek-chat";
+  const result = resolveAgentModels(providers, "deepseek", modelOverride);
+  assert.equal(result.selectedModelKey, "deepseek:deepseek-chat");
+  assert.equal(result.selectedModelLabel, "DeepSeek · deepseek-chat");
+  assert.equal(result.modelChoices.find((choice) => choice.key === result.selectedModelKey)?.model, modelOverride ?? result.selectedProvider?.model);
+  assert.deepEqual(result.modelChoices.map((choice) => choice.model), ["deepseek-flash", "deepseek-chat"]);
+  assert.deepEqual(providers, before, "the temporary current option must not write or mutate the provider catalog");
+});
+
+test("a null override displays the actual provider default rather than the first catalog item", () => {
+  const result = resolveAgentModels([deepseek], "deepseek", null);
+  assert.equal(result.selectedModelKey, "deepseek:deepseek-chat");
+  assert.equal(result.selectedModelLabel, "DeepSeek · deepseek-chat");
+  assert.equal(result.modelChoices.find((choice) => choice.key === result.selectedModelKey)?.model, result.selectedProvider?.model);
+  const known = resolveAgentModels([deepseek], "deepseek", "deepseek-flash");
+  assert.equal(known.modelChoices.length, 1, "an existing catalog item must not be duplicated");
+  assert.equal(known.selectedModelLabel, "DeepSeek · deepseek-flash");
+});
+
+test("transient overrides bind to the exact enabled provider and retain model IDs containing colons", () => {
+  const other = { ...deepseek, id: "other", label: "Other" };
+  const result = resolveAgentModels([deepseek, other], "other", "vendor/custom:rev2");
+  const selected = result.modelChoices.find((choice) => choice.key === result.selectedModelKey);
+  assert.equal(selected?.providerId, "other");
+  assert.equal(selected?.model, "vendor/custom:rev2");
+  assert.equal(result.selectedModelLabel, "Other · vendor/custom:rev2");
+  for (const id of ["deleted", "deepseek"]) {
+    const unavailable = resolveAgentModels([{ ...deepseek, enabled: false }, other], id, "old-model");
+    assert.equal(unavailable.selectedModelKey, null);
+    assert.equal(unavailable.modelChoices.some((choice) => choice.model === "old-model"), false);
+  }
+});
+
+test("a foreground current option does not broaden independent capability binding rules", () => {
+  const current = resolveAgentModels([deepseek], "deepseek", "deepseek-chat");
+  assert.ok(current.modelChoices.some((choice) => choice.model === "deepseek-chat"));
+  assert.equal(roleModelChoices(deepseek).some((choice) => choice.model === "deepseek-chat"), false);
+  assert.ok(roleBinding({ ...defaultAgentRoles()[0]!, providerId: "deepseek", model: "deepseek-chat" }, [deepseek]).reason);
 });

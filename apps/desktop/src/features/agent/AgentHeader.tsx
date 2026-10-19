@@ -101,21 +101,47 @@ export function AgentRunStatus({ running, runState, tokenUsage, contextUsage, ag
 }) {
   const label = runStateLabel(runState);
   const usageLabel = tokenUsage ? tokenUsage.reportedRequests === 0 ? "用量未上报" : `${tokenUsage.unreportedRequests ? "≥ " : ""}${(tokenUsage.inputTokens + tokenUsage.outputTokens).toLocaleString()} tokens` : "";
-  const usageMissing = tokenUsage?.unreportedRequests ? `；${tokenUsage.unreportedRequests} 次模型请求未上报用量` : "";
+  const lowerBound = tokenUsage?.unreportedRequests ? "≥ " : "";
   const statusLabel = preview ? "模拟数据 · 发送已停用" : label ?? (!shell ? "预览" : agentReady ? "已就绪" : "未启动");
   return <>
-    {compact ? <span className="agent-status is-icon" role="status" aria-label={statusLabel} title={statusLabel}><Icon name={preview ? "agent" : running ? "refresh" : agentReady ? "connect" : "disconnect"} size="sm" /></span> : running && label ? (
+    {compact ? <span className="agent-status is-icon" role="status" aria-label={statusLabel} title={statusLabel}><Icon name={preview ? "agent" : running ? "refresh" : agentReady ? "connect" : "disconnect"} size="sm" /></span> : !preview && running && label ? (
       <span className="agent-status agent-status-active" role="status"><span className="status-pulse" />{label}</span>
     ) : (
-      <span className={`agent-status ${agentReady ? "agent-status-ready" : "agent-status-idle"}`} data-idle={!runState || undefined} role="status">
-        {label ?? (!shell ? "预览" : agentReady ? "已就绪" : "未启动")}
+      <span className={`agent-status ${!preview && agentReady ? "agent-status-ready" : "agent-status-idle"}`} data-idle={!runState || undefined} role="status">
+        {statusLabel}
       </span>
     )}
-    {contextUsage ? <span className="agent-context-usage" title={`历史上下文：保留 ${contextUsage.includedTurns} / ${contextUsage.totalTurns} 条，已压缩 ${contextUsage.compactedTurns} 条；输入 ${(contextUsage.inputBytes / 1024).toFixed(1)} / ${(contextUsage.maxInputBytes / 1024).toFixed(0)} KiB${tokenUsage ? `；本次运行输入 ${tokenUsage.inputTokens.toLocaleString()}，输出 ${tokenUsage.outputTokens.toLocaleString()} tokens${usageMissing}` : ""}${contextUsage.memorySources?.length ? `；使用记忆：${contextUsage.memorySources.map((source) => source.title).join("、")}` : ""}`}>
-      {compact ? <Icon name="archive" size="xs" /> : <span className="agent-context-caption">上下文 </span>}<span>{contextUsage.includedTurns}/{contextUsage.totalTurns}</span>{!compact && contextUsage.compactedTurns ? <span className="agent-context-compacted"> · 已压缩</span> : null}
-    </span> : null}
-    {tokenUsage && !contextUsage ? <span className="agent-token-usage" title={`本次运行累计：输入 ${tokenUsage.inputTokens.toLocaleString()} tokens，输出 ${tokenUsage.outputTokens.toLocaleString()} tokens${usageMissing}`}>
-      {usageLabel}
-    </span> : null}
+    {contextUsage || tokenUsage ? <details className="agent-context-details" onKeyDown={(event) => {
+      if (event.key !== "Escape" || !event.currentTarget.open) return;
+      event.currentTarget.open = false;
+      event.currentTarget.querySelector("summary")?.focus();
+      event.stopPropagation();
+    }}>
+      <summary className={`agent-context-trigger ${contextUsage ? "agent-context-usage" : "agent-token-usage"}`} aria-label="查看上下文与用量">
+        {contextUsage ? <>
+          {compact ? <Icon name="archive" size="xs" /> : <span className="agent-context-caption">上下文 </span>}
+          <span>{contextUsage.includedTurns}/{contextUsage.totalTurns}</span>
+          {!compact && contextUsage.compactedTurns ? <span className="agent-context-compacted"> · 已压缩</span> : null}
+        </> : usageLabel}
+        <Icon name="chevronDown" size="xs" />
+      </summary>
+      <div className="agent-context-panel" tabIndex={0} role="region" aria-label="上下文与用量详情">
+        <strong>上下文与用量</strong>
+        <dl className="agent-context-facts">
+          {contextUsage ? <>
+            <div><dt>历史记录</dt><dd>保留 {contextUsage.includedTurns} / {contextUsage.totalTurns} 条</dd></div>
+            <div><dt>历史压缩</dt><dd>已压缩 {contextUsage.compactedTurns} 条</dd></div>
+            <div><dt>输入文本预算</dt><dd>{(contextUsage.inputBytes / 1024).toFixed(1)} / {(contextUsage.maxInputBytes / 1024).toFixed(0)} KiB</dd></div>
+          </> : null}
+          <div><dt>本次运行模型用量</dt><dd>{tokenUsage && tokenUsage.reportedRequests !== 0
+            ? <>输入 {lowerBound}{tokenUsage.inputTokens.toLocaleString()} tokens；输出 {lowerBound}{tokenUsage.outputTokens.toLocaleString()} tokens</>
+            : "模型用量尚未上报"}</dd></div>
+          {tokenUsage?.reportedRequests !== undefined ? <div><dt>已上报请求</dt><dd>{tokenUsage.reportedRequests} 次</dd></div> : null}
+          {tokenUsage?.unreportedRequests ? <div><dt>缺失用量</dt><dd>{tokenUsage.unreportedRequests} 次模型请求未上报用量，累计不含这些请求。</dd></div> : null}
+          {contextUsage?.memorySources?.length ? <div><dt>使用记忆</dt><dd>{contextUsage.memorySources.map((source) => source.title).join("、")}</dd></div> : null}
+        </dl>
+        <p className="agent-context-note">KiB 为文本大小；token 用量由模型上报。</p>
+      </div>
+    </details> : null}
   </>;
 }

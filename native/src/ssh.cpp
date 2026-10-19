@@ -39,6 +39,8 @@
 #endif
 
 #include "ssh_network.hpp"
+#include "ssh_credentials.hpp"
+#include "ssh_timeouts.hpp"
 #include "host_key.hpp"
 
 #include <libssh2.h>
@@ -260,7 +262,6 @@ struct Libssh2SessionContext {
   TerminalAuthContext* terminal_auth = nullptr;
 };
 
-std::string read_environment(const std::string& name);
 void wipe(std::string* value);
 std::string base64_encode(const std::vector<unsigned char>& bytes);
 
@@ -411,7 +412,7 @@ ProxyTunnelFailure establish_http_connect_tunnel(const TargetConfig& target, Soc
                         "\r\nProxy-Connection: Keep-Alive\r\n";
   std::string encoded_credential;
   if (!target.proxy_auth_env.empty()) {
-    std::string credential = read_environment(target.proxy_auth_env);
+    std::string credential = detail::read_ssh_credential(target.proxy_auth_env);
     if (credential.empty() || credential.size() > 1024) {
       wipe(&credential);
       return ProxyTunnelFailure::authentication;
@@ -612,7 +613,7 @@ ProxyTunnelFailure establish_socks5_tunnel(const TargetConfig& target, Socket so
   if (version != 5 || method == 0xff) return ProxyTunnelFailure::authentication;
   if (auth_required) {
     if (method != 2) return ProxyTunnelFailure::authentication;
-    std::string credential = read_environment(target.proxy_auth_env);
+    std::string credential = detail::read_ssh_credential(target.proxy_auth_env);
     const auto separator = credential.find(':');
     if (credential.empty() || credential.size() > 1024 || separator == std::string::npos ||
         separator == 0 || separator + 1 >= credential.size() || separator > 255 ||
@@ -816,10 +817,9 @@ bool set_session_timeout(LIBSSH2_SESSION* session, Clock::time_point deadline) {
   return true;
 }
 
-std::string read_environment(const std::string& name) {
-  if (name.empty()) return {};
-  const char* value = std::getenv(name.c_str());
-  return value ? value : "";
+bool session_timed_out(LIBSSH2_SESSION* session, Clock::time_point deadline) {
+  return remaining_ms(deadline) == 0 ||
+      libssh2_session_last_errno(session) == LIBSSH2_ERROR_TIMEOUT;
 }
 
 bool read_public_key_file(const std::string& path, std::string* public_key) {
@@ -896,6 +896,17 @@ ssize_t proxy_tls_write(libssh2_socket_t, const void* buffer, std::size_t length
 class SshResources {
  public:
   ~SshResources() {
+    if (bounded_metadata_cleanup_ && session_) {
+      // Metadata requests have already received their operation reply. Do not
+      // wait for another peer acknowledgement during cleanup, especially after
+      // a phase timed out; shutting down our socket makes libssh2 free locally.
+#ifdef _WIN32
+      if (socket_ != kInvalidSocket) shutdown(socket_, SD_BOTH);
+#else
+      if (socket_ != kInvalidSocket) shutdown(socket_, SHUT_RDWR);
+#endif
+      libssh2_session_set_blocking(session_, 0);
+    }
     if (agent_) {
       libssh2_agent_disconnect(agent_);
       libssh2_agent_free(agent_);
@@ -930,6 +941,7 @@ class SshResources {
     return true;
   }
 
+  bool bounded_metadata_cleanup_ = false;
   Socket socket_ = kInvalidSocket;
   SslPtr proxy_tls_{nullptr, SSL_free};
   Libssh2SessionContext session_context_;
@@ -1009,6 +1021,28 @@ int initialize_libssh2() {
   return result;
 }
 
+// This runs before user authentication, so libssh2's transport diagnostic
+// contains no SSH password or private key. Bound and sanitize it before returning
+// it to the desktop: remote disconnect descriptions are untrusted text.
+std::string handshake_failure_message(LIBSSH2_SESSION* session, int return_code,
+                                      std::string_view summary) {
+  char* raw = nullptr;
+  int raw_length = 0;
+  libssh2_session_last_error(session, &raw, &raw_length, 0);
+  std::string detail;
+  if (raw && raw_length > 0) {
+    const auto keep = std::min(raw_length, 256);
+    detail.reserve(static_cast<std::size_t>(keep));
+    for (int index = 0; index < keep; ++index) {
+      const auto byte = static_cast<unsigned char>(raw[index]);
+      detail.push_back(byte >= 0x20 && byte <= 0x7e ? static_cast<char>(byte) : ' ');
+    }
+    if (raw_length > keep) detail += "...";
+  }
+  return std::string(summary) + " (libssh2 " + std::to_string(return_code) +
+         (detail.empty() ? ")" : ": " + detail + ")");
+}
+
 struct TerminalInputQueue;
 
 struct TerminalAuthContext {
@@ -1023,7 +1057,13 @@ void terminal_keyboard_interactive_callback(
 
 bool connect_authenticated(const TargetConfig& target, Clock::time_point deadline,
                            SshResources* resources, ExecResult* result,
-                           TerminalAuthContext* terminal_auth = nullptr) {
+                           TerminalAuthContext* terminal_auth = nullptr,
+                           detail::SftpMetadataDeadline* metadata_deadline = nullptr) {
+  using Phase = detail::SftpMetadataDeadline::Phase;
+  if (metadata_deadline) {
+    resources->bounded_metadata_cleanup_ = true;
+    deadline = metadata_deadline->enter(Phase::host_key);
+  }
   if (initialize_libssh2() != 0) {
     fail(result, "ssh_unavailable", "SSH library initialization failed");
     return false;
@@ -1041,6 +1081,13 @@ bool connect_authenticated(const TargetConfig& target, Clock::time_point deadlin
     revocation_list = std::move(*loaded);
   }
 
+  if (metadata_deadline) {
+    if (remaining_ms(deadline) == 0) {
+      fail(result, "timeout", "SSH host-key preparation timed out");
+      return false;
+    }
+    deadline = metadata_deadline->enter(Phase::connection);
+  }
   SocketConnection connection = connect_socket(target, deadline);
   resources->socket_ = connection.socket;
   if (resources->socket_ == kInvalidSocket) {
@@ -1079,17 +1126,23 @@ bool connect_authenticated(const TargetConfig& target, Clock::time_point deadlin
     return false;
   }
   libssh2_session_set_blocking(resources->session_, 1);
+  if (metadata_deadline) deadline = metadata_deadline->enter(Phase::handshake);
   if (!set_session_timeout(resources->session_, deadline)) {
     fail(result, "timeout", "SSH connection timed out");
     return false;
   }
-  if (libssh2_session_handshake(resources->session_, static_cast<libssh2_socket_t>(resources->socket_)) != 0) {
-    const bool timed_out = remaining_ms(deadline) == 0 || libssh2_session_last_errno(resources->session_) == LIBSSH2_ERROR_TIMEOUT;
-    fail(result, timed_out ? "timeout" : "ssh_handshake_failed",
-         timed_out ? "SSH handshake timed out" : "SSH handshake failed");
+  const int handshake = libssh2_session_handshake(
+      resources->session_, static_cast<libssh2_socket_t>(resources->socket_));
+  if (handshake != 0) {
+    const bool timed_out = remaining_ms(deadline) == 0 ||
+                           libssh2_session_last_errno(resources->session_) == LIBSSH2_ERROR_TIMEOUT;
+    const auto message = timed_out ? std::string("SSH handshake timed out") :
+        handshake_failure_message(resources->session_, handshake, "SSH handshake failed");
+    fail(result, timed_out ? "timeout" : "ssh_handshake_failed", message.c_str());
     return false;
   }
 
+  if (metadata_deadline) deadline = metadata_deadline->enter(Phase::host_key);
   std::size_t host_key_length = 0;
   const char* host_key = libssh2_session_hostkey(resources->session_, &host_key_length, nullptr);
   const auto material = host_key
@@ -1147,6 +1200,13 @@ bool connect_authenticated(const TargetConfig& target, Clock::time_point deadlin
     }
   }
 
+  if (metadata_deadline) {
+    if (remaining_ms(deadline) == 0) {
+      fail(result, "timeout", "SSH host-key verification timed out");
+      return false;
+    }
+    deadline = metadata_deadline->enter(Phase::authentication);
+  }
   if (!set_session_timeout(resources->session_, deadline)) {
     fail(result, "timeout", "SSH authentication timed out");
     return false;
@@ -1202,9 +1262,9 @@ bool connect_authenticated(const TargetConfig& target, Clock::time_point deadlin
     if (authenticated) return true;
   }
   else if (!target.private_key_file.empty() || !target.private_key_env.empty()) {
-    std::string passphrase = read_environment(target.passphrase_env);
+    std::string passphrase = detail::read_ssh_credential(target.passphrase_env);
     if (!target.private_key_env.empty()) {
-      std::string private_key = read_environment(target.private_key_env);
+      std::string private_key = detail::read_ssh_credential(target.private_key_env);
       std::string public_key;
       if (private_key.empty()) {
         fail(result, "credential_unavailable", "The configured SSH private key is not available");
@@ -1233,7 +1293,7 @@ bool connect_authenticated(const TargetConfig& target, Clock::time_point deadlin
     }
     wipe(&passphrase);
   } else {
-    std::string password = read_environment(target.password_env);
+    std::string password = detail::read_ssh_credential(target.password_env);
     if (password.empty()) {
       fail(result, "credential_unavailable", "The configured SSH credential is not available");
       return false;
@@ -1271,20 +1331,27 @@ bool connect_authenticated(const TargetConfig& target, Clock::time_point deadlin
 }
 
 bool connect_sftp(const TargetConfig& target, Clock::time_point deadline,
-                  SshResources* resources, ExecResult* result) {
-  if (!connect_authenticated(target, deadline, resources, result)) return false;
+                  SshResources* resources, ExecResult* result,
+                  detail::SftpMetadataDeadline* metadata_deadline = nullptr) {
+  if (!connect_authenticated(target, deadline, resources, result, nullptr, metadata_deadline)) return false;
+  if (metadata_deadline) deadline = metadata_deadline->enter(detail::SftpMetadataDeadline::Phase::startup);
   if (!set_session_timeout(resources->session_, deadline)) {
     fail(result, "timeout", "SFTP initialization timed out");
     return false;
   }
   resources->sftp_ = libssh2_sftp_init(resources->session_);
   if (!resources->sftp_) {
-    const bool timed_out = remaining_ms(deadline) == 0;
+    const bool timed_out = session_timed_out(resources->session_, deadline);
     fail(result, timed_out ? "timeout" : "sftp_error",
          timed_out ? "SFTP initialization timed out" : "Could not initialize SFTP");
     return false;
   }
   return true;
+}
+
+void annotate_metadata_connection_failure(ExecResult* result,
+                                          const detail::SftpMetadataDeadline& budget) {
+  result->error_message = std::string("SFTP ") + budget.phase_label() + "阶段：" + result->error_message;
 }
 
 std::string base64_encode(const std::vector<unsigned char>& bytes) {
@@ -2396,14 +2463,55 @@ ExecResult package_install(const TargetConfig& target, const std::string& manage
   return run_ssh_command_with_timeout_limit(target, command, timeout_seconds, 600);
 }
 
+static std::string bounded_inventory_source_command(const std::string& probe,
+                                                    const std::string& source,
+                                                    int maximum_lines) {
+  // The final status record belongs to the shell, not the command's output. Do
+  // not publish a failed candidate's rows or hide its failure behind a pipe.
+  // C locale makes length() count bytes; retain whole lines so UTF-8 is intact.
+  // Leave room below the SSH core's 64 KiB limit for protocol records.
+  static constexpr char limiter[] = R"YK_AWK(
+function keep(line, size) {
+  if (line == "") return;
+  if (line ~ /^__YUKINAL_(SOURCE|TRUNCATED|STATUS)__=/) {
+    partial = 1;
+    return;
+  }
+  size = length(line) + 1;
+  if (count >= maximum_lines || bytes + size > 61440) {
+    partial = 1;
+    return;
+  }
+  rows[++count] = line;
+  bytes += size;
+}
+NR > 1 { keep(previous); }
+{ previous = $0; }
+END {
+  if (previous != "__YUKINAL_STATUS__=0") exit 1;
+  for (row_index = 1; row_index <= count; row_index++) print rows[row_index];
+  printf "__YUKINAL_SOURCE__=%s\n", source;
+  if (partial) print "__YUKINAL_TRUNCATED__=1";
+}
+)YK_AWK";
+  return "{ " + probe +
+         "; yk_inventory_status=$?; printf '\\n__YUKINAL_STATUS__=%s\\n' \"$yk_inventory_status\"; } | "
+         "LC_ALL=C awk -v maximum_lines=" + std::to_string(maximum_lines) +
+         " -v source=" + source + " '" + limiter + "'";
+}
+
 ExecResult service_inventory(const TargetConfig& target, int timeout_seconds) {
-  static constexpr char command[] =
-      "if command -v systemctl >/dev/null 2>&1; then "
-      "systemctl list-units --type=service --all --no-legend --no-pager --plain 2>/dev/null; "
-      "if [ $? -eq 0 ]; then printf '\\n__YUKINAL_SOURCE__=systemd\\n'; exit 0; fi; fi; "
-      "if command -v docker >/dev/null 2>&1; then "
-      "docker ps -a --format '{{.Names}}\\t{{.State}}\\t{{.Status}}\\t{{.Image}}' 2>/dev/null; "
-      "if [ $? -eq 0 ]; then printf '\\n__YUKINAL_SOURCE__=docker\\n'; exit 0; fi; fi; "
+  const std::string command =
+      "if command -v systemctl >/dev/null 2>&1; then " +
+      bounded_inventory_source_command(
+          "systemctl list-units --type=service --all --no-legend --no-pager --plain 2>/dev/null",
+          "systemd", 200) +
+      "; if [ $? -eq 0 ]; then exit 0; fi; fi; "
+      "if command -v docker >/dev/null 2>&1; then " +
+      bounded_inventory_source_command(
+          "docker ps -a --format '{{.Names}}\\t{{.State}}\\t{{.Status}}\\t{{.Image}}' 2>/dev/null",
+          "docker", 200) +
+      "; if [ $? -eq 0 ]; then exit 0; fi; fi; "
       "printf '__YUKINAL_SOURCE__=unavailable\\n'";
   return run_ssh_command(target, command, timeout_seconds);
 }
@@ -2417,18 +2525,22 @@ ExecResult server_logs(const TargetConfig& target,
     fail(&result, "invalid_parameters", "The bounded server log parameters are invalid");
     return result;
   }
+  std::string journal_probe = "journalctl -n 100 --no-pager -o short-iso";
+  if (since_seconds) journal_probe += " --since '-" + std::to_string(*since_seconds) + " seconds'";
+  if (!unit.empty()) journal_probe += " --unit '" + unit + "'";
+  journal_probe += " 2>/dev/null";
   std::string command =
-      "if command -v journalctl >/dev/null 2>&1; then journalctl -n 500 --no-pager -o short-iso";
-  if (since_seconds) command += " --since '-" + std::to_string(*since_seconds) + " seconds'";
-  if (!unit.empty()) command += " --unit '" + unit + "'";
-  command +=
-      " 2>/dev/null; if [ $? -eq 0 ]; then printf '\\n__YUKINAL_SOURCE__=journalctl\\n'; exit 0; fi; fi; ";
+      "if command -v journalctl >/dev/null 2>&1; then " +
+      bounded_inventory_source_command(journal_probe, "journalctl", 100) +
+      "; if [ $? -eq 0 ]; then exit 0; fi; fi; ";
   if (!since_seconds && unit.empty()) {
-    command +=
-        "for file in /var/log/syslog /var/log/messages; do if [ -r \"$file\" ]; then "
-        "tail -n 500 \"$file\"; if [ $? -eq 0 ]; then case \"$file\" in "
-        "/var/log/syslog) printf '\\n__YUKINAL_SOURCE__=syslog\\n' ;; "
-        "/var/log/messages) printf '\\n__YUKINAL_SOURCE__=messages\\n' ;; esac; exit 0; fi; fi; done; ";
+    for (const auto& [file, source] : {
+             std::pair{"/var/log/syslog", "syslog"},
+             std::pair{"/var/log/messages", "messages"}}) {
+      command += "if [ -r " + std::string(file) + " ]; then " +
+                 bounded_inventory_source_command("tail -n 100 " + std::string(file), source, 100) +
+                 "; if [ $? -eq 0 ]; then exit 0; fi; fi; ";
+    }
   }
   command += "printf '__YUKINAL_SOURCE__=unavailable\\n'";
   return run_ssh_command(target, command, timeout_seconds);
@@ -2492,11 +2604,14 @@ ExecResult host_key_probe(const TargetConfig& target, int timeout_seconds) {
     fail(&result, "timeout", "SSH host-key probe timed out");
     return result;
   }
-  if (libssh2_session_handshake(resources.session_, static_cast<libssh2_socket_t>(resources.socket_)) != 0) {
+  const int handshake = libssh2_session_handshake(
+      resources.session_, static_cast<libssh2_socket_t>(resources.socket_));
+  if (handshake != 0) {
     const bool timed_out = remaining_ms(deadline) == 0 ||
                            libssh2_session_last_errno(resources.session_) == LIBSSH2_ERROR_TIMEOUT;
-    fail(&result, timed_out ? "timeout" : "ssh_handshake_failed",
-         timed_out ? "SSH host-key probe timed out" : "SSH host-key handshake failed");
+    const auto message = timed_out ? std::string("SSH host-key probe timed out") :
+        handshake_failure_message(resources.session_, handshake, "SSH host-key handshake failed");
+    fail(&result, timed_out ? "timeout" : "ssh_handshake_failed", message.c_str());
     return result;
   }
 
@@ -2528,14 +2643,22 @@ ExecResult sftp_list(const TargetConfig& target, const std::string& path, int ti
     return result;
   }
 
-  const auto deadline = started + std::chrono::seconds(timeout_seconds);
+  detail::SftpMetadataDeadline budget(started, std::chrono::seconds(timeout_seconds));
   SshResources resources;
-  if (!connect_sftp(target, deadline, &resources, &result)) return result;
+  if (!connect_sftp(target, budget.overall(), &resources, &result, &budget)) {
+    annotate_metadata_connection_failure(&result, budget);
+    return result;
+  }
+  const auto deadline = budget.enter(detail::SftpMetadataDeadline::Phase::operation);
+  if (!set_session_timeout(resources.session_, deadline)) {
+    fail(&result, "timeout", "SFTP directory listing timed out");
+    return result;
+  }
   resources.sftp_handle_ = libssh2_sftp_open_ex(
       resources.sftp_, path.data(), static_cast<unsigned int>(path.size()), 0, 0,
       LIBSSH2_SFTP_OPENDIR);
   if (!resources.sftp_handle_) {
-    const bool timed_out = remaining_ms(deadline) == 0;
+    const bool timed_out = session_timed_out(resources.session_, deadline);
     fail(&result, timed_out ? "timeout" : "sftp_error",
          timed_out ? "SFTP directory listing timed out" : "Could not open the remote directory");
     return result;
@@ -2554,7 +2677,7 @@ ExecResult sftp_list(const TargetConfig& target, const std::string& path, int ti
                                                &attributes);
     if (count == 0) break;
     if (count < 0) {
-      const bool timed_out = remaining_ms(deadline) == 0;
+      const bool timed_out = session_timed_out(resources.session_, deadline);
       fail(&result, timed_out ? "timeout" : "sftp_error",
            timed_out ? "SFTP directory listing timed out" : "Could not read the remote directory");
       return result;
@@ -2599,9 +2722,13 @@ static ExecResult sftp_stat_impl(const TargetConfig& target, const std::string& 
     fail(&result, "invalid_parameters", "The SFTP metadata request parameters are invalid");
     return result;
   }
-  const auto deadline = started + std::chrono::seconds(timeout_seconds);
+  detail::SftpMetadataDeadline budget(started, std::chrono::seconds(timeout_seconds));
   SshResources resources;
-  if (!connect_sftp(target, deadline, &resources, &result)) return result;
+  if (!connect_sftp(target, budget.overall(), &resources, &result, &budget)) {
+    annotate_metadata_connection_failure(&result, budget);
+    return result;
+  }
+  const auto deadline = budget.enter(detail::SftpMetadataDeadline::Phase::operation);
   if (!set_session_timeout(resources.session_, deadline)) {
     fail(&result, "timeout", "SFTP metadata request timed out");
     return result;
@@ -2610,15 +2737,15 @@ static ExecResult sftp_stat_impl(const TargetConfig& target, const std::string& 
   LIBSSH2_SFTP_ATTRIBUTES attributes{};
   if (libssh2_sftp_stat_ex(resources.sftp_, path.data(), static_cast<unsigned int>(path.size()),
                            LIBSSH2_SFTP_LSTAT, &attributes) != 0) {
+    const bool timed_out = session_timed_out(resources.session_, deadline);
     const unsigned long sftp_error = libssh2_sftp_last_error(resources.sftp_);
-    if (optional && (sftp_error == LIBSSH2_FX_NO_SUCH_FILE ||
+    if (!timed_out && optional && (sftp_error == LIBSSH2_FX_NO_SUCH_FILE ||
                      sftp_error == LIBSSH2_FX_NO_SUCH_PATH)) {
       result.stdout_text = "{\"exists\":false}";
       result.exit_code = 0;
       result.completed = true;
       return result;
     }
-    const bool timed_out = remaining_ms(deadline) == 0;
     fail(&result, timed_out ? "timeout" : "sftp_error",
          timed_out ? "SFTP metadata request timed out" : "Could not read remote path metadata");
     return result;
@@ -2667,16 +2794,20 @@ ExecResult sftp_create_dir(const TargetConfig& target, const std::string& path,
     return result;
   }
 
-  const auto deadline = started + std::chrono::seconds(timeout_seconds);
+  detail::SftpMetadataDeadline budget(started, std::chrono::seconds(timeout_seconds));
   SshResources resources;
-  if (!connect_sftp(target, deadline, &resources, &result)) return result;
+  if (!connect_sftp(target, budget.overall(), &resources, &result, &budget)) {
+    annotate_metadata_connection_failure(&result, budget);
+    return result;
+  }
+  const auto deadline = budget.enter(detail::SftpMetadataDeadline::Phase::operation);
   if (!set_session_timeout(resources.session_, deadline)) {
     fail(&result, "timeout", "SFTP directory creation timed out");
     return result;
   }
   if (libssh2_sftp_mkdir_ex(resources.sftp_, path.data(),
                             static_cast<unsigned int>(path.size()), 0755) != 0) {
-    const bool timed_out = remaining_ms(deadline) == 0;
+    const bool timed_out = session_timed_out(resources.session_, deadline);
     fail(&result, timed_out ? "timeout" : "sftp_error",
          timed_out ? "SFTP directory creation timed out" : "Could not create the remote directory");
     return result;
@@ -3271,15 +3402,19 @@ ExecResult sftp_remove_file(const TargetConfig& target, const std::string& path,
     fail(&result, "invalid_parameters", "The SFTP file removal parameters are invalid");
     return result;
   }
-  const auto deadline = started + std::chrono::seconds(timeout_seconds);
+  detail::SftpMetadataDeadline budget(started, std::chrono::seconds(timeout_seconds));
   SshResources resources;
-  if (!connect_sftp(target, deadline, &resources, &result)) return result;
+  if (!connect_sftp(target, budget.overall(), &resources, &result, &budget)) {
+    annotate_metadata_connection_failure(&result, budget);
+    return result;
+  }
+  const auto deadline = budget.enter(detail::SftpMetadataDeadline::Phase::operation);
   if (!set_session_timeout(resources.session_, deadline)) {
     fail(&result, "timeout", "SFTP file removal timed out");
     return result;
   }
   if (libssh2_sftp_unlink_ex(resources.sftp_, path.data(), static_cast<unsigned int>(path.size())) != 0) {
-    const bool timed_out = remaining_ms(deadline) == 0;
+    const bool timed_out = session_timed_out(resources.session_, deadline);
     fail(&result, timed_out ? "timeout" : "sftp_error",
          timed_out ? "SFTP file removal timed out" : "Could not remove the remote file");
     return result;
@@ -3438,12 +3573,20 @@ ExecResult sftp_publish_no_replace(const TargetConfig& target, const std::string
     return result;
   }
 
-  const auto deadline = started + std::chrono::seconds(timeout_seconds);
+  detail::SftpMetadataDeadline budget(started, std::chrono::seconds(timeout_seconds));
   SshResources resources;
-  if (!connect_authenticated(target, deadline, &resources, &result)) return result;
+  if (!connect_authenticated(target, budget.overall(), &resources, &result, nullptr, &budget)) {
+    annotate_metadata_connection_failure(&result, budget);
+    return result;
+  }
+  auto deadline = budget.enter(detail::SftpMetadataDeadline::Phase::startup);
+  if (!set_session_timeout(resources.session_, deadline)) {
+    fail(&result, "timeout", "Starting the SFTP publication timed out");
+    return result;
+  }
   resources.channel_ = libssh2_channel_open_session(resources.session_);
   if (!resources.channel_) {
-    const bool timed_out = remaining_ms(deadline) == 0;
+    const bool timed_out = session_timed_out(resources.session_, deadline);
     fail(&result, timed_out ? "timeout" : "sftp_error",
          timed_out ? "Starting the SFTP publication timed out"
                    : "Could not open the SFTP publication channel");
@@ -3451,7 +3594,7 @@ ExecResult sftp_publish_no_replace(const TargetConfig& target, const std::string
   }
   if (!set_session_timeout(resources.session_, deadline) ||
       libssh2_channel_process_startup(resources.channel_, "subsystem", 9, "sftp", 4) != 0) {
-    const bool timed_out = remaining_ms(deadline) == 0;
+    const bool timed_out = session_timed_out(resources.session_, deadline);
     fail(&result, timed_out ? "timeout" : "sftp_error",
          timed_out ? "Starting the SFTP publication timed out"
                    : "Could not start the SFTP subsystem for publication");
@@ -3470,7 +3613,7 @@ ExecResult sftp_publish_no_replace(const TargetConfig& target, const std::string
   append_sftp_u32(&init_frame, static_cast<std::uint32_t>(init_body.size()));
   init_frame.insert(init_frame.end(), init_body.begin(), init_body.end());
   if (!write_sftp_channel(&resources, init_frame, deadline)) {
-    const bool timed_out = remaining_ms(deadline) == 0;
+    const bool timed_out = session_timed_out(resources.session_, deadline);
     fail(&result, timed_out ? "timeout" : "sftp_error",
          timed_out ? "Negotiating the SFTP publication timed out"
                    : "Could not initialize the SFTP publication channel");
@@ -3479,7 +3622,7 @@ ExecResult sftp_publish_no_replace(const TargetConfig& target, const std::string
 
   std::vector<unsigned char> packet;
   if (!read_sftp_channel_packet(&resources, &packet, deadline)) {
-    const bool timed_out = remaining_ms(deadline) == 0;
+    const bool timed_out = session_timed_out(resources.session_, deadline);
     fail(&result, timed_out ? "timeout" : "sftp_error",
          timed_out ? "Negotiating the SFTP publication timed out"
                    : "The SFTP server returned an invalid version packet");
@@ -3507,6 +3650,7 @@ ExecResult sftp_publish_no_replace(const TargetConfig& target, const std::string
     return result;
   }
 
+  deadline = budget.enter(detail::SftpMetadataDeadline::Phase::operation);
   std::vector<unsigned char> request_body{200};  // SSH_FXP_EXTENDED
   append_sftp_u32(&request_body, 1);
   append_sftp_string(&request_body, "hardlink@openssh.com");
@@ -3517,7 +3661,7 @@ ExecResult sftp_publish_no_replace(const TargetConfig& target, const std::string
   request_frame.insert(request_frame.end(), request_body.begin(), request_body.end());
   if (!write_sftp_channel(&resources, request_frame, deadline) ||
       !read_sftp_channel_packet(&resources, &packet, deadline)) {
-    const bool timed_out = remaining_ms(deadline) == 0;
+    const bool timed_out = session_timed_out(resources.session_, deadline);
     fail(&result, timed_out ? "timeout" : "sftp_error",
          timed_out ? "Publishing the remote file timed out"
                    : "The SFTP server did not confirm file publication");

@@ -1,0 +1,80 @@
+/* Reply-owned summaries stay quiet and distinct from approval/runtime surfaces. */
+.conversation-widgets {
+  min-width: 0;
+  margin-block: 8px;
+  padding: 8px 11px;
+  border: 1px solid var(--edge-normal);
+  border-radius: var(--radius-card);
+  color: var(--text);
+  font-size: var(--text-label);
+  line-height: 1.55;
+  overflow-wrap: anywhere;
+}
+.conversation-widgets.is-entering { animation: conversation-widget-enter var(--motion-fast, 160ms) var(--motion-ease, ease) both; }
+.conversation-widgets-caption {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 4px 12px;
+  margin-bottom: 5px;
+  color: var(--faint);
+  font-size: var(--text-caption);
+}
+.conversation-widgets-caption > span:first-child { display: inline-flex; align-items: center; gap: 5px; }
+.conversation-widgets-streaming { margin-inline-start: auto; }
+.conversation-widgets-content, .conversation-widget { min-width: 0; }
+.conversation-widget { padding-block: 7px; }
+.conversation-widget + .conversation-widget { border-top: 1px solid var(--edge-normal); }
+.conversation-widget h4 { margin: 0; color: var(--text); font: inherit; font-weight: 600; }
+.conversation-widget-body { margin: 5px 0 0; color: var(--muted); white-space: pre-wrap; overflow-wrap: anywhere; }
+.conversation-widget-note { margin: 4px 0 0; color: var(--faint); font-size: var(--text-caption); }
+.conversation-widget-card[data-tone="info"] > h4 { color: var(--accent-strong); }
+.conversation-widget-card[data-tone="success"] > h4 { color: var(--success); }
+.conversation-widget-card[data-tone="warning"] > h4 { color: var(--warning); }
+.conversation-widget-card[data-tone="error"] > h4 { color: var(--danger); }
+
+.conversation-widget-step-list { display: grid; gap: 0; min-width: 0; margin: 7px 0 0; padding: 0; list-style: none; }
+.conversation-widget-step-list > li { position: relative; display: grid; grid-template-columns: 14px minmax(0, 1fr); gap: 8px; padding-bottom: 8px; }
+.conversation-widget-step-list > li:last-child { padding-bottom: 0; }
+.conversation-widget-step-list > li:not(:last-child)::after { content: ""; position: absolute; inset-inline-start: 6px; top: 19px; bottom: 2px; border-inline-start: 1px solid var(--edge-normal); }
+.conversation-widget-step-mark { display: inline-flex; justify-content: center; margin-top: 4px; color: var(--faint); }
+.conversation-widget-step-list > li[data-step-status="done"] .conversation-widget-step-mark { color: var(--success); }
+.conversation-widget-step-list > li[data-step-status="error"] .conversation-widget-step-mark { color: var(--danger); }
+.conversation-widget-step-copy { min-width: 0; }
+.conversation-widget-step-heading { display: flex; flex-wrap: wrap; align-items: baseline; gap: 2px 10px; }
+.conversation-widget-step-heading > strong { min-width: 0; font-weight: 500; }
+.conversation-widget-step-heading > span { color: var(--faint); font-size: var(--text-caption); }
+.conversation-widget-step-copy .conversation-widget-body { margin-top: 2px; font-size: var(--text-caption); }
+
+.conversation-widget-metric-list { display: grid; grid-template-columns: repeat(auto-fit, minmax(min(100%, 9rem), 1fr)); gap: 10px 16px; min-width: 0; margin: 7px 0 0; }
+.conversation-widget-metric-list > div { min-width: 0; }
+.conversation-widget-metric-list dt { color: var(--faint); font-size: var(--text-caption); }
+.conversation-widget-metric-list dd { min-width: 0; margin: 2px 0 0; font-variant-numeric: tabular-nums; }
+.conversation-widget-metric-value { font-size: var(--text-body); font-weight: 500; }
+.conversation-widget-metric-list small { margin-inline-start: 5px; color: var(--muted); font-size: var(--text-caption); }
+.conversation-widget-metric-trend { max-width: 180px; }
+.conversation-widget-sparkline { display: block; width: 100%; height: 28px; margin-top: 5px; color: var(--accent-strong); overflow: hidden; }
+.conversation-widget-sparkline polyline { fill: none; stroke: currentColor; stroke-width: 1.5; stroke-linecap: round; stroke-linejoin: round; }
+
+.conversation-widget-progress-heading { display: flex; flex-wrap: wrap; justify-content: space-between; align-items: baseline; gap: 2px 12px; }
+.conversation-widget-progress-heading > span { color: var(--faint); font-size: var(--text-caption); font-variant-numeric: tabular-nums; }
+.conversation-widget-progress progress { display: block; width: 100%; height: 5px; margin-block: 8px; border: 0; border-radius: var(--radius-pill); background: var(--surface-2); accent-color: var(--accent-strong); }
+.conversation-widget-progress progress::-webkit-progress-bar { border-radius: var(--radius-pill); background: var(--surface-2); }
+.conversation-widget-progress progress::-webkit-progress-value { border-radius: var(--radius-pill); background: var(--accent-strong); }
+.conversation-widget-progress progress::-moz-progress-bar { border-radius: var(--radius-pill); background: var(--accent-strong); }
+
+.conversation-widget-details > summary { display: flex; align-items: baseline; gap: 6px; min-height: 28px; list-style: none; cursor: pointer; font-weight: 500; }
+.conversation-widget-details > summary::-webkit-details-marker { display: none; }
+.conversation-widget-details > summary > .icon { flex: 0 0 auto; align-self: center; color: var(--faint); }
+.conversation-widget-details > summary > span { min-width: 0; }
+.conversation-widget-details > summary:focus-visible { outline: var(--focus-width) solid var(--focus-line); outline-offset: var(--focus-offset); border-radius: var(--radius-detail); }
+.conversation-widget-details[open] > summary > .icon { transform: rotate(90deg); }
+.conversation-widget-details[open] > .conversation-widget-disclosure { animation: conversation-widget-enter var(--motion-fast, 160ms) var(--motion-ease, ease) both; }
+.conversation-widget-disclosure { min-width: 0; padding-inline-start: 20px; }
+@keyframes conversation-widget-enter {
+  from { opacity: 0; transform: translateY(3px); }
+  to { opacity: 1; transform: translateY(0); }
+}
+@media (prefers-reduced-motion: reduce) {
+  .conversation-widgets.is-entering, .conversation-widget-details[open] > .conversation-widget-disclosure { animation: none; }
+}

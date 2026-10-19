@@ -18,12 +18,15 @@ import type {
 } from "@yukinal/shared";
 import { memo } from "react";
 
+import { CopyButton } from "../../components/CopyButton.js";
 import { Icon } from "../../components/Icon.js";
 import { KeywordText } from "../../components/KeywordText.js";
 import { MarkdownText } from "../../components/MarkdownText.js";
+import { conversationReplyCopyText } from "../../lib/conversation-reply-copy.js";
 import { approvalSourceLabel, decisionLabel, resultLabel, riskLabel } from "../../lib/labels.js";
 import { imageAttachmentUrl } from "./image-attachments.js";
-import { targetLabel, type Entry } from "./transcript.js";
+import { ApprovalCard } from "./ApprovalCard.js";
+import type { Entry } from "./transcript.js";
 
 export const AgentEntryView = memo(function AgentEntryView({
   entry,
@@ -31,6 +34,7 @@ export const AgentEntryView = memo(function AgentEntryView({
   approvalBusy,
   approvalStatus,
   streaming = false,
+  isNewEntry = false,
 }: {
   entry: Entry;
   onApproval: (approval: ApprovalRequest, decision: ApprovalDecision) => Promise<void>;
@@ -38,14 +42,17 @@ export const AgentEntryView = memo(function AgentEntryView({
   approvalStatus?: string;
   /** True while this row is the one the model is still writing into. */
   streaming?: boolean;
+  /** A newly appended live row; history loading and approvals never animate. */
+  isNewEntry?: boolean;
 }) {
+  const newEntryClass = isNewEntry ? " is-new-entry" : "";
   switch (entry.kind) {
     /* 你与 Agent 的正文是动态里**唯一**能拖动选中的东西（见 styles.css 的
        `.agent-entry-body`）：标签、工具卡片、审批按钮都不参与选择，一次拖动
        得到的就是要说的话本身，而不是「你 / Agent」这些框。 */
     case "user":
       return (
-        <div className="agent-entry agent-entry-user">
+        <div className={`agent-entry agent-entry-user${newEntryClass}`}>
           <span className="entry-label">你</span>
           <div className="agent-entry-body">
             {entry.attachments?.some((attachment) => attachment.type === "image") ? (
@@ -109,84 +116,58 @@ export const AgentEntryView = memo(function AgentEntryView({
       );
     case "assistant":
       return (
-        <div className={`agent-entry agent-entry-assistant${streaming ? " agent-entry-streaming" : ""}`}>
+        <div className={`agent-entry agent-entry-assistant${streaming ? " agent-entry-streaming" : ""}${newEntryClass}`}>
           <span className="entry-label">回复</span>
           <div className="agent-reply-meta">
             <strong>{entry.participant?.label ?? "Agent"}</strong>
             {entry.participant?.kind === "subagent" ? <span>子 Agent</span> : null}
             {entry.model ? <span title={entry.model}>{entry.model}</span> : null}
           </div>
-          <MarkdownText text={entry.text || "…"} className="agent-entry-body agent-markdown" />
+          <MarkdownText text={entry.text || "…"} className="agent-entry-body agent-markdown" streaming={streaming} />
+          {streaming ? <span className="agent-stream-status" role="status"><span className="agent-stream-caret" aria-hidden="true" />正在输出</span> : null}
+          {entry.text ? <div className="agent-reply-actions">
+            <CopyButton text={conversationReplyCopyText(entry.text)} label={streaming ? "复制当前内容" : "复制回答"} ariaLabel={streaming ? "复制当前已生成内容" : "复制完整回答"} className="agent-entry-copy" />
+          </div> : null}
         </div>
       );
     case "reasoning":
       return (
-        <details className="agent-reasoning">
-          <summary className="agent-reasoning-summary">思考过程</summary>
+        <details className={`agent-reasoning${newEntryClass}`} aria-busy={streaming || undefined}>
+          <summary className="agent-reasoning-summary">
+            <span className="agent-reasoning-indicator" aria-hidden="true" />
+            <span className="agent-reasoning-caption">{streaming ? "正在思考" : "思考过程"}</span>
+            <span className="agent-reasoning-count">{Array.from(entry.text).length.toLocaleString()} 字符</span>
+          </summary>
           <pre className="agent-reasoning-text">{entry.text}</pre>
         </details>
       );
     case "tool":
-      return <ToolCard entry={entry} />;
+      return <ToolCard entry={entry} isNewEntry={isNewEntry} />;
     /* 应用自己的话，不是模型输出 —— 因此用中性样式并标注来源，
        避免读者把 /help 的回复当成 Agent 说过的话。 */
     case "system":
       return (
-        <div className="agent-entry agent-entry-system">
+        <div className={`agent-entry agent-entry-system${newEntryClass}`}>
           <span className="entry-label">本机</span>
           <pre className="agent-entry-system-text">{entry.text}</pre>
         </div>
       );
     case "error":
-      return <div className="agent-error">{entry.text}</div>;
+      return <div className={`agent-error${newEntryClass}`}>{entry.text}</div>;
     case "approval":
-      return (
-        <div className="approval-card">
-          <div className="approval-heading">
-            <span className="approval-icon"><Icon name="warning" size="sm" /></span>
-            <div><strong>需要审批</strong><code><KeywordText text={entry.approval.toolName} /></code></div>
-          </div>
-          <p>{entry.approval.reason}</p>
-          <p className="approval-target">{targetLabel(entry.approval.target)}</p>
-          {entry.approval.sessionGrantable === false ? (
-            <p className="approval-note">此操作每次都需要单独批准，不能记住到本次运行。</p>
-          ) : null}
-          {approvalStatus ? (
-            <p className="approval-resolved" role="status">{approvalStatus}</p>
-          ) : (
-            <div className="approval-actions">
-              <button type="button" className="approval-button approval-button-reject" disabled={approvalBusy} onClick={() => void onApproval(entry.approval, "reject")}>
-                拒绝
-              </button>
-              <button type="button" className="approval-button approval-button-approve" disabled={approvalBusy} onClick={() => void onApproval(entry.approval, "approve_once")}>
-                批准一次
-              </button>
-              {entry.approval.sessionGrantable !== false ? (
-                <button type="button" className="approval-button approval-button-approve" disabled={approvalBusy} onClick={() => void onApproval(entry.approval, "approve_session")}>
-                  本次运行批准
-                </button>
-              ) : null}
-            </div>
-          )}
-        </div>
-      );
+      return <ApprovalCard approval={entry.approval} onApproval={onApproval} busy={approvalBusy} status={approvalStatus} />;
   }
 });
 
-/**
- * 一次工具调用 —— 调用与结果合成一张卡片。
- *
- * 默认展开而不是默认折叠：这个面板的存在意义就是可追溯，把结果藏进
- * 一次点击后面等于让审计变难。`open` 只在首次挂载时写入，之后用户手动
- * 折叠不会被后续事件重渲染强行掰开（React 仅在属性值变化时才改 DOM）。
- */
-function ToolCard({ entry }: { entry: Extract<Entry, { kind: "tool" }> }) {
+/** One collapsible row keeps the actual call, status and result together. */
+function ToolCard({ entry, isNewEntry = false }: { entry: Extract<Entry, { kind: "tool" }>; isNewEntry?: boolean }) {
   const { result } = entry;
   return (
-    <details className={`tool-card tool-card-${result ? result.status : "running"}`} open>
+    <details className={`tool-card tool-card-${result ? result.status : "running"}${isNewEntry ? " is-new-entry" : ""}`}>
       <summary className="tool-card-heading">
         <span className="tool-card-label">工具</span>
         <span className="tool-name"><KeywordText text={entry.toolName} /></span>
+        <span className="tool-target-preview" title={entry.target}>{entry.target}</span>
         <span className={`tool-status tool-status-${result ? result.status : "running"}`}>
           {result ? `${resultLabel(result.status)} · ${result.durationMs}ms` : "执行中…"}
         </span>

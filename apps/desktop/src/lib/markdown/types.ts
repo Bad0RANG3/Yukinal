@@ -26,10 +26,15 @@ export type ListItem = {
   blocks: Block[];
 };
 
+export interface MarkdownParseOptions {
+  /** Preserve code source for copying without changing normalized display text. */
+  preserveCodeSource?: boolean;
+}
+
 export type Block =
   | { kind: "heading"; level: number; content: Inline[] }
   | { kind: "paragraph"; content: Inline[] }
-  | { kind: "code"; language: string | null; text: string }
+  | { kind: "code"; language: string | null; text: string; copyText?: string }
   | {
       kind: "list";
       ordered: boolean;

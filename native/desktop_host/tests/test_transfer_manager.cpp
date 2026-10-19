@@ -11,6 +11,7 @@
 #include <algorithm>
 #include <atomic>
 #include <chrono>
+#include <condition_variable>
 #include <cstdint>
 #include <cstring>
 #include <filesystem>
@@ -411,6 +412,10 @@ class FakeHistoryStore : public TransferHistoryStore {
     std::lock_guard<std::mutex> lock(mutex_);
     rows_[snapshot.transfer_id] = snapshot;
     staging_[snapshot.transfer_id] = staging;
+  }
+  void set_fail_insert(bool value) {
+    std::lock_guard<std::mutex> lock(mutex_);
+    fail_insert_ = value;
   }
   void set_fail_terminal(bool value) {
     std::lock_guard<std::mutex> lock(mutex_);
@@ -1577,6 +1582,199 @@ void run_ipc_router_remote_drag_start_checks() {
   check(upload_after_drop.ok, "a dropped handle should be usable by file_transfer_upload");
 }
 
+void run_bounded_admission_checks() {
+  TemporaryDirectory temporary;
+  auto backend = std::make_shared<FakeBackend>();
+  backend->add_directory("/srv");
+  backend->add_file("/srv/held.txt", "existing");
+  const auto source = temporary.path / "held.txt";
+  write_file(source, "new");
+  auto history = std::make_shared<FakeHistoryStore>();
+  TransferManager manager = TransferManager::with_history(backend, history);
+  const auto capacity = TransferManager::kMaxParallelTransfers + TransferManager::kMaxPendingTransfers;
+  std::vector<std::string> ids;
+  for (std::size_t index = 0; index < capacity; ++index) {
+    ids.push_back(manager.start_upload("srv_1", "/srv", {source}, ConflictPolicy::Ask));
+    if (index < TransferManager::kMaxParallelTransfers) (void)wait_conflict(manager, ids.back());
+  }
+  check(manager.active_worker_count() == capacity, "admitted threads must be bounded by running plus waiting capacity");
+  check(history->list(std::nullopt, 100).size() == capacity, "each admitted request must have one history row");
+  for (int attempt = 0; attempt < 32; ++attempt) {
+    require_transfer_error([&] {
+      if (attempt % 2 == 0) {
+        (void)manager.start_upload("srv_1", "/srv", {source}, ConflictPolicy::Ask);
+      } else {
+        (void)manager.start_download("srv_1", {"/srv/held.txt"}, temporary.path, ConflictPolicy::Skip);
+      }
+    }, TransferErrorCode::Busy, "overflow must reject uploads and downloads before admission");
+  }
+  check(history->list(std::nullopt, 100).size() == capacity, "rejected requests must not create queued history");
+
+  // Exercise the real IPC mapping of a capacity rejection with a valid opaque
+  // local path handle, rather than accepting a generic TRANSFER_FAILED reply.
+  IpcRouter router;
+  router.set_transfer_manager(std::make_unique<TransferManager>(manager));
+  const auto registration = router.local_paths().register_paths({source});
+  const auto busy = router.invoke("file_transfer_upload",
+      {{"serverId", "srv_1"}, {"remoteDirectory", "/srv"},
+       {"sourceHandleIds", {registration.handles.front().handle_id}}});
+  check(!busy.ok && busy.value.value("code", "") == "BUSY", "IPC must retain the BUSY code");
+  check(busy.value.value("message", "") == "当前传输较多，请稍后重试", "capacity feedback must be concise Chinese");
+  check(history->list(std::nullopt, 100).size() == capacity, "IPC overflow must not persist a queued row");
+
+  manager.cancel(ids.back());
+  check(wait_terminal(manager, ids.back()).status == TransferStatus::Cancelled,
+        "a queued cancellation must finish without waiting for an I/O permit");
+  check(wait_until([&] { return manager.active_worker_count() == capacity - 1; }),
+        "queued cancellation must release its admission reservation");
+  ids.push_back(manager.start_upload("srv_1", "/srv", {source}, ConflictPolicy::Ask));
+  check(manager.active_worker_count() <= capacity, "replacing a cancelled request must preserve capacity");
+  manager.shutdown();
+  check(manager.active_worker_count() == 0, "shutdown must wait for all admitted workers");
+  require_transfer_error([&] {
+    (void)manager.start_upload("srv_1", "/srv", {source}, ConflictPolicy::Ask);
+  }, TransferErrorCode::ShuttingDown, "closed admission must reject new work");
+  // Path handles are one-shot and the earlier BUSY call consumed its handle.
+  const auto closing_registration = router.local_paths().register_paths({source});
+  const auto closing = router.invoke("file_transfer_upload",
+      {{"serverId", "srv_1"}, {"remoteDirectory", "/srv"},
+       {"sourceHandleIds", {closing_registration.handles.front().handle_id}}});
+  check(!closing.ok && closing.value.value("code", "") == "SHUTTING_DOWN",
+        "IPC must retain the shutdown code after admission closes");
+}
+
+void run_admission_failure_checks() {
+  TemporaryDirectory temporary;
+  auto backend = std::make_shared<FakeBackend>();
+  backend->add_directory("/srv");
+  const auto source = temporary.path / "launch.txt";
+  write_file(source, "payload");
+
+  // Fail before history insertion, repeatedly beyond the entire queue capacity.
+  {
+    auto history = std::make_shared<FakeHistoryStore>();
+    history->set_fail_insert(true);
+    TransferManager manager = TransferManager::with_history(backend, history);
+    for (int attempt = 0; attempt < 32; ++attempt) {
+      require_transfer_error([&] {
+        (void)manager.start_upload("srv_1", "/srv", {source}, ConflictPolicy::Skip);
+      }, TransferErrorCode::Local, "history rejection must release admission");
+      check(manager.active_worker_count() == 0, "failed persistence must not keep a worker reservation");
+    }
+    check(history->list(std::nullopt, 100).empty(), "failed insertions must not create history");
+    history->set_fail_insert(false);
+    const auto id = manager.start_upload("srv_1", "/srv", {source}, ConflictPolicy::Skip);
+    check(wait_terminal(manager, id).status == TransferStatus::Completed, "work must resume after persistence recovers");
+    manager.shutdown();
+  }
+
+  // Inject failure at the actual thread-creation seam, after history insertion.
+  {
+    auto history = std::make_shared<FakeHistoryStore>();
+    std::atomic<bool> fail_start{true};
+    TransferManager manager = TransferManager::with_history(backend, history,
+        [&](std::function<void()> work) {
+          if (fail_start.load()) throw std::runtime_error("local worker creation fixture failure");
+          std::thread(std::move(work)).detach();
+        });
+    for (int attempt = 0; attempt < 32; ++attempt) {
+      require_transfer_error([&] {
+        (void)manager.start_upload("srv_1", "/srv", {source}, ConflictPolicy::Skip);
+      }, TransferErrorCode::Local, "thread creation failure must release admission");
+      check(manager.active_worker_count() == 0, "failed worker creation must not leak a reservation");
+    }
+    const auto rows = history->list(std::nullopt, 100);
+    check(rows.size() == 32, "each failed start should retain its failed audit row");
+    check(std::all_of(rows.begin(), rows.end(), [](const auto& row) { return row.status == TransferStatus::Failed; }),
+          "failed thread creation must not leave queued or running history");
+    fail_start.store(false);
+    const auto id = manager.start_upload("srv_1", "/srv", {source}, ConflictPolicy::Skip);
+    (void)wait_terminal(manager, id);
+    manager.shutdown();
+  }
+}
+
+class BlockingInsertHistory final : public FakeHistoryStore {
+ public:
+  void insert(const TransferSnapshot& snapshot, const std::vector<TransferStagingFile>& staging) override {
+    entered.store(true);
+    {
+      std::unique_lock<std::mutex> lock(gate_mutex);
+      gate_cv.wait(lock, [&] { return released; });
+    }
+    FakeHistoryStore::insert(snapshot, staging);
+  }
+  void release() {
+    { std::lock_guard<std::mutex> lock(gate_mutex); released = true; }
+    gate_cv.notify_all();
+  }
+  std::atomic<bool> entered{false};
+ private:
+  std::mutex gate_mutex;
+  std::condition_variable gate_cv;
+  bool released = false;
+};
+
+void run_admission_shutdown_race_check() {
+  TemporaryDirectory temporary;
+  auto backend = std::make_shared<FakeBackend>();
+  backend->add_directory("/srv");
+  auto history = std::make_shared<BlockingInsertHistory>();
+  TransferManager manager = TransferManager::with_history(backend, history);
+  const auto source = temporary.path / "pending-start.txt";
+  write_file(source, "payload");
+  std::atomic<bool> rejected_during_shutdown{false};
+  std::thread starting([&] {
+    try { (void)manager.start_upload("srv_1", "/srv", {source}, ConflictPolicy::Skip); }
+    catch (const TransferError& error) { rejected_during_shutdown.store(error.code() == TransferErrorCode::ShuttingDown); }
+  });
+  check(wait_until([&] { return history->entered.load(); }), "fixture must pause an admitted start before registration");
+  check(manager.active_worker_count() == 1, "persistence must be covered by the admission reservation");
+  std::atomic<bool> shutdown_started{false};
+  std::atomic<bool> shutdown_finished{false};
+  std::thread closing([&] {
+    shutdown_started.store(true);
+    manager.shutdown();
+    shutdown_finished.store(true);
+  });
+  check(wait_until([&] { return shutdown_started.load(); }), "shutdown fixture must start");
+  std::this_thread::sleep_for(std::chrono::milliseconds(40));
+  check(!shutdown_finished.load(), "shutdown must not return while an admitted start owns persistence work");
+  history->release();
+  starting.join();
+  closing.join();
+  check(rejected_during_shutdown.load(), "late registration must fail after shutdown closes admission");
+  check(manager.active_worker_count() == 0, "the shutdown race must return its reservation");
+  const auto rows = history->list(std::nullopt, 100);
+  check(rows.size() == 1 && rows.front().status == TransferStatus::Interrupted,
+        "an admitted start overtaken by shutdown must not leave a queued audit row");
+  check(backend->peak_reads() == 0, "a start overtaken by shutdown must not enter backend I/O");
+}
+
+class ThrowOnceBackend final : public FakeBackend {
+ public:
+  std::optional<RemoteStat> lstat(const std::string& server, const std::string& path) override {
+    if (!failed.exchange(true)) throw std::runtime_error("unexpected local provider fixture exception");
+    return FakeBackend::lstat(server, path);
+  }
+ private:
+  std::atomic<bool> failed{false};
+};
+
+void run_io_permit_exception_check() {
+  TemporaryDirectory temporary;
+  auto backend = std::make_shared<ThrowOnceBackend>();
+  backend->add_directory("/srv");
+  backend->add_file("/srv/recover.txt", "payload");
+  TransferManager manager(backend, 1);
+  const auto failed = manager.start_download("srv_1", {"/srv/recover.txt"}, temporary.path, ConflictPolicy::Skip);
+  check(wait_terminal(manager, failed).status == TransferStatus::Failed, "unexpected provider errors must finalize the transfer");
+  const auto resumed = manager.start_download("srv_1", {"/srv/recover.txt"}, temporary.path, ConflictPolicy::Skip);
+  check(wait_terminal(manager, resumed).status == TransferStatus::Completed,
+        "a provider exception must return the sole I/O permit for the next transfer");
+  manager.shutdown();
+}
+
 }  // namespace
 
 int main() {
@@ -1584,6 +1782,10 @@ int main() {
   run_conflict_checks();
   run_cancellation_checks();
   run_parallelism_checks();
+  run_bounded_admission_checks();
+  run_admission_failure_checks();
+  run_admission_shutdown_race_check();
+  run_io_permit_exception_check();
   run_recovery_checks();
   run_fail_closed_history_check();
   run_query_checks();

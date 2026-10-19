@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from typing import Any
 
-from langchain_core.messages import AIMessage
+from langchain_core.messages import AIMessage, AIMessageChunk
 from langchain_openai import ChatOpenAI
 
 
@@ -14,6 +14,21 @@ class DeepSeekChatModel(ChatOpenAI):
     response on the next request. Keep it in additional_kwargs (and therefore in
     private checkpoints), never in content or the public agent event stream.
     """
+
+    # DeepSeek supports stream_options.include_usage; request actual terminal
+    # token counts rather than estimating usage from displayed characters.
+    stream_usage: bool | None = True
+
+    def _convert_chunk_to_generation_chunk(
+        self, chunk: dict[str, Any], default_chunk_class: type, base_generation_info: dict[str, Any] | None,
+    ) -> Any:
+        result = super()._convert_chunk_to_generation_chunk(chunk, default_chunk_class, base_generation_info)
+        choices = chunk.get("choices") or chunk.get("chunk", {}).get("choices", [])
+        delta = choices[0].get("delta") if choices else None
+        reasoning = delta.get("reasoning_content") if isinstance(delta, dict) else None
+        if result is not None and isinstance(result.message, AIMessageChunk) and isinstance(reasoning, str):
+            result.message.additional_kwargs["reasoning_content"] = reasoning
+        return result
 
     def _create_chat_result(self, response: Any, generation_info: dict[str, Any] | None = None) -> Any:
         result = super()._create_chat_result(response, generation_info)

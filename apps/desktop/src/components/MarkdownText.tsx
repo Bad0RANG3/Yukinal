@@ -23,21 +23,39 @@ import { memo, useState, type ReactNode } from "react";
 import { openExternalUrl } from "../lib/external.js";
 import { parseMarkdown, type Block, type ColumnAlign, type Inline } from "../lib/markdown.js";
 import { KeywordText } from "./KeywordText.js";
+import { CopyButton } from "./CopyButton.js";
+import { MarkdownWidgetBlock } from "./MarkdownWidgetBlock.js";
+import { CONVERSATION_WIDGET_LANGUAGE } from "../lib/conversation-widgets.js";
 
 const HEADING_TAG = { 1: "h1", 2: "h2", 3: "h3", 4: "h4", 5: "h5", 6: "h6" } as const;
 
-export const MarkdownText = memo(function MarkdownText({ text, className }: { text: string; className?: string }) {
-  const blocks = parseMarkdown(text);
+export const MarkdownText = memo(function MarkdownText({ text, className, streaming = false }: { text: string; className?: string; streaming?: boolean }) {
+  const blocks = parseMarkdown(text, { preserveCodeSource: true });
   return (
     <div className={className}>
       {blocks.map((block, index) => (
-        <BlockView block={block} key={index} />
+        <BlockView block={block} key={index} streaming={streaming && index === blocks.length - 1} />
       ))}
     </div>
   );
 });
 
-function BlockView({ block }: { block: Block }) {
+/** Copy feedback lives in its own child; it never reparses or redraws the message body. */
+const MarkdownCodeBlock = memo(function MarkdownCodeBlock({ text, copyText, language }: {
+  text: string; copyText: string; language: string | null;
+}) {
+  return (
+    <div className="md-code-block">
+      <div className="md-code-header">
+        <span className="md-code-language">{language || "代码"}</span>
+        <CopyButton text={copyText} label="复制代码" className="md-code-copy" />
+      </div>
+      <pre className="md-code-pre"><code><KeywordText text={text} /></code></pre>
+    </div>
+  );
+});
+
+function BlockView({ block, streaming = false }: { block: Block; streaming?: boolean }) {
   switch (block.kind) {
     case "heading": {
       const Tag = HEADING_TAG[clampLevel(block.level)];
@@ -54,16 +72,9 @@ function BlockView({ block }: { block: Block }) {
         </p>
       );
     case "code":
-      return (
-        <div className="md-code-block">
-          {block.language ? <span className="md-code-language">{block.language}</span> : null}
-          <pre className="md-code-pre">
-            <code>
-              <KeywordText text={block.text} />
-            </code>
-          </pre>
-        </div>
-      );
+      return block.language?.toLowerCase() === CONVERSATION_WIDGET_LANGUAGE
+        ? <MarkdownWidgetBlock source={block.copyText ?? block.text} streaming={streaming} />
+        : <MarkdownCodeBlock text={block.text} copyText={block.copyText ?? block.text} language={block.language} />;
     case "list": {
       const items = block.items.map((item, index) => (
         <li className={item.checked === null ? undefined : "md-task"} key={index}>
@@ -72,7 +83,7 @@ function BlockView({ block }: { block: Block }) {
               {item.checked ? "☑" : "☐"}
             </span>
           )}
-          <ListItemBlocks blocks={item.blocks} tight={block.tight} />
+          <ListItemBlocks blocks={item.blocks} tight={block.tight} streaming={streaming && index === block.items.length - 1} />
         </li>
       ));
       return block.ordered ? (
@@ -86,7 +97,7 @@ function BlockView({ block }: { block: Block }) {
     case "quote":
       return (
         <blockquote className="md-quote">
-          <BlockList blocks={block.blocks} />
+          <BlockList blocks={block.blocks} streaming={streaming} />
         </blockquote>
       );
     case "table":
@@ -137,25 +148,25 @@ function BlockView({ block }: { block: Block }) {
  * CommonMark 的 tight 只省略列表项**直接子段落**的 `<p>`；引用、嵌套列表等容器里
  * 的段落仍走普通块渲染，并由那些容器自己的 tight 状态决定。
  */
-function ListItemBlocks({ blocks, tight }: { blocks: Block[]; tight: boolean }) {
+function ListItemBlocks({ blocks, tight, streaming = false }: { blocks: Block[]; tight: boolean; streaming?: boolean }) {
   return (
     <>
       {blocks.map((block, index) =>
         tight && block.kind === "paragraph" ? (
           <InlineView nodes={block.content} key={index} />
         ) : (
-          <BlockView block={block} key={index} />
+          <BlockView block={block} key={index} streaming={streaming && index === blocks.length - 1} />
         ),
       )}
     </>
   );
 }
 
-function BlockList({ blocks }: { blocks: Block[] }) {
+function BlockList({ blocks, streaming = false }: { blocks: Block[]; streaming?: boolean }) {
   return (
     <>
       {blocks.map((block, index) => (
-        <BlockView block={block} key={index} />
+        <BlockView block={block} key={index} streaming={streaming && index === blocks.length - 1} />
       ))}
     </>
   );

@@ -173,3 +173,10 @@
 @container reference (min-width: 760px) {
   .overview-page .split-sections { grid-template-columns: repeat(2, minmax(0, 1fr)); align-items: start; }
 }
+
+.remote-list-filters { display: flex; flex-wrap: wrap; min-width: 0; gap: 8px; margin-block: 10px; }
+.remote-list-filters input { min-width: 0; flex: 1 1 120px; width: 100%; }
+.remote-list-filters select { max-width: 100%; min-width: 0; flex: 0 1 auto; }
+.remote-list-pager { display: flex; flex-wrap: wrap; align-items: center; justify-content: space-between; gap: 8px; margin-block: 10px; color: var(--muted); font-size: var(--text-caption); }
+.remote-list-pager .button-secondary { padding: 5px 8px; }
+.remote-list-filters :is(input, select) { min-height: 30px; padding: 5px 8px; border: 1px solid var(--line); border-radius: var(--radius-control); color: var(--text); background: var(--surface-2); font: inherit; font-size: var(--text-caption); }

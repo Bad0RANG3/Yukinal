@@ -57,7 +57,7 @@
   border: 1px solid var(--edge-subtle);
   --composer-action-size: 36px;
   --composer-action-inset: 10px;
-  --composer-radius: calc(var(--composer-action-size) / 2 + var(--composer-action-inset) + 1px);
+  --composer-radius: calc(var(--radius-card) + var(--radius-control));
   border-radius: var(--composer-radius);
   background: var(--composer-surface);
   box-shadow: none;
@@ -66,7 +66,7 @@
 
 /* Focus changes the border only; the input surface stays flat and unlit. */
 .agent-composer-shell:focus-within {
-  border-color: var(--edge-normal);
+  border-color: var(--edge-emphasis);
   box-shadow: none;
 }
 
@@ -387,7 +387,7 @@
 }
 
 .agent-composer-toolbar-right {
-  flex: 0 1 auto;
+  flex: 0 0 auto;
   max-width: 100%;
   margin-left: auto;
   justify-content: flex-end;
@@ -789,7 +789,6 @@
 .agent-reply-meta > span { max-width: 100%; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 
 @container agent-composer (max-width: 360px) {
-  .agent-composer-toolbar-right { flex: 1 1 100%; }
   .agent-composer-status { margin-left: 0; }
   .agent-model-value { max-width: 120px; }
 }

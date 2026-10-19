@@ -35,6 +35,7 @@ import { usePreferencesStore } from "../../stores/preferences-store.js";
 import { useWorkspaceStore } from "../../stores/workspace-store.js";
 import { AgentComposer } from "./AgentComposer.js";
 import { AgentFeed } from "./AgentFeed.js";
+import { NativeTaskApprovals, useNativeTaskRunEvents } from "./NativeTaskApprovals.js";
 import { AgentHeader, AgentRunStatus } from "./AgentHeader.js";
 import { AgentHistoryPane } from "./AgentHistoryPane.js";
 import { AgentRecentConversations } from "./AgentRecentConversations.js";
@@ -90,6 +91,7 @@ export function AgentPanel({ onCloseStart, onCloseEnd, workspace = false, worksp
   onOpenTeam?: () => void;
 }) {
   const agentStatus = useAgentStatus({ poll: true });
+  useNativeTaskRunEvents(agentStatus.data?.running, restartId(agentStatus.data?.restart));
   const spawnAgent = useSpawnAgent();
   const selectedServerId = useWorkspaceStore((state) => state.selectedServerId);
   const selectedTaskId = useWorkspaceStore((state) => state.selectedTaskId);
@@ -162,7 +164,8 @@ export function AgentPanel({ onCloseStart, onCloseEnd, workspace = false, worksp
    * 设定，策略覆盖是「这一次」，所以它只活在面板的这一次会话里。
    */
   const [runPolicy, setRunPolicy] = useState<RunPolicyChoice>(null);
-  const follow = useFeedFollow(agentOpen, run.entries);
+  const conversationScope = (selectedServerId ?? "global") + ":" + (sessions.activeSessionId ?? "new");
+  const follow = useFeedFollow(agentOpen, run.entries, conversationScope);
   // 必须稳定：焦点陷阱那个 effect 以它为依赖，每次渲染都换新函数会让键盘监听反复重装。
   const closePanel = useCallback(() => setAgentOpen(false), [setAgentOpen]);
   const panel = useAgentPanelShell({
@@ -474,8 +477,12 @@ export function AgentPanel({ onCloseStart, onCloseEnd, workspace = false, worksp
               pendingApprovalIds={run.pendingApprovalIds}
               approvalStatuses={run.approvalStatuses}
               feedRef={follow.feedRef}
+              frameRef={follow.frameRef}
               onScroll={follow.onScroll}
-            ><CoordinatorTasks runtime={teamTasks} sessionId={sessions.activeSessionId} /></AgentFeed>
+              showJumpControl={follow.showJumpControl}
+              onJumpToLatest={follow.pinToBottom}
+              motionScope={conversationScope}
+            ><NativeTaskApprovals sessionId={sessions.activeSessionId} serverId={selectedServerId} /><CoordinatorTasks runtime={teamTasks} sessionId={sessions.activeSessionId} /></AgentFeed>
 
             <div className="agent-input-region">
               <AgentComposer
@@ -500,7 +507,7 @@ export function AgentPanel({ onCloseStart, onCloseEnd, workspace = false, worksp
                 status={<>
                   {livePreviewChat ? <span>模拟服务器 · 仅对话</span> : null}
                   <button type="button" className="agent-composer-tool agent-scope-trigger" disabled={run.running || !selectedServerId} aria-label={selectedServerId ? `当前范围：${focusServer?.name ?? selectedServerId}，切换到全局对话` : "当前范围：全局工作区"} title={run.running ? runContext ?? "运行中" : selectedServerId ? `${focusServer?.name ?? selectedServerId} · 切换到全局` : "全局工作区"} onClick={() => useWorkspaceStore.getState().selectServer(null)}><Icon name={selectedServerId ? "servers" : "projects"} size="md" /></button>
-                  <AgentRunStatus compact preview={preview && !livePreviewChat} running={run.running} runState={run.runState} tokenUsage={run.tokenUsage} contextUsage={run.contextUsage} agentReady={agentRunning} shell={shell} />
+                  <AgentRunStatus preview={preview && !livePreviewChat} running={run.running} runState={run.runState} tokenUsage={run.tokenUsage} contextUsage={run.contextUsage} agentReady={agentRunning} shell={shell} />
                 </>}
                 prompt={prompt}
                 onPromptChange={setPrompt}

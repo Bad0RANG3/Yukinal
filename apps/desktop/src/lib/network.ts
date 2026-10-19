@@ -27,10 +27,10 @@ export interface NetworkProxyForm {
   clearCredential: boolean;
 }
 
-export function useNetworkProxy() {
+export function useNetworkProxy({ enabled = true }: { enabled?: boolean } = {}) {
   return useQuery({
     queryKey: NETWORK_PROXY_QUERY_KEY,
-    enabled: isDesktopShell(),
+    enabled: enabled && isDesktopShell(),
     queryFn: async () => await callDesktop(IPC_COMMANDS.networkProxyGet, {}),
   });
 }

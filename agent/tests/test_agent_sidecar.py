@@ -123,7 +123,7 @@ class PythonSidecarTests(unittest.TestCase):
         }))
         self.assertEqual(initialized["result"]["agentVersion"], "0.3.0")
         self.assertEqual(initialized["result"]["capabilities"], {
-            "streaming": False, "toolCalling": True, "cancellation": True, "mcp": False,
+            "streaming": True, "toolCalling": True, "cancellation": True, "mcp": False,
         })
 
         tools = sidecar.handle(_request(3, "tools.list"))["result"]["tools"]

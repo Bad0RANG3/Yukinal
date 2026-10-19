@@ -152,9 +152,9 @@ export function AppShell() {
             {primary === "agents" && !guideOpen ? <Suspense fallback={<PageLoadingFallback />}><AgentNistPane onUseAgent={returnToAI} /></Suspense> : null}
             {(primary === "activity" || (primary === "servers" && !detail)) && !guideOpen ? <Suspense fallback={<PageLoadingFallback />}><ActivityFeed /></Suspense> : null}
             {detail && !guideOpen ? <>
-              {serverPage === "overview" ? <HostKeyGate serverId={selectedServerId}><Suspense fallback={<PageLoadingFallback />}><ServerOverview key={selectedServerId} /></Suspense></HostKeyGate> : null}
-              {serverPage === "logs" ? <HostKeyGate serverId={selectedServerId}><Suspense fallback={<PageLoadingFallback />}><LogsPane /></Suspense></HostKeyGate> : null}
-              {serverPage === "services" ? <HostKeyGate serverId={selectedServerId}><Suspense fallback={<PageLoadingFallback />}><ServicesPane /></Suspense></HostKeyGate> : null}
+              {serverPage === "overview" ? <HostKeyGate serverId={selectedServerId}><Suspense fallback={<PageLoadingFallback />}><ServerOverview key={selectedServerId} active={!compact || contextOpen} /></Suspense></HostKeyGate> : null}
+              {serverPage === "logs" ? <HostKeyGate serverId={selectedServerId}><Suspense fallback={<PageLoadingFallback />}><LogsPane active={!compact || contextOpen} /></Suspense></HostKeyGate> : null}
+              {serverPage === "services" ? <HostKeyGate serverId={selectedServerId}><Suspense fallback={<PageLoadingFallback />}><ServicesPane active={!compact || contextOpen} /></Suspense></HostKeyGate> : null}
               {serverPage === "activity" ? <Suspense fallback={<PageLoadingFallback />}><ActivityFeed serverId={selectedServerId} /></Suspense> : null}
             </> : null}
           </div>

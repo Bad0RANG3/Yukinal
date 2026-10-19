@@ -77,7 +77,7 @@ export function MemoryLibrary({ onClose }: { onClose: () => void }) {
           <button type="button" className="icon-button" aria-label={`删除记忆 ${memory.title}`} disabled={remove.isPending} onClick={() => {
             if (window.confirm(`删除记忆“${memory.title}”？`)) remove.mutate(memory);
           }}><Icon name="trash" size="sm" /></button>
-        </li>)}{!memories.data?.length ? <li className="compact-empty">暂无记忆</li> : null}</ul>}
+        </li>)}{memories.isSuccess && memories.data.length === 0 ? <li className="compact-empty">暂无记忆</li> : null}</ul>}
       </div>
       <footer><button type="button" className="text-button text-button-danger" disabled={busy || reset.isPending} onClick={() => {
         if (window.confirm("重置全部上下文和当前草稿？对话历史、记忆、服务器和连接配置会保留。")) reset.mutate();

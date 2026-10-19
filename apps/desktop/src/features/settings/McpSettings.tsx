@@ -45,8 +45,8 @@ import {
   type McpOAuthDeviceCodePhase,
 } from "./McpOAuthDeviceCodeDialog.js";
 
-export function McpSettings() {
-  const serversQuery = useMcpServers();
+export function McpSettings({ active = true }: { active?: boolean } = {}) {
+  const serversQuery = useMcpServers({ enabled: active });
   const actions = useMcpServerActions();
   // 「正在编辑哪一行」是界面状态：`null` = 没有在编辑。它不是服务端状态，所以不进缓存。
   const [editing, setEditing] = useState<string | null>(null);

@@ -3,7 +3,7 @@
 import { spawn } from "node:child_process";
 import { existsSync } from "node:fs";
 import { setTimeout as delay } from "node:timers/promises";
-import { dirname, join, resolve } from "node:path";
+import { delimiter, dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 
 import { resolveCommandInvocation } from "./lib/commands.mjs";
@@ -17,6 +17,14 @@ const buildDirectory = resolve(
   root,
   process.env.YUKINAL_DESKTOP_HOST_BUILD_DIR ?? join("native", "build-cpp-host"),
 );
+// A preview-only host deliberately has no SSH transport. Real desktop development
+// builds both the in-process core and the PTY worker unless explicitly opted out.
+const previewOnlyValue = process.env.YUKINAL_DESKTOP_PREVIEW_ONLY ?? "0";
+if (previewOnlyValue !== "0" && previewOnlyValue !== "1") {
+  throw new Error("YUKINAL_DESKTOP_PREVIEW_ONLY must be 0 or 1.");
+}
+const previewOnly = previewOnlyValue === "1";
+const opensslRoot = process.env.YUKINAL_OPENSSL_ROOT ?? process.env.OPENSSL_ROOT_DIR;
 const port = Number(process.env.YUKINAL_DESKTOP_DEV_PORT ?? "1420");
 if (!Number.isInteger(port) || port < 1 || port > 65535) {
   console.error("YUKINAL_DESKTOP_DEV_PORT must be an integer from 1 to 65535.");
@@ -118,6 +126,20 @@ function hostExecutable() {
   return executable;
 }
 
+function sshServiceExecutable() {
+  const suffix = process.platform === "win32" ? ".exe" : "";
+  const candidates = [
+    join(buildDirectory, `yukinal-ssh-service${suffix}`),
+    join(buildDirectory, "Debug", `yukinal-ssh-service${suffix}`),
+    join(buildDirectory, "Release", `yukinal-ssh-service${suffix}`),
+  ];
+  const executable = candidates.find(existsSync);
+  if (!executable) {
+    throw new Error(`CMake built the desktop but the SSH worker is missing under ${buildDirectory}.`);
+  }
+  return executable;
+}
+
 async function main() {
   const sharedBuild = resolveCommandInvocation("pnpm", ["--filter", "@yukinal/shared", "build"]);
   await run(sharedBuild.command, sharedBuild.args);
@@ -125,18 +147,25 @@ async function main() {
   const configureArgs = [
     "-S", native,
     "-B", buildDirectory,
-    "-DYUKINAL_BUILD_SSH_SERVICE=OFF",
+    `-DYUKINAL_BUILD_SSH_SERVICE=${previewOnly ? "OFF" : "ON"}`,
     "-DYUKINAL_BUILD_DESKTOP_HOST=ON",
     "-DYUKINAL_BUILD_TESTS=OFF",
     "-DYUKINAL_FETCH_DEPS=ON",
     "-DYUKINAL_BUNDLE_WINDOWS_OPENSSL=OFF",
   ];
+  if (!previewOnly && opensslRoot) {
+    configureArgs.push(`-DOPENSSL_ROOT_DIR=${resolve(opensslRoot)}`);
+  }
   await run("cmake", configureArgs);
   await run("cmake", [
     "--build", buildDirectory,
     "--target", "yukinal-desktop-host",
+    ...(previewOnly ? [] : ["yukinal-ssh-service"]),
     "--config", "Debug",
   ]);
+  // Check before starting Vite so an incomplete native build cannot open a
+  // seemingly functional desktop whose terminal worker is absent.
+  const serviceBinary = previewOnly ? undefined : sshServiceExecutable();
 
   const viteEntry = join(desktop, "node_modules", "vite", "bin", "vite.js");
   if (!existsSync(viteEntry)) {
@@ -158,6 +187,17 @@ async function main() {
       process.platform === "win32" ? "python.exe" : "python",
     );
     const hostEnvironment = { ...process.env };
+    if (serviceBinary) {
+      hostEnvironment.YUKINAL_SSH_SERVICE_BINARY = serviceBinary;
+      hostEnvironment.YUKINAL_SSH_SERVICE_AUTOCONFIG = "1";
+      const runtimeDirectories = [dirname(serviceBinary)];
+      if (opensslRoot) runtimeDirectories.push(join(resolve(opensslRoot), "bin"));
+      hostEnvironment.PATH = [...runtimeDirectories, hostEnvironment.PATH ?? ""].join(delimiter);
+    } else {
+      // An inherited autoconfig flag must not silently reactivate SSH in a
+      // session whose owner explicitly requested a visual preview only.
+      delete hostEnvironment.YUKINAL_SSH_SERVICE_AUTOCONFIG;
+    }
     if (!hostEnvironment.YUKINAL_AGENT_PYTHON && existsSync(venvPython)) {
       hostEnvironment.YUKINAL_AGENT_PYTHON = venvPython;
     }
@@ -166,7 +206,9 @@ async function main() {
     }
     // SW_HIDE in STARTUPINFO overrides the WebView's first ShowWindow call.
     host = spawnLongRunning(hostExecutable(), ["--dev-url", url], { env: hostEnvironment, windowsHide: false });
-    console.log("Desktop live preview is running; saved UI changes update this window automatically.");
+    console.log(previewOnly
+      ? "Desktop preview-only mode is running; SSH is disabled by explicit request."
+      : "Desktop development is running with the SSH core and terminal worker; saved UI changes update this window automatically.");
     result = await Promise.race([
       vite.exit.then((value) => ({ role: "Vite", value })),
       host.exit.then((value) => ({ role: "C++ host", value })),

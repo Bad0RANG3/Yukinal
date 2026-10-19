@@ -97,6 +97,58 @@ int run_tests(int argc, char** argv) {
   MemoryCredentialStore credentials;
   DesktopDatabase database(directory.path);
 
+  // A task conversation is initialized once, preserving both scope and history.
+  const auto original_chat = database.ensure_chat_session(
+      "ses_ensure", std::nullopt, std::string("srv_fixture"),
+      "Original title", "2026-01-01T00:00:00Z");
+  (void)database.append_chat_message("msg_ensure", "ses_ensure", "user", "Retain this context",
+                                     std::nullopt, std::nullopt, "2026-01-01T00:00:01Z");
+  const auto reused_chat = database.ensure_chat_session(
+      "ses_ensure", std::nullopt, std::string("srv_fixture"),
+      "Must not replace title", "2026-01-02T00:00:00Z");
+  check(reused_chat.at("messages").size() == 1 &&
+            reused_chat.at("messages").at(0).at("content") == "Retain this context" &&
+            reused_chat.at("session").at("title") == original_chat.at("session").at("title") &&
+            reused_chat.at("session").at("createdAt") == original_chat.at("session").at("createdAt"),
+        "ensuring an existing conversation must preserve its transcript and metadata");
+  for (bool change_workspace : {false, true}) {
+    bool scope_rejected = false;
+    try {
+      (void)database.ensure_chat_session(
+          "ses_ensure", change_workspace ? std::optional<std::string>("workspace_other") : std::nullopt,
+          std::string(change_workspace ? "srv_fixture" : "srv_other"), "Other", "2026-01-03T00:00:00Z");
+    } catch (const std::invalid_argument&) {
+      scope_rejected = true;
+    }
+    check(scope_rejected && database.get_chat_session("ses_ensure") == reused_chat,
+          "a different server or workspace must be rejected without modifying saved history");
+  }
+  {
+    TemporaryDirectory broken_directory;
+    DesktopDatabase broken(broken_directory.path);
+    sqlite3* connection = nullptr;
+    const auto path = (broken_directory.path / "yukinal.db").string();
+    check(sqlite3_open(path.c_str(), &connection) == SQLITE_OK,
+          "the private error fixture must open");
+    check(sqlite3_exec(connection, "DROP TABLE chat_messages", nullptr, nullptr, nullptr) == SQLITE_OK,
+          "the private error fixture must expose a real SQL read failure");
+    bool read_failed = false;
+    try {
+      (void)broken.ensure_chat_session("ses_sql_failure", std::nullopt, std::nullopt,
+                                       "Must fail", "2026-01-01T00:00:00Z");
+    } catch (const std::runtime_error&) {
+      read_failed = true;
+    }
+    sqlite3_stmt* count = nullptr;
+    check(sqlite3_prepare_v2(connection,
+              "SELECT count(*) FROM chat_sessions WHERE id = 'ses_sql_failure'", -1, &count, nullptr) == SQLITE_OK &&
+              sqlite3_step(count) == SQLITE_ROW && sqlite3_column_int(count, 0) == 0,
+          "a failed context read must roll back its new conversation");
+    sqlite3_finalize(count);
+    sqlite3_close(connection);
+    check(read_failed, "a real database read failure must propagate rather than become empty history");
+  }
+
   auto handle_host = [&credentials](const std::string& method, const json& params,
                                     const std::shared_ptr<std::atomic<bool>>& cancel) -> json {
     (void)cancel;
@@ -287,7 +339,14 @@ int run_tests(int argc, char** argv) {
     };
     (void)database.create_investigation_task(probe_task);
     const auto start = router.invoke("investigation_task_start", {{"taskId", "itask_sidecar"}});
-    check(!start.ok, "investigation_task_start should fail closed when the Agent has no provider");
+    check(!start.ok && start.value.value("code", std::string()) == "INVALID_PARAMS" &&
+              start.value.value("message", std::string()).find("No enabled AI provider") != std::string::npos,
+          "a first task must hydrate its real conversation before reaching the missing-provider check");
+    const auto task_chat = database.get_chat_session("session_task_itask_sidecar");
+    check(!task_chat.at("session").contains("serverId") && task_chat.at("messages").size() == 1 &&
+              task_chat.at("messages").at(0).at("role") == "user" &&
+              task_chat.at("messages").at(0).at("content").get<std::string>().find("Probe the local host") != std::string::npos,
+          "the initial task must save its real scoped prompt before asking Python to hydrate");
     const auto detail = database.get_investigation_task("itask_sidecar");
     check(detail.has_value() && detail->at("task").at("status") == "failed" &&
               detail->at("runs").size() == 1 &&

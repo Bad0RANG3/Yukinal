@@ -40,6 +40,7 @@
 #include <openssl/x509v3.h>
 
 #include "ssh_network.hpp"
+#include "ssh_credentials.hpp"
 
 namespace yukinal::ssh_service::detail {
 namespace {
@@ -856,8 +857,7 @@ bool establish_krl_socks5_tunnel(socket_t socket, const KrlUrl& url,
   }
   if (auth_required) {
     if (method_response[1] != 2) return false;
-    const char* configured = std::getenv(target.proxy_auth_env.c_str());
-    std::string credential = configured ? configured : "";
+    std::string credential = read_ssh_credential(target.proxy_auth_env);
     const auto separator = credential.find(':');
     if (credential.empty() || credential.size() > 1024 || separator == std::string::npos ||
         separator == 0 || separator + 1 >= credential.size() || separator > 255 ||
@@ -1014,12 +1014,12 @@ std::optional<std::string> perform_krl_http_request(Client& client, const KrlUrl
   if (use_proxy && !socks_proxy_tunnel) {
     client.set_proxy(target.proxy_host, target.proxy_port);
     if (!target.proxy_auth_env.empty()) {
-      const char* value = std::getenv(target.proxy_auth_env.c_str());
-      if (!value || !*value || std::strlen(value) > 1024) {
+      credential = read_ssh_credential(target.proxy_auth_env);
+      if (credential.empty() || credential.size() > 1024) {
+        wipe_secret(&credential);
         if (error) *error = "proxy authentication credential is unavailable";
         return std::nullopt;
       }
-      credential = value;
       const auto separator = credential.find(':');
       if (separator == std::string::npos) {
         wipe_secret(&credential);

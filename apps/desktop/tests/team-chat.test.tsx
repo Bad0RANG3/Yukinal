@@ -5,7 +5,7 @@ import type { ComponentProps } from "react";
 import type { AgentPromptPart, ChatMessage } from "@yukinal/shared";
 
 import { AgentEntryView } from "../src/features/agent/AgentEntryView.js";
-import { AgentHeader } from "../src/features/agent/AgentHeader.js";
+import { AgentHeader, AgentRunStatus } from "../src/features/agent/AgentHeader.js";
 import { AgentComposer } from "../src/features/agent/AgentComposer.js";
 import { defaultAgentRoles } from "../src/features/agent-nist/agent-nist.js";
 import { appendAssistantDelta, entriesFromMessages, settleAssistantText } from "../src/features/agent/transcript.js";
@@ -23,7 +23,9 @@ test("actor and model survive streaming, terminal reconciliation and history res
   assert.deepEqual(row.participant, identity.participant);
   assert.equal(row.model, identity.model);
   const messages: ChatMessage[] = [{ id: "msg-1", sessionId: "ses-1", role: "assistant", content: row.text, createdAt: "", ...identity }];
-  assert.deepEqual(entriesFromMessages(messages), [row]);
+  assert.equal(row.entryId, streamed[1]?.entryId, "terminal calibration retains the live row id");
+  assert.deepEqual(entriesFromMessages(messages), [{ ...row, entryId: messages[0]!.id }]);
+  assert.deepEqual(entriesFromMessages(messages), entriesFromMessages(messages.map((message) => ({ ...message }))));
   const markup = renderToStaticMarkup(<AgentEntryView entry={row} onApproval={async () => {}} approvalBusy={false} />);
   assert.ok(markup.includes(identity.participant.label));
   assert.ok(markup.includes(identity.model));
@@ -116,12 +118,30 @@ test("running composer preserves stop admission, allows drafting and locks model
   assert.ok(stopping.includes("停止中"));
 });
 
-test("composer keeps one plus entry, one attachment chooser and a precise send blocker", () => {
+test("composer separates attachments and settings while retaining a precise send blocker", () => {
   const markup = renderToStaticMarkup(<AgentComposer {...composerProps} canSend={false} sendDisabledReason="请先启动运行服务" />);
   assert.equal((markup.match(/class="agent-composer-file-input"/gu) ?? []).length, 1);
   assert.equal((markup.match(/class="agent-composer-toolbar-left"/gu) ?? []).length, 1);
-  assert.ok(markup.includes('aria-label="添加附件与对话设置"'));
+  assert.ok(markup.includes('aria-label="添加附件"'));
+  assert.ok(markup.includes('aria-label="对话设置：目标模式，请求批准"'));
+  assert.ok(markup.includes('class="agent-composer-action"'));
   assert.equal(markup.includes('aria-label="添加图片"'), false);
   assert.equal(markup.includes('aria-label="添加文本文件或 PDF"'), false);
   assert.match(markup, /aria-label="发送消息"[^>]+title="请先启动运行服务"[^>]+disabled=""/u);
+});
+
+test("composer shows real scope and runtime status without opening settings", () => {
+  const markup = renderToStaticMarkup(<AgentComposer {...composerProps} status={<span>生产目标 · 等待批准</span>} />);
+  assert.ok(markup.includes("生产目标 · 等待批准"));
+  assert.ok(markup.includes('aria-label="范围与运行状态"'));
+  assert.doesNotMatch(markup, /class="agent-settings-panel/);
+  assert.ok(markup.includes("Ctrl+Enter 发送"));
+  const archived = renderToStaticMarkup(<AgentComposer {...composerProps} commandContext={{ ...composerProps.commandContext, archived: true }} />);
+  assert.match(archived, /aria-label="添加附件"[^>]+disabled=""/);
+});
+
+test("expanded preview status never announces a ready or active real runtime", () => {
+  const markup = renderToStaticMarkup(<AgentRunStatus preview running runState="executing" tokenUsage={null} agentReady shell />);
+  assert.ok(markup.includes("模拟数据 · 发送已停用"));
+  assert.doesNotMatch(markup, /已就绪|agent-status-active|agent-status-ready/);
 });
