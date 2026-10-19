@@ -3,9 +3,10 @@
  *
  * `packages/shared/fixtures/error-taxonomy.json` is the single source of truth for
  * which wire code maps to which actionable category, and whether an unchanged
- * retry is allowed. This test asserts the TypeScript side against it; the Rust
- * side (`crates/database/tests/error_taxonomy.rs`) asserts its own enum against
- * the same file. A category added on one side only turns one of the two red.
+ * retry is allowed. This test asserts the TypeScript side against it. The Rust
+ * counterpart cited here (`crates/database/tests/error_taxonomy.rs`) was deleted with the
+ * Rust host, so the file currently has exactly one reader; a category added to the fixture
+ * without updating `errors.ts` turns this red, but a C++-side divergence would not.
  */
 
 import assert from "node:assert/strict";

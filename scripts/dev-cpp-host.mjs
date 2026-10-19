@@ -163,14 +163,13 @@ async function main() {
     ...(previewOnly ? [] : ["yukinal-ssh-service"]),
     "--config", "Debug",
   ]);
-  // Check before starting Vite so an incomplete native build cannot open a
-  // seemingly functional desktop whose terminal worker is absent.
-  const serviceBinary = previewOnly ? undefined : sshServiceExecutable();
-
   const viteEntry = join(desktop, "node_modules", "vite", "bin", "vite.js");
   if (!existsSync(viteEntry)) {
     throw new Error("Vite is not installed. Run pnpm install --frozen-lockfile first.");
   }
+  // Check before starting Vite so an incomplete native build cannot open a
+  // seemingly functional desktop whose terminal worker is absent.
+  const serviceBinary = sshServiceExecutable();
   const url = `http://127.0.0.1:${port}`;
   const vite = spawnLongRunning(process.execPath, [
     viteEntry, "--host", "127.0.0.1", "--port", String(port), "--strictPort",

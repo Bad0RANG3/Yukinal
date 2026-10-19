@@ -5,6 +5,7 @@
 #include "yukinal/desktop_host/database.hpp"
 #include "yukinal/desktop_host/desktop_target.hpp"
 #include "yukinal/desktop_host/local_paths.hpp"
+#include "yukinal/desktop_host/scoped_environment.hpp"
 
 #include <stdexcept>
 #include <string>

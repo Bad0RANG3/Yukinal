@@ -157,7 +157,7 @@ test("EmptyPanel matches the markup it replaced, including the page-level class"
     ["", "servers", "选择一台服务器", "从左侧列表选择目标环境，查看实时健康状态与运行中的容器。"],
     ["", "activity", "暂无动态", "服务器连接、配置变更和 Agent 操作会记录在这里。"],
     ["", "folder", "选择一台服务器", "连接服务器后浏览远程文件。"],
-    ["", "folder", "浏览器预览模式", "远程文件需要 Tauri 原生连接。"],
+    ["", "folder", "浏览器预览模式", "远程文件需要桌面原生连接。"],
     ["log-empty", "logs", "没有可展示的日志", "日志源没有返回内容。"],
     ["service-empty", "services", "没有可展示的服务", "服务管理器没有返回服务条目。"],
     ["project-empty", "projects", "暂无项目", "本地数据库还没有 workspace 记录。服务器视图仍可独立使用。"],
@@ -183,13 +183,13 @@ test("an EmptyPanel without a page-level class has no trailing space in class", 
 });
 
 test("PreviewEmpty matches the markup it replaced, with and without an icon", () => {
-  const withIcon = ["logs", "原生 SSH 能力只在 Tauri 桌面壳中可用，预览不会伪造远端日志数据。"] as const;
+  const withIcon = ["logs", "原生 SSH 能力只在桌面壳中可用，预览不会伪造远端日志数据。"] as const;
   assert.equal(
     renderToStaticMarkup(<PreviewEmpty icon={withIcon[0]} body={withIcon[1]} />),
     renderToStaticMarkup(originalEmptyPanel("", withIcon[0], "浏览器预览", withIcon[1])),
   );
 
-  const noIcon = "动态记录需要 Tauri 桌面壳中的本地数据库。";
+  const noIcon = "动态记录需要桌面壳中的本地数据库。";
   assert.equal(
     renderToStaticMarkup(<PreviewEmpty body={noIcon} />),
     renderToStaticMarkup(originalPreviewEmptyNoIcon(noIcon)),

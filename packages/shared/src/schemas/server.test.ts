@@ -79,7 +79,7 @@ test("the ssh-agent option carries no secret, and nothing else may ride along", 
   );
 });
 
-test("an encrypted private key carries an optional passphrase with the same bounds as Rust", () => {
+test("an encrypted private key carries an optional passphrase with the same bounds as the host", () => {
   const withPassphrase = {
     name: "db",
     host: "10.0.0.5",
@@ -100,7 +100,7 @@ test("an encrypted private key carries an optional passphrase with the same boun
     }).success,
     true,
   );
-  // 空串不是「空口令」：没填就该省略字段（`min(1)` 与 Rust 侧一致）。
+  // 空串不是「空口令」：没填就该省略字段（`min(1)` 与宿主侧一致）。
   assert.equal(
     AddServerInputSchema.safeParse({
       ...withPassphrase,
@@ -108,7 +108,7 @@ test("an encrypted private key carries an optional passphrase with the same boun
     }).success,
     false,
   );
-  // 与 Rust 的 `max(4_096)` 对齐：4_096 收，4_097 拒。
+  // 与宿主的 `max(4_096)` 对齐：4_096 收，4_097 拒。
   assert.equal(
     AddServerInputSchema.safeParse({
       ...withPassphrase,

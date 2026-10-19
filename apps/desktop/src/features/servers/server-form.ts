@@ -35,7 +35,7 @@ export const SERVER_FORM_VALIDATION_MESSAGES = {
 } as const;
 
 /**
- * 口令的提交规则，与 Rust 侧「空 / 纯空白 = 没有口令」对齐。
+ * 口令的提交规则，与宿主侧「空 / 纯空白 = 没有口令」对齐。
  *
  * 留空时返回 `undefined`，调用点据此**省略字段**：契约里 `passphrase` 是
  * `min(1)` 的可选字段，送一个 `""` 会被 schema 拒掉，而「明文 key」本身就是

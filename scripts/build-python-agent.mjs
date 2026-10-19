@@ -1,9 +1,10 @@
 #!/usr/bin/env node
 
-import { existsSync, statSync } from "node:fs";
+import { existsSync, rmSync, statSync } from "node:fs";
 import { join } from "node:path";
 import { spawnSync } from "node:child_process";
 import { fileURLToPath } from "node:url";
+import { materializeInternalSymlinks } from "./lib/materialize-internal-symlinks.mjs";
 
 const root = fileURLToPath(new URL("..", import.meta.url));
 const venvPython = join(
@@ -55,12 +56,31 @@ const args = [
   entrypoint,
 ];
 
+// PyInstaller's `--clean` only clears its own cache and the `distpath/yukinal-agent`
+// directory, so anything else left in `agent/runtime` from an earlier build survives
+// and `package.mjs` copies it into the payload unconditionally. The licence notice
+// was the concrete case: a failed PyInstaller run used to ship the previous build's
+// THIRD_PARTY_LICENSES.txt. Clear both the onedir and that file before building.
+rmSync(join(output, "yukinal-agent"), { recursive: true, force: true });
+rmSync(join(output, "THIRD_PARTY_LICENSES.txt"), { force: true });
+
 const result = spawnSync(python, args, { cwd: root, stdio: "inherit", windowsHide: true });
 if (result.error) {
   console.error(`Could not launch PyInstaller: ${result.error.message}`);
   process.exit(1);
 }
 if (result.status !== 0) process.exit(result.status ?? 1);
+
+if (process.platform === "darwin") {
+  const runtime = join(output, "yukinal-agent");
+  try {
+    const links = await materializeInternalSymlinks(runtime);
+    console.log(`Materialized ${links.length} internal macOS Agent symlink(s).`);
+  } catch (error) {
+    console.error(`Could not safely materialize the macOS Agent runtime: ${error.message}`);
+    process.exit(1);
+  }
+}
 
 const executable = join(output, "yukinal-agent", process.platform === "win32" ? "yukinal-agent.exe" : "yukinal-agent");
 if (!existsSync(executable) || !statSync(executable).isFile()) {
@@ -70,6 +90,10 @@ if (!existsSync(executable) || !statSync(executable).isFile()) {
 
 const licenses = spawnSync(python, [
   join(root, "scripts", "collect-python-licenses.py"),
+  // Enumerate the frozen payload, not this interpreter's site-packages: the notice
+  // must describe the bytes that ship.
+  "--payload",
+  join(output, "yukinal-agent"),
   "--destination",
   join(output, "THIRD_PARTY_LICENSES.txt"),
 ], { cwd: root, stdio: "inherit", windowsHide: true });

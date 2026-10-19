@@ -14,9 +14,12 @@ import { TOOL_ERROR_CODES, type ToolError } from "./tool.js";
  * connection drop and a retryable timeout) share a category; two codes that both
  * mention "approval" do too, because both end with the user deciding.
  *
- * `packages/shared/fixtures/error-taxonomy.json` is the single canonical mapping
- * and is asserted by both this package and `crates/database` so the Rust host
- * and the UI cannot drift.
+ * `packages/shared/fixtures/error-taxonomy.json` is the single canonical mapping.
+ * `errors.test.ts` asserts this package against it. The second asserter used to be
+ * `crates/database/tests/error_taxonomy.rs`, which is gone with the Rust host, so nothing
+ * on the native side reads the fixture today — the C++ host handles the handful of codes it
+ * needs by literal (`native/desktop_host/src/ipc_router.cpp:5473`). "Single source" here
+ * means the fixture, not a shared generator.
  */
 export const ERROR_CATEGORIES = [
   "input",

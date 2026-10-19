@@ -96,6 +96,7 @@ def create_app(settings: Settings, *, engine: AsyncEngine | None = None) -> Fast
         """
         return await service.authenticate_node(
             session,
+            nonce_session_factory=session_factory,
             node_id=x_yukinal_node,
             timestamp=x_yukinal_timestamp,
             nonce=x_yukinal_nonce,
@@ -474,7 +475,14 @@ def create_app(settings: Settings, *, engine: AsyncEngine | None = None) -> Fast
 
         Every gate check is time-aware on its own, so this only makes the stored
         state match reality sooner.
+
+        The tenant gate comes first and is the same one every sibling tenant route
+        uses: sweeping is a write, so an unknown or disabled tenant must be a 404
+        here too, not a 200 that reports a sweep of nothing. Without it the
+        endpoint is the one tenant path that answers for a tenant that does not
+        exist, and on a disabled tenant it would still move that tenant's rows.
         """
+        await service.require_tenant(session, tenant_id)
         expired = await service.expire_stale_approvals(session, tenant_id=tenant_id)
         return {"expired": expired}
 

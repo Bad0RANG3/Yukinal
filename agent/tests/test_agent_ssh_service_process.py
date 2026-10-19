@@ -311,5 +311,169 @@ class SshServiceProcessTests(unittest.IsolatedAsyncioTestCase):
                     binary, {"target": invalid_target, "credentials": credentials}
                 )
 
+    async def test_desktop_target_accepts_and_forwards_server_exec_denylist(self) -> None:
+        denylist = [
+            "rm -rf /",
+            {"pattern": "shutdown", "regex": True, "case_insensitive": True},
+            {"pattern": "mkfs", "regex": False},
+            "a" * 1024,
+            *["literal"] * 251,
+        ]
+        target = {
+            "target_id": "srv_example1",
+            "host": "stage.example.test",
+            "port": 22,
+            "username": "ops",
+            "host_key_fingerprint": "SHA256:AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA",
+            "auth": {"type": "agent"},
+            "allow_server_exec": True,
+            "server_exec_denylist": denylist,
+        }
+        with tempfile.TemporaryDirectory(prefix="yukinal-ssh-process-") as temporary:
+            binary = Path(temporary) / "service.exe"
+            binary.write_text("service", encoding="utf-8")
+            service, _, _ = SshServiceProcess.for_desktop_target(
+                binary,
+                {"target": target, "credentials": {"SSH_AUTH_SOCK": "/tmp/agent.sock"}},
+            )
+            config_text = service._config.read_text(encoding="utf-8")
+            configured_target = json.loads(config_text)["targets"][0]
+            self.assertEqual(configured_target["server_exec_denylist"], denylist)
+            self.assertIn(
+                json.dumps(denylist, separators=(",", ":"), ensure_ascii=False),
+                config_text,
+            )
+            await service.stop()
+
+    async def test_desktop_target_rejects_malformed_server_exec_denylist(self) -> None:
+        target = {
+            "target_id": "srv_example1",
+            "host": "stage.example.test",
+            "port": 22,
+            "username": "ops",
+            "host_key_fingerprint": "SHA256:AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA",
+            "auth": {"type": "agent"},
+        }
+        invalid_denylists = [
+            "rm -rf /",
+            {"pattern": "rm -rf /"},
+            None,
+            ["pattern"] * 257,
+            ["a" * 1025],
+            [""],
+            ["   "],
+            [42],
+            [None],
+            [True],
+            [["rm -rf /"]],
+            [{"pattern": "shutdown", "regex": "true"}],
+            [{"pattern": "shutdown", "regex": 1}],
+            [{"pattern": "shutdown", "case_insensitive": "true"}],
+            [{"pattern": "shutdown", "case_insensitive": 0}],
+            [{"pattern": "shutdown", "flags": "i"}],
+            [{"regex": True}],
+            [{"pattern": ""}],
+            ["echo\x00bad"],
+            ["\ud800"],
+            [{"pattern": "echo\x00bad"}],
+        ]
+        with tempfile.TemporaryDirectory(prefix="yukinal-ssh-process-") as temporary:
+            binary = Path(temporary) / "service.exe"
+            binary.write_text("service", encoding="utf-8")
+            for invalid in invalid_denylists:
+                with self.subTest(denylist=invalid):
+                    with self.assertRaises(SshServiceProcessError) as context:
+                        SshServiceProcess.for_desktop_target(
+                            binary,
+                            {
+                                "target": {**target, "server_exec_denylist": invalid},
+                                "credentials": {},
+                            },
+                        )
+                    self.assertEqual(
+                        str(context.exception),
+                        "the desktop host returned an invalid SSH target",
+                    )
+                    self.assertNotIn("shutdown", str(context.exception))
+                    self.assertNotIn("echo", str(context.exception))
+            for invalid in invalid_denylists:
+                with self.subTest(payload_denylist=invalid):
+                    with self.assertRaises(SshServiceProcessError) as context:
+                        SshServiceProcess.for_desktop_target(
+                            binary,
+                            {
+                                "target": target,
+                                "credentials": {},
+                                "server_exec_denylist": invalid,
+                            },
+                        )
+                    self.assertEqual(
+                        str(context.exception),
+                        "the desktop host returned an invalid SSH target",
+                    )
+
+    async def test_environment_accepts_and_rejects_server_exec_denylist(self) -> None:
+        base_document = {
+            "listen_port": 8765,
+            "api_token_env": "YUKINAL_SSH_API_TOKEN",
+            "targets": [{"auth": {"type": "agent"}}],
+            "server_exec_denylist": ["rm -rf /"],
+        }
+        environment = {
+            "YUKINAL_SSH_SERVICE_BINARY": sys.executable,
+            "YUKINAL_SSH_API_TOKEN": "test-token",
+            "SSH_AUTH_SOCK": "/tmp/yukinal-agent.sock",
+        }
+        with tempfile.TemporaryDirectory(prefix="yukinal-ssh-process-") as temporary:
+            config = Path(temporary) / "service.json"
+
+            config.write_text(json.dumps({
+                **base_document,
+                "targets": [{
+                    "auth": {"type": "agent"},
+                    "server_exec_denylist": [{"pattern": "mkfs", "regex": False}],
+                }],
+            }), encoding="utf-8")
+            with patch.dict(
+                os.environ,
+                {**environment, "YUKINAL_SSH_SERVICE_CONFIG": str(config)},
+                clear=True,
+            ):
+                self.assertIsNotNone(SshServiceProcess.from_environment())
+
+            for invalid in (
+                "rm -rf /",
+                [{"pattern": "shutdown", "regex": "true"}],
+                [{"pattern": "shutdown", "extra": True}],
+                [""],
+                [{"pattern": "echo\x00bad"}],
+                ["a" * 1025],
+                ["pattern"] * 257,
+            ):
+                for document in (
+                    {**base_document, "server_exec_denylist": invalid},
+                    {
+                        **base_document,
+                        "targets": [{
+                            "auth": {"type": "agent"},
+                            "server_exec_denylist": invalid,
+                        }],
+                    },
+                ):
+                    with self.subTest(denylist=invalid):
+                        config.write_text(json.dumps(document), encoding="utf-8")
+                        with patch.dict(
+                            os.environ,
+                            {**environment, "YUKINAL_SSH_SERVICE_CONFIG": str(config)},
+                            clear=True,
+                        ):
+                            with self.assertRaises(SshServiceProcessError) as context:
+                                SshServiceProcess.from_environment()
+                        message = str(context.exception)
+                        self.assertIn("server_exec_denylist", message)
+                        self.assertNotIn("shutdown", message)
+                        self.assertNotIn("echo", message)
+
+
 if __name__ == "__main__":
     unittest.main()

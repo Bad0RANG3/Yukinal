@@ -1,6 +1,6 @@
 # 贡献指南
 
-感谢你愿意参与 Yukinal。桌面宿主已是 **C++ WebView 宿主**：Rust/Tauri 宿主与 legacy Node agent 已按 [`docs/rust-removal-plan.md`](./docs/rust-removal-plan.md) 从仓库删除，`pnpm check` 不再依赖 cargo。C++/Python 重写按 `ssh_agent_development_brief.md` 分阶段推进；尚未迁移的命令返回 `NOT_IMPLEMENTED`，不回退旧宿主。因此最重要的贡献原则是：**先定义边界，再实现行为，最后用测试和文档把边界钉住。**
+感谢你愿意参与 Yukinal。桌面宿主已是 **C++ WebView 宿主**：Rust/Tauri 宿主与 legacy Node agent 已按 [`docs/rust-removal-plan.md`](./docs/rust-removal-plan.md) 从仓库删除，`pnpm check` 不再依赖 cargo。C++/Python 重写按 [`docs/rewrite-cpp-python.md`](./docs/rewrite-cpp-python.md) 与 [`docs/cpp-desktop-handoff.md`](./docs/cpp-desktop-handoff.md) 分阶段推进；尚未迁移的命令返回 `NOT_IMPLEMENTED`，不回退旧宿主。因此最重要的贡献原则是：**先定义边界，再实现行为，最后用测试和文档把边界钉住。**
 
 ## 开始之前
 
@@ -43,7 +43,7 @@ pnpm check
 git diff --check
 ```
 
-`pnpm check` 已覆盖文档链接、密钥扫描、发布卫生、跨语言契约、类型检查、单元测试、sidecar 冒烟、打包契约，以及 C++ SSH/桌面宿主与 Python Agent 的 CTest 套件；控制平面存在独立 venv 时还会跑其 SQLite 测试。修改打包或发布流程时还要按[交付与发布](./docs/release.md#发布验收)验证安装包。
+`pnpm check` 已覆盖文档链接、密钥扫描、发布卫生、跨语言契约、类型检查、单元测试、sidecar 冒烟、打包契约、仓库内命令运行器测试、门禁自身配置的护栏测试、桌面前端打包，以及 C++ SSH/桌面宿主与 Python Agent 的 CTest 套件；控制平面存在独立 venv 时还会跑其 SQLite 测试。门禁目前**没有** lint、格式化或静态分析步骤（既无 C++ 的 clang-format/clang-tidy，也无 JS/Python 的 eslint/ruff/mypy），因此风格与静态问题仍需人工审查。修改打包或发布流程时还要按[交付与发布](./docs/release.md#发布验收)验证安装包。
 
 ## Pull Request
 

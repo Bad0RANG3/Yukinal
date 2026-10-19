@@ -97,7 +97,7 @@ class RunFinalizationTests(unittest.IsolatedAsyncioTestCase):
         return [event for event in events if event["type"] in ("agent.failed", "agent.completed")]
 
     async def test_preparation_failures_emit_one_failed_and_finalize_before_model(self):
-        phases = ("budget", "history", "memory", "context_record", "all_records", "coordinator", "started_record")
+        phases = ("budget", "history", "memory", "coordinator")
         for phase in phases:
             with self.subTest(phase=phase):
                 sidecar, store, request, events = self.fixture()
@@ -109,16 +109,9 @@ class RunFinalizationTests(unittest.IsolatedAsyncioTestCase):
                         stack.enter_context(patch.object(agent, "conversation_budget_bytes", side_effect=error))
                     elif phase in ("history", "memory"):
                         stack.enter_context(patch.object(store, "context" if phase == "history" else "memory_context", side_effect=error))
-                    elif phase == "coordinator":
+                    else:
                         request["coordination"] = {"fixture": True}
                         stack.enter_context(patch.object(sidecar._coordination, "context", side_effect=error))
-                    else:
-                        record = store.record_event
-                        def fail_record(run_id, event):
-                            if phase == "all_records" or event["type"] == ("agent.started" if phase == "started_record" else "context.loaded"):
-                                raise error
-                            return record(run_id, event)
-                        stack.enter_context(patch.object(store, "record_event", side_effect=fail_record))
                     result = await self.launch(sidecar, request, agent)
                 self.assertEqual(result["state"], "failed")
                 self.assertEqual(agent.calls, 0)

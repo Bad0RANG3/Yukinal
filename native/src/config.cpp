@@ -7,6 +7,7 @@
 #include <filesystem>
 #include <fstream>
 #include <cstdint>
+#include <iterator>
 #include <regex>
 #include <set>
 #include <stdexcept>
@@ -316,6 +317,28 @@ std::string lowercase(std::string value) {
   return value;
 }
 
+bool is_server_exec_pattern_space(char ch) {
+  return ch == ' ' || ch == '\t' || ch == '\r' || ch == '\n' || ch == '\f' || ch == '\v';
+}
+
+// Every maximal run of {' ', '\t', '\r', '\n', '\f', '\v'} becomes a single ' ';
+// then leading and trailing ' ' are removed.
+std::string normalize_server_exec_text(const std::string& text) {
+  std::string normalized;
+  normalized.reserve(text.size());
+  bool pending_space = false;
+  for (const char ch : text) {
+    if (is_server_exec_pattern_space(ch)) {
+      pending_space = true;
+      continue;
+    }
+    if (pending_space && !normalized.empty()) normalized.push_back(' ');
+    pending_space = false;
+    normalized.push_back(ch);
+  }
+  return normalized;
+}
+
 bool host_matches_suffix(const std::string& host, const std::string& suffix) {
   return host == suffix || (host.size() > suffix.size() &&
       host.compare(host.size() - suffix.size(), suffix.size(), suffix) == 0 &&
@@ -435,15 +458,118 @@ std::string resolve_path(const std::string& path, const std::string& base_direct
 
 }  // namespace
 
+ServerExecDenyList parse_server_exec_denylist(const nlohmann::json& value, const std::string& label) {
+  ServerExecDenyList list;
+  if (!value.is_array()) throw std::runtime_error(label + " must be an array");
+  if (value.size() > kMaxServerExecDenyEntries) {
+    throw std::runtime_error(label + " must contain at most " +
+                             std::to_string(kMaxServerExecDenyEntries) + " entries");
+  }
+
+  for (std::size_t i = 0; i < value.size(); ++i) {
+    const Json& item = value[i];
+    const std::string entry_label = label + "[" + std::to_string(i) + "]";
+    const std::string invalid_pattern =
+        entry_label + ".pattern must be a non-empty string of at most " +
+        std::to_string(kMaxServerExecDenyPatternBytes) + " bytes";
+
+    ServerExecDenyEntry entry;
+    std::string raw_pattern;
+    bool has_pattern = false;
+    if (item.is_string()) {
+      raw_pattern = item.get<std::string>();
+      has_pattern = true;
+    } else if (item.is_object()) {
+      require_only_keys(item, {"pattern", "regex", "case_insensitive"}, entry_label);
+      const auto pattern_it = item.find("pattern");
+      if (pattern_it != item.end() && pattern_it->is_string()) {
+        raw_pattern = pattern_it->get<std::string>();
+        has_pattern = true;
+      }
+      const auto optional_boolean = [&](const char* key, bool* destination) {
+        const auto it = item.find(key);
+        if (it == item.end()) return;
+        if (!it->is_boolean()) throw std::runtime_error(entry_label + "." + key + " must be a boolean");
+        *destination = it->get<bool>();
+      };
+      optional_boolean("regex", &entry.is_regex);
+      optional_boolean("case_insensitive", &entry.case_insensitive);
+    } else {
+      throw std::runtime_error(entry_label + " must be a string or an object");
+    }
+
+    if (!has_pattern || raw_pattern.size() > kMaxServerExecDenyPatternBytes ||
+        raw_pattern.find('\0') != std::string::npos) {
+      throw std::runtime_error(invalid_pattern);
+    }
+    // The normalized source is both what is compiled and what is reported: the
+    // same trim + whitespace-collapse is applied to literal and regex sources.
+    entry.pattern = normalize_server_exec_text(raw_pattern);
+    if (entry.pattern.empty()) throw std::runtime_error(invalid_pattern);
+
+    if (entry.is_regex) {
+      auto flags = std::regex::ECMAScript | std::regex::optimize;
+      if (entry.case_insensitive) flags |= std::regex::icase;
+      try {
+        entry.expression = std::make_shared<const std::regex>(entry.pattern, flags);
+      } catch (const std::regex_error&) {
+        throw std::runtime_error(entry_label + ".pattern is not a valid regular expression");
+      }
+    }
+    list.entries.push_back(std::move(entry));
+  }
+  return list;
+}
+
+nlohmann::json server_exec_denylist_to_json(const ServerExecDenyList& list) {
+  auto array = nlohmann::json::array();
+  for (const auto& entry : list.entries) {
+    array.push_back(nlohmann::json{{"pattern", entry.pattern},
+                                   {"regex", entry.is_regex},
+                                   {"case_insensitive", entry.case_insensitive}});
+  }
+  return array;
+}
+
+bool server_exec_command_is_denied(const ServerExecDenyList& list, const std::string& command,
+                                   std::string* matched_pattern) {
+  const std::string normalized_command = normalize_server_exec_text(command);
+  const std::string lowered_command = lowercase(normalized_command);
+  for (const auto& entry : list.entries) {
+    bool matched = false;
+    if (entry.is_regex) {
+      if (entry.expression) {
+        try {
+          matched = std::regex_search(normalized_command, *entry.expression);
+        } catch (const std::regex_error&) {
+          matched = false;
+        }
+      }
+    } else {
+      const std::string& candidate = entry.case_insensitive ? lowered_command : normalized_command;
+      const std::string& needle = entry.case_insensitive ? lowercase(entry.pattern) : entry.pattern;
+      matched = candidate.find(needle) != std::string::npos;
+    }
+    if (!matched) continue;
+    if (matched_pattern) *matched_pattern = entry.pattern;
+    return true;
+  }
+  return false;
+}
+
 ServiceConfig parse_config(const nlohmann::json& value, const std::string& base_directory) {
   require_object(value, "config");
-  require_only_keys(value, {"listen_port", "api_token_env", "targets"}, "config");
+  require_only_keys(value, {"listen_port", "api_token_env", "targets", "server_exec_denylist"}, "config");
 
   ServiceConfig config;
   config.listen_port = required_integer(value, "listen_port", 1, 65535, "config");
   config.api_token_env = required_string(value, "api_token_env", "config");
   if (!valid_env_name(config.api_token_env)) {
     throw std::runtime_error("config.api_token_env must be an environment variable name");
+  }
+  if (value.contains("server_exec_denylist")) {
+    config.server_exec_denylist =
+        parse_server_exec_denylist(value["server_exec_denylist"], "config.server_exec_denylist");
   }
 
   const auto targets_it = value.find("targets");
@@ -458,7 +584,7 @@ ServiceConfig parse_config(const nlohmann::json& value, const std::string& base_
     require_only_keys(entry,
                       {"target_id", "host", "port", "username", "known_hosts_file",
                        "host_key_fingerprint", "host_certificate_authority", "auth", "probe_only", "proxy",
-                       "allow_server_exec"},
+                       "allow_server_exec", "server_exec_denylist"},
                       label);
 
     TargetConfig target;
@@ -466,6 +592,16 @@ ServiceConfig parse_config(const nlohmann::json& value, const std::string& base_
     target.host = required_string(entry, "host", label);
     target.port = required_integer(entry, "port", 1, 65535, label);
     target.username = required_string(entry, "username", label);
+    // Service-level entries stay in front of the target's own entries. A target
+    // without its own key still receives the service-level entries.
+    target.server_exec_denylist.entries = config.server_exec_denylist.entries;
+    if (entry.contains("server_exec_denylist")) {
+      auto target_denylist =
+          parse_server_exec_denylist(entry["server_exec_denylist"], label + ".server_exec_denylist");
+      target.server_exec_denylist.entries.insert(target.server_exec_denylist.entries.end(),
+                                                 std::make_move_iterator(target_denylist.entries.begin()),
+                                                 std::make_move_iterator(target_denylist.entries.end()));
+    }
     if (entry.contains("probe_only")) {
       if (!entry["probe_only"].is_boolean()) {
         throw std::runtime_error(label + ".probe_only must be a boolean");

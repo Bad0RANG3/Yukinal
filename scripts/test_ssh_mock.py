@@ -356,6 +356,23 @@ def start_ssh_mock(
                         continue
                     if not data:
                         break
+                    if data == b"quit\n":
+                        # H-1 terminal regression: the server ends the shell
+                        # itself and closes the channel *with* an exit-status.
+                        # The frame must report that value verbatim; the pre-fix
+                        # `< 0 ? null : value` ternary masked a negated uint32 as
+                        # `null`, i.e. the same thing as "never received".
+                        channel.sendall(b"bye\n")
+                        channel.send_exit_status(0x80000000)
+                        channel.shutdown_write()
+                        # Hold the transport open until the client has consumed
+                        # the status and closed its side, as the exec path does;
+                        # tearing down the transport here would surface as a read
+                        # error instead of a clean EOF.
+                        terminal_close_deadline = time.monotonic() + 5
+                        while not channel.closed and time.monotonic() < terminal_close_deadline:
+                            time.sleep(0.02)
+                        return
                     channel.sendall(b"echo:" + data)
                 return
             command = server.command or b""
@@ -413,7 +430,7 @@ def start_ssh_mock(
             elif command == b"systemctl show --no-pager --property=LoadState,ActiveState,SubState,Description --value -- 'nginx.service' 2>&1":
                 channel.sendall(b"loaded\nactive\nrunning\nNginx web server\n")
                 channel.send_exit_status(0)
-            elif command == b"if command -v dpkg-query >/dev/null 2>&1; then dpkg-query --showformat='${Status}\\t${Version}\\n' --show -- 'nginx' 2>/dev/null || printf '%s\\n' absent; else printf '%s\\n' unsupported; fi":
+            elif command == b"if command -v apt-get >/dev/null 2>&1 && command -v dpkg-query >/dev/null 2>&1; then dpkg-query --showformat='${Status}\\t${Version}\\n' --show -- 'nginx' 2>/dev/null || printf '%s\\n' absent; else printf '%s\\n' unsupported; fi":
                 channel.sendall(b"install ok installed\t1.27.0-1\n")
                 channel.send_exit_status(0)
             elif command == b"docker restart --time 15 -- 'api' 2>&1":
@@ -454,6 +471,19 @@ def start_ssh_mock(
             elif command == b"systemctl is-active -- large.service":
                 channel.sendall(b"A" * 70000)
                 channel.send_exit_status(0)
+            elif command == b"systemctl is-active -- no-exit-status.service":
+                # Deliberately no send_exit_status(): the peer closes the channel
+                # without the RFC 4254 "exit-status" request. libssh2 seeds the
+                # status field to zero, so only libssh2_channel_has_exit_status
+                # can tell this apart from a clean `exit 0`.
+                channel.sendall(b"inactive\n")
+            elif command == b"systemctl is-active -- big-exit-status.service":
+                # RFC 4254 carries the exit status as a uint32; 0x80000000 is
+                # representable on the wire and narrows to a negative `int` in
+                # libssh2. It must be reported as a received status, not as
+                # "no exit-status".
+                channel.sendall(b"inactive\n")
+                channel.send_exit_status(0x80000000)
             elif command.startswith(b"stat -c %h '") and b"' 2>/dev/null || stat -f %l '" in command:
                 channel.sendall(b"1\n")
                 channel.send_exit_status(0)
@@ -804,6 +834,7 @@ def exercise_cpp_terminal(
     environment: dict[str, str],
     *,
     keyboard_interactive: bool = False,
+    server_exit_status: bool = False,
 ) -> None:
     terminal_config = root / "terminal-service.json"
     terminal_config.write_text(
@@ -874,8 +905,17 @@ def exercise_cpp_terminal(
         if (100, 30) not in TERMINAL_DIMENSIONS:
             raise AssertionError(f"C++ terminal did not forward the PTY resize: {TERMINAL_DIMENSIONS!r}")
 
-        process.stdin.write(json.dumps({"type": "close"}) + "\n")
-        process.stdin.flush()
+        if server_exit_status:
+            # Let the *server* end the shell so the following `closed` frame
+            # carries a server-reported exit-status rather than `null`.
+            process.stdin.write(json.dumps({"type": "write", "data": "quit\n"}) + "\n")
+            process.stdin.flush()
+            farewell = next_event()
+            if farewell.get("type") != "output" or base64.b64decode(str(farewell.get("data", ""))) != b"bye\n":
+                raise AssertionError(f"C++ terminal lost the server's final output: {farewell!r}")
+        else:
+            process.stdin.write(json.dumps({"type": "close"}) + "\n")
+            process.stdin.flush()
         closed = next_event()
         if closed.get("type") != "closed":
             raise AssertionError(f"C++ terminal did not report a clean close: {closed!r}")
@@ -883,6 +923,15 @@ def exercise_cpp_terminal(
             raise AssertionError(f"C++ terminal worker exited with {process.returncode}")
         if keyboard_interactive and "keyboard-interactive-success" not in AUTH_EVENTS:
             raise AssertionError(f"SSH mock did not accept the keyboard-interactive response: {AUTH_EVENTS!r}")
+        if server_exit_status:
+            # The server ended the shell itself and reported an exit-status, so
+            # `closed` must carry that value verbatim. Before the H-1 fix the
+            # `< 0 ? null : value` ternary reported the negated uint32 as `null`,
+            # which is indistinguishable from "no exit-status was received".
+            if closed.get("exit_code") != -2147483648:
+                raise AssertionError(f"C++ terminal masked the received exit status: {closed!r}")
+        elif closed.get("exit_code") is not None:
+            raise AssertionError(f"C++ terminal invented an exit status: {closed!r}")
     finally:
         if process.poll() is None:
             process.kill()
@@ -2028,6 +2077,21 @@ def run_test(service_binary: Path, *, agent_runtime_only: bool = False) -> None:
             expect_error(client, "srv_bad_auth", "nginx.service", 5, "authentication_failed")
             expect_error(client, "srv_stage1", "slow.service", 2, "timeout", max_elapsed=3.5)
             expect_error(client, "srv_stage1", "large.service", 5, "output_limit")
+            # H-1 regression: the mock closes the channel without sending an RFC
+            # 4254 "exit-status" request. libssh2's numeric status is zero-seeded,
+            # so before the fix this reported a successful `exit 0`; it must now
+            # surface as `result_unknown` instead of a false success.
+            expect_error(client, "srv_stage1", "no-exit-status.service", 5, "result_unknown")
+            # Same H-1 fix, other direction: 0x80000000 is a *received* status.
+            # libssh2 narrows it to a negative int, so pre-fix the `< 0` guard
+            # misreported it as result_unknown (false failure); it must now be
+            # reported verbatim. The generic client does not bound exit_code to
+            # 0..255 (only `server_exec` does), so this is observable here.
+            big_status = client.service_status("srv_stage1", "big-exit-status.service", timeout_seconds=5)
+            if big_status.exit_code != -2147483648:
+                raise AssertionError(f"uint32 exit status was not reported verbatim: {big_status!r}")
+            if big_status.stdout != "inactive\n":
+                raise AssertionError(f"uint32 exit status lost the command output: {big_status!r}")
 
             known_hosts.write_text("", encoding="ascii")
             expect_error(client, "srv_stage1", "nginx.service", 5, "host_key_unverified")
@@ -2043,6 +2107,16 @@ def run_test(service_binary: Path, *, agent_runtime_only: bool = False) -> None:
                 "auth": {"type": "private_key", "private_key_env": "YK_SSH_TEST_PRIVATE_KEY"},
             }
             exercise_cpp_terminal(service_binary, root, terminal_target, environment)
+            # H-1 terminal regression: same target, but this time the server ends
+            # the shell and reports exit-status 0x80000000, which libssh2 narrows
+            # to a negative int. The `closed` frame must carry it verbatim.
+            exercise_cpp_terminal(
+                service_binary,
+                root,
+                terminal_target,
+                environment,
+                server_exit_status=True,
+            )
             keyboard_terminal_target = {
                 "target_id": "srv_keyboard_interactive",
                 "host": "127.0.0.1",

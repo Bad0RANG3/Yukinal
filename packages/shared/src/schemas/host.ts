@@ -261,9 +261,10 @@ export const HostMcpCatalogResponseSchema = z.strictObject({
 }) satisfies z.ZodType<HostMcpCatalogResponse>;
 
 /**
- * Mirrors `McpContentBlock` (`crates/core/src/mcp/descriptor.rs`). A `strictObject` per
- * variant on purpose: a server that invents a block type gets it back as `other` with the
- * raw value, so an unmodelled type can never arrive looking like a text block.
+ * Mirrors the host's MCP content-block handling (`native/desktop_host/src/ipc_router.cpp`).
+ * A `strictObject` per variant on purpose: a server that invents a block type gets it back
+ * as `other` with the raw value, so an unmodelled type can never arrive looking like a text
+ * block.
  */
 export const HostMcpContentBlockSchema = z.union([
   z.strictObject({ type: z.literal("text"), text: z.string() }),

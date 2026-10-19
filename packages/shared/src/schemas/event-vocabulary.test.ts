@@ -1,26 +1,24 @@
 /**
- * The event vocabulary, pinned as an explicit list.
+ * The event vocabulary, pinned as an explicit list — with producer state per name.
  *
- * `EVENT_NAMES` (declared protocol names) and `EVENT_SCHEMAS` (the runtime gate that
- * also defines `DesktopEventName` / `AgentEventName`) overlap without being equal.
- * The overlap is real and intentional — Rust emits `server.updated` and
- * `terminal.opened` and the UI has no subscriber yet — but *nothing* recorded which
- * names are in that state, so the difference drifted invisibly instead of being a
- * decision someone makes.
+ * `EVENT_NAMES` (declared names) and `EVENT_SCHEMAS` (the runtime gate that also defines
+ * `DesktopEventName` / `AgentEventName`) overlap without being equal, and neither of them
+ * says anything about who *emits*. That gap is what this file records.
  *
- * The gap is now only Rust-only events (server.updated / terminal.opened). Every
- * agent member has a producer, a channel, and a consumer; `agent.text` and
- * `agent.usage` complete the provider-to-UI path.
- *
- * These tests make the sets visible, so adding or removing a channel has to be
- * deliberate.
+ * The earlier version of this header claimed the only gap was "Rust-only events", and that
+ * every agent member had "a producer, a channel, and a consumer". Both were false: the
+ * producers named were in files that no longer exist (`apps/agent/src/agent-loop.ts`,
+ * the retired `apps/desktop/src-tauri/`), and nine declared names have no emitter anywhere
+ * in the repository. So the lists below are *measured* states — gated, unproduced, and
+ * emitted-without-a-subscriber — and the tests assert they partition `EVENT_NAMES`. A name
+ * may not sit in two cells of the same question, and a name that changes state has to be
+ * changed here. The nine-name count is itself asserted: this is the C-2/B7 record.
  */
 
 import assert from "node:assert/strict";
 import test from "node:test";
 
-import { EVENT_NAMES } from "../events/index.js";
-import { tauriEventName } from "../events/index.js";
+import { EVENT_NAMES, eventChannelName } from "../events/index.js";
 import { TOOL_RESULT_STATUSES } from "../types/enums.js";
 import { AGENT_EVENT_MEMBER_SCHEMAS, AGENT_EVENT_TYPES, AgentStreamEventSchema } from "./agent.js";
 import { EVENT_SCHEMAS } from "./ipc.js";
@@ -50,54 +48,143 @@ const SUBSCRIBABLE = [
 ] as const;
 
 /**
- * Declared and emitted by Rust, but with no UI subscriber. Listed so the gap is a
- * recorded state rather than an accident; a new entry here should be a decision.
+ * Channels the UI actually subscribes to and no process emits — all nine of them.
+ *
+ * The UI has a handler or a branch for each (so none is dead on the consumer side), but a
+ * literal scan of every emitter in the repository — `native/**` and `agent/src/**`, which
+ * are the only two — finds no emit for any of them. Six are gated (`SUBSCRIBABLE`) and
+ * have a UI subscriber waiting; the three `server.*` names have neither a gate nor a
+ * subscriber, so they are reserved vocabulary in the strictest sense.
+ *
+ * Kept, not deleted, and each one is annotated per name in `../events/index.ts`:
+ *  - `server.connected` / `server.disconnected`: the host's `server_connect` /
+ *    `server_disconnect` only write the status column (`ipc_router.cpp:8837`, `:8807`).
+ *    The commands exist; emitting is an increment.
+ *  - `server.updated`: no emitter at all. `consistency.ts` used to assert "Rust emits it",
+ *    which was false when it was written and is unfalsifiable now.
+ *  - `server.auth_challenge`: the missing half of interactive SSH auth (C-1); the modal
+ *    subscribes and never receives.
+ *  - `agent.thinking` / `agent.usage`: the sidecar forwards exactly eight notification
+ *    types (`sidecar.py:1015-1019`) and neither is among them, although `useAgentRun`
+ *    branches on both.
+ *  - `terminal.output_lost`: no `Lagged` handling exists in the host's broadcast path.
+ *  - `activity.created`: four UI subscribers, none of which can receive; they poll instead.
+ *  - `investigation.schedule_notification`: the scheduler answers in command responses and
+ *    never pushes.
+ *
+ * Deleting any of them would make the eventual fix a contract break rather than an
+ * addition. What was wrong was pretending they were live.
  */
-const DECLARED_WITHOUT_A_SUBSCRIBER = [
+const NO_PRODUCER = [
   "server.connected",
   "server.disconnected",
   "server.updated",
-  "terminal.opened",
+  "server.auth_challenge",
+  "agent.thinking",
+  "agent.usage",
+  "terminal.output_lost",
+  "activity.created",
+  "investigation.schedule_notification",
 ] as const;
+
+/**
+ * Declared and really emitted, but nothing in the UI listens.
+ *
+ * `terminal.opened` is the only member: the C++ terminal manager does emit it
+ * (`native/desktop_host/src/desktop_terminal.cpp:391`); it has no `EVENT_SCHEMAS` gate
+ * because no subscriber needs one. Listed so the gap is a recorded state rather than an
+ * accident — a new entry here should be a decision.
+ */
+const EMITTED_WITHOUT_A_SUBSCRIBER = ["terminal.opened"] as const;
 
 test("the subscribable set is exactly the declared names that have a gate", () => {
   const gated = Object.keys(EVENT_SCHEMAS).sort();
   assert.deepEqual(gated, [...SUBSCRIBABLE].sort());
 });
 
-test("the three event sets partition EVENT_NAMES exactly", () => {
-  // No name may fall outside the recorded buckets, and none may be in two: an
-  // overlap would mean one of the lists above is lying about the channel's state.
-  const recorded = [
-    ...SUBSCRIBABLE,
-    ...DECLARED_WITHOUT_A_SUBSCRIBER,
-  ];
-  assert.equal(new Set(recorded).size, recorded.length, "a channel is in two buckets");
+test("the recorded event states partition EVENT_NAMES exactly", () => {
+  // Two independent questions are asked of every declared name — *can the UI subscribe?*
+  // (`SUBSCRIBABLE`) and *does anything emit it?* (`NO_PRODUCER`) — and their cross product
+  // has four cells. Together they must cover every name exactly once, so a name cannot be
+  // added to `EVENT_NAMES` without recording both answers. The two lists overlap by design:
+  // "gated and unproduced" is a real, common state, not a bookkeeping error.
+  const names = [...EVENT_NAMES].sort();
+  const gated = new Set<string>(SUBSCRIBABLE);
+  const unproduced = new Set<string>(NO_PRODUCER);
+  const emitted = new Set<string>(EMITTED_WITHOUT_A_SUBSCRIBER);
+
+  const cells = {
+    "gated, no measured absence of a producer": names.filter((n) => gated.has(n) && !unproduced.has(n)),
+    "gated, no producer": names.filter((n) => gated.has(n) && unproduced.has(n)),
+    "ungated, no producer": names.filter((n) => !gated.has(n) && unproduced.has(n)),
+    "ungated, emitted": names.filter((n) => emitted.has(n)),
+  };
+  for (const [label, members] of Object.entries(cells)) {
+    for (const name of members) {
+      assert.ok(
+        (SUBSCRIBABLE as readonly string[]).includes(name) ||
+          (NO_PRODUCER as readonly string[]).includes(name) ||
+          (EMITTED_WITHOUT_A_SUBSCRIBER as readonly string[]).includes(name),
+        `${name} is in the "${label}" cell but appears in none of the three lists`,
+      );
+    }
+  }
+  const covered = Object.values(cells).flat().sort();
+  assert.deepEqual(covered, names, "EVENT_NAMES changed without recording the channel's state here");
+  // Every list entry has to be a declared name, or a rename would leave a stale record.
+  for (const name of [...SUBSCRIBABLE, ...NO_PRODUCER, ...EMITTED_WITHOUT_A_SUBSCRIBER]) {
+    assert.ok((EVENT_NAMES as readonly string[]).includes(name), `${name} is recorded but not declared`);
+  }
+  assert.equal(new Set(names).size, names.length, "EVENT_NAMES has a duplicate");
+});
+
+test("the nine names with no producer are exactly the ones recorded as such", () => {
+  // The count is the deliverable (C-2/B7): nine declared names have no emitter in this
+  // repository. Pinning the number here means a tenth cannot appear unnoticed, and a fix
+  // that adds a producer has to delete exactly one entry — which is the reminder that a
+  // name moves out of this list by *emitting*, not by editing the list.
+  assert.equal(NO_PRODUCER.length, 9);
   assert.deepEqual(
-    [...recorded].sort(),
-    [...EVENT_NAMES].sort(),
-    "EVENT_NAMES changed without recording the channel's state here",
+    [...new Set([...NO_PRODUCER])].sort(),
+    [
+      "activity.created",
+      "agent.thinking",
+      "agent.usage",
+      "investigation.schedule_notification",
+      "server.auth_challenge",
+      "server.connected",
+      "server.disconnected",
+      "server.updated",
+      "terminal.output_lost",
+    ],
+    "the zero-producer set changed; update the per-name note in ../events/index.ts too",
   );
 });
 
-test("every declared name maps to a distinct Tauri channel", () => {
-  // `tauriEventName` is a plain `.` -> `:` substitution, so two logical names that
-  // differ only by separator would collide into one channel and cross-deliver.
-  const channels = EVENT_NAMES.map(tauriEventName);
+test("every declared name maps to a distinct host channel", () => {
+  // `eventChannelName` is the identity, so the assertion here is that the vocabulary has
+  // no duplicate and no name that two different channels could share. It used to be a
+  // `.`→`:` substitution worth testing for collisions; the C++ host consumes the dotted
+  // names verbatim, so a rewrite would now be the bug.
+  const channels = EVENT_NAMES.map(eventChannelName);
   assert.equal(new Set(channels).size, channels.length, "two event names share a channel");
   assert.equal(new Set(EVENT_NAMES).size, EVENT_NAMES.length, "EVENT_NAMES has a duplicate");
 });
 
-test("the agent channels the loop emits are all subscribable", () => {
-  // The producer side, transcribed from `apps/agent/src/agent-loop.ts`. If the loop
-  // gains an emit and this list is not updated, the UI silently cannot listen —
-  // which is the agent.text failure mode, so it is asserted rather than assumed.
+test("the agent channels the sidecar actually emits are all subscribable", () => {
+  // The producer side. This list was previously "transcribed from
+  // `apps/agent/src/agent-loop.ts`" — a file that no longer exists — and it included
+  // `agent.thinking` and `agent.usage`, which the Python sidecar never emits. That is how
+  // a false producer claim survived: the list was copied from a deleted implementation
+  // instead of from the one that runs.
+  //
+  // Verified against `agent/src/yukinal_agent/sidecar.py` (the notification sink at
+  // `:1015-1019` forwards `params.type`) and `model_agent.py:793,824`. A member the
+  // sidecar gains has to be added here, or the UI silently cannot listen to it.
   const emitted = [
     "agent.team_task",
     "agent.started",
-    "agent.thinking",
     "agent.text",
-    "agent.usage",
     "agent.tool_call",
     "agent.tool_result",
     "agent.waiting_approval",
@@ -108,7 +195,22 @@ test("the agent channels the loop emits are all subscribable", () => {
   for (const name of emitted) {
     assert.ok(
       (SUBSCRIBABLE as readonly string[]).includes(name),
-      `the agent loop emits ${name} but the UI cannot subscribe to it`,
+      `the sidecar emits ${name} but the UI cannot subscribe to it`,
+    );
+    assert.equal(
+      (NO_PRODUCER as readonly string[]).includes(name),
+      false,
+      `${name} is both recorded as emitted and as unproduced`,
+    );
+  }
+  // The other direction: a name recorded as unproduced must not simultaneously be recorded
+  // as emitted. `NO_PRODUCER` is now the complete nine-name list, so this check is what
+  // stops a future producer from being added in one place and forgotten in the other.
+  for (const name of NO_PRODUCER) {
+    assert.equal(
+      emitted.includes(name),
+      false,
+      `${name} has no producer in this repository`,
     );
   }
 });
@@ -133,9 +235,11 @@ test("every agent channel rejects a payload that is valid for a different channe
   // agent event" — this payload answered yes to all eight, and `useAgentRun`'s
   // `as Extract<…>` cast then told the handler it held a `result` that was not there.
   //
-  // The channel name *is* the payload's discriminator on the Rust side
-  // (`commands/mod.rs` emits on `tauri_event_name(params.type)`), so a mismatched pair
-  // cannot come off the transport — which is why rejecting it costs nothing real.
+  // The channel name *is* the payload's discriminator, and both come from the same
+  // field: the sidecar's notification sink publishes an `agent.stream` notification, and
+  // the host routes it by `params.type` (`native/desktop_host/src/ipc_router.cpp:8988-8990`)
+  // without rewriting it. So a payload arriving on `agent.completed` cannot carry
+  // `type: "agent.started"` — which is why rejecting it costs nothing real.
   for (const name of AGENT_CHANNELS) {
     const parsed = EVENT_SCHEMAS[name].safeParse(VALID_BUT_WRONG_MEMBER);
     if (name === "agent.started") {

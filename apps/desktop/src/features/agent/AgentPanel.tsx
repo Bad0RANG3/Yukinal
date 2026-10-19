@@ -126,7 +126,7 @@ export function AgentPanel({ onCloseStart, onCloseEnd, workspace = false, worksp
     // 崩溃与自动重启之间的间隔可能短于一次轮询，所以「进程死过」这件事要由重启记录
     // 提供，而不能只靠 `running === false`。
     sidecarRestart: restartId(agentStatus.data?.restart),
-    onAssistantMessage: (text, identity, sessionId) => void sessions.recordAssistantMessage(text, identity, sessionId),
+    onAssistantMessage: (text, identity, sessionId) => sessions.recordAssistantMessage(text, identity, sessionId),
     onApprovalRequested: () => { setAgentOpen(true); onAttentionRequested?.(); },
   });
 
@@ -181,7 +181,7 @@ export function AgentPanel({ onCloseStart, onCloseEnd, workspace = false, worksp
 
   const commandContext: CommandContext = { running: run.running, archived: sessions.archived, desktop: shell };
 
-  /** 可被 @ 提及的服务器 —— 直接来自 Rust 的服务器列表，不是凭空的候选。 */
+  /** 可被 @ 提及的服务器 —— 直接来自宿主的服务器列表，不是凭空的候选。 */
   const mentionCandidates: MentionCandidate[] = useMemo(
     () => (servers.data ?? []).map((server) => ({
       id: server.id,

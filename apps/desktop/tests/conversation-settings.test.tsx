@@ -24,6 +24,11 @@ function find(node: ReactNode, match: (element: Element) => boolean): Element {
   return result;
 }
 const named = (tree: ReactNode, label: string) => find(tree, (element) => element.props["aria-label"] === label);
+function buttons(node: ReactNode): Element[] {
+  if (Array.isArray(node)) return node.flatMap(buttons);
+  if (!isValidElement<Record<string, any>>(node)) return [];
+  return [...(node.type === "button" ? [node] : []), ...buttons(node.props.children)];
+}
 
 test("settings expose all real run modes and keep policy mismatch visible before advanced disclosure", () => {
   const markup = renderToStaticMarkup(<ConversationSettings {...base} runMode="plan" runPolicy="policy.development" targetEnvironment="production" />);
@@ -40,11 +45,14 @@ test("closed and running settings reject late events without changing the next r
   for (const state of [{ open: false, closing: true, running: false }, { open: true, closing: false, running: true }]) {
     const calls: unknown[] = [];
     const tree = ConversationSettings({ ...base, ...state, onRunModeChange: (v) => calls.push(v), onPermissionModeChange: (v) => calls.push(v), onRunPolicyChange: (v) => calls.push(v), onSelectRole: (v) => calls.push(v), onDeliveryChange: (v) => calls.push(v) });
-    for (const [label, value] of [["运行方式", "goal"], ["批准方式", "auto"], ["目标策略", "policy.development"], ["处理角色", base.roles[0]!.id]]) {
+    for (const [label, value] of [["运行方式", "goal"], ["批准方式", "auto"], ["处理角色", base.roles[0]!.id]]) {
       const control = named(tree, label!);
       assert.equal(control.props.disabled, true);
       control.props.onChange({ target: { value } });
     }
+    const policyButtons = buttons(named(tree, "目标策略").props.children);
+    assert.ok(policyButtons.length > 0);
+    assert.ok(policyButtons.every((button) => button.props.disabled), "the current Agent Node cannot accept policy IDs");
     find(tree, (e) => e.type === "button" && e.props.children === "等待完成").props.onClick();
     assert.deepEqual(calls, []);
   }
@@ -52,13 +60,16 @@ test("closed and running settings reject late events without changing the next r
   assert.match(closed, /aria-hidden="true" inert=""/);
 });
 
-test("editable settings preserve mode, approval, role and environment-auto payload semantics", () => {
+test("editable settings preserve mode, approval, role and delivery semantics while unsupported policies stay disabled", () => {
   const calls: unknown[] = [];
   const roleId = base.roles[0]!.id;
   const tree = ConversationSettings({ ...base, onRunModeChange: (v) => calls.push(["mode", v]), onPermissionModeChange: (v) => calls.push(["approval", v]), onRunPolicyChange: (v) => calls.push(["policy", v]), onSelectRole: (v) => calls.push(["role", v]), onDeliveryChange: (v) => calls.push(["delivery", v]) });
-  for (const [label, value] of [["运行方式", "plan"], ["批准方式", "auto"], ["目标策略", "policy.production"], ["目标策略", "environment"], ["处理角色", roleId], ["处理角色", ""]]) named(tree, label!).props.onChange({ target: { value } });
+  for (const [label, value] of [["运行方式", "plan"], ["批准方式", "auto"], ["处理角色", roleId], ["处理角色", ""]]) named(tree, label!).props.onChange({ target: { value } });
+  const policyButtons = buttons(named(tree, "目标策略").props.children);
+  assert.ok(policyButtons.length > 0);
+  assert.ok(policyButtons.every((button) => button.props.disabled), "the current Agent Node cannot accept policy IDs");
   find(tree, (e) => e.type === "button" && e.props.children === "等待完成").props.onClick();
-  assert.deepEqual(calls, [["mode", "plan"], ["approval", "auto"], ["policy", "policy.production"], ["policy", null], ["role", roleId], ["role", null], ["delivery", "sync"]]);
+  assert.deepEqual(calls, [["mode", "plan"], ["approval", "auto"], ["role", roleId], ["role", null], ["delivery", "sync"]]);
 });
 
 test("running settings still allow an explicit close while a closing panel rejects repeated close", () => {

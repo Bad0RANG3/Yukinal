@@ -12,8 +12,8 @@ import { dashboardResources } from "../overview/dashboard-model.js";
 import { TeamActionCue, TeamOperationOutline } from "../agent-nist/TeamActivity.js";
 import { ServerRowActions } from "./ServerRowActions.js";
 
-export function ServerTreeItem({ server, selected, disabled, onSelect, children }: {
-  server: Server; selected: boolean; disabled: boolean; onSelect: () => void; children: ReactNode;
+export function ServerTreeItem({ server, selected, disabled, onSelect, onOpenWorkpage, children }: {
+  server: Server; selected: boolean; disabled: boolean; onSelect: () => void; onOpenWorkpage?: () => void; children: ReactNode;
 }) {
   const [expanded, setExpanded] = useState(false);
   const groupId = useId();
@@ -29,7 +29,7 @@ export function ServerTreeItem({ server, selected, disabled, onSelect, children 
   const resources = dashboardResources(server.id, snapshot.data);
   const host = server.connection.host.includes(":") ? `[${server.connection.host}]` : server.connection.host;
   const address = `${server.connection.username}@${host}:${server.connection.port}`;
-  const openServices = () => { if (!disabled) useWorkpagesStore.getState().openTool("services", { serverId: server.id }); };
+  const openServices = () => { if (disabled) return; onSelect(); useWorkpagesStore.getState().openTool("services", { serverId: server.id }); onOpenWorkpage?.(); };
   return <li className="server-list-item">
     <div className={`server-row team-operation-target ${selected ? "server-row-selected" : ""}`}>
       {server.capabilities.docker ? <button type="button" className="server-tree-toggle" aria-label={`${expanded ? "收起" : "展开"} ${server.name} 的资源`} aria-expanded={expanded} aria-controls={groupId} onClick={() => setExpanded((value) => !value)}><Icon name={expanded ? "chevronDown" : "chevronRight"} size="xs" /></button> : <span className="server-tree-spacer" />}

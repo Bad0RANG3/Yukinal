@@ -10,6 +10,10 @@ test("AI recents hide an empty history and keep busy sessions unavailable", () =
   assert.equal(render([]), "");
   assert.match(render([session]), /最近对话/);
   assert.match(render([session]), /排查数据库连接池/);
-  assert.equal((render([session], true).match(/disabled=""/g) ?? []).length, 2);
+  // Busy disables behaviour, not the element: a `disabled` button drops focus, so a
+  // keyboard user would have to Tab back into the panel after every write.
+  assert.equal((render([session], true).match(/disabled=""/g) ?? []).length, 0);
+  assert.equal((render([session], true).match(/aria-disabled="true"/g) ?? []).length, 2);
   assert.match(render([], false, true), /读取失败.*重试/);
+  assert.equal((render([], true, true).match(/aria-disabled="true"/g) ?? []).length, 2);
 });

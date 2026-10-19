@@ -142,6 +142,10 @@ class PythonSidecar:
         self._conversations = conversation_store or ConversationStore()
         self._session_locks: dict[str, asyncio.Lock] = {}
         self._run_sessions: dict[str, str] = {}
+        self._terminal_emitted: set[str] = set()
+        # Terminal events whose notification failed, kept so the run's done-callback —
+        # the one hook that runs for every run — can hand them over a second time.
+        self._undelivered_terminals: OrderedDict[str, dict[str, Any]] = OrderedDict()
         self._resetting_sessions: set[str] = set()
         self._resetting_all = False
         self._coordination = CoordinationRuntime(self._registry, self._conversations, self._emit, self._launch_team)
@@ -696,6 +700,14 @@ class PythonSidecar:
         except Exception:
             raise _RpcFault(RPC_INVALID_PARAMS, "configured model cannot run the registered tools") from None
 
+        request["runId"] = run_id
+        try:
+            self._conversations.begin(request, _run_fingerprint(request))
+        except ValueError as error:
+            raise _RpcFault(RPC_INVALID_PARAMS, str(error)) from None
+        # Only a run that really opened a conversation turn counts as started. Marking
+        # the admission before `begin` would leave `duplicate: true` on a rejected
+        # attempt, so the caller could never retry a run that never began.
         if admission is not None:
             admission["started"] = True
         elif message_id:
@@ -708,22 +720,43 @@ class PythonSidecar:
             }
             self._prune_admissions()
 
-        request["runId"] = run_id
-        try:
-            self._conversations.begin(request, _run_fingerprint(request))
-        except ValueError as error:
-            raise _RpcFault(RPC_INVALID_PARAMS, str(error)) from None
         task = asyncio.create_task(self._execute_run(request, run_id, agent))
+        # `Task.cancel()` on a coroutine that has not taken its first step settles the
+        # task without executing one line of its body, so neither `_execute_run` nor
+        # `_execute_session_run` reaches a `finally`. This callback is the only hook
+        # that always runs, and it is what writes the terminal accounting in that case.
+        task.add_done_callback(lambda done, request=request, run_id=run_id: self._on_run_task_done(request, run_id, done))
         self._active_runs[run_id] = task
         self._run_sessions[run_id] = request["sessionId"]
         if request["delivery"] == "sync":
-            result = await task
+            result = await self._await_run_response(task, run_id)
             response: dict[str, Any] = {"runId": run_id, "started": True, "result": result}
         else:
             response = {"runId": run_id, "started": True}
         if resumed:
             response["resumed"] = True
         return response
+
+    @staticmethod
+    async def _await_run_response(task: asyncio.Task[dict[str, Any]], run_id: str) -> dict[str, Any]:
+        """Await a sync run, answering the caller even when the run itself was stopped.
+
+        A `delivery: "sync"` caller owns this RPC's response frame. When `agent.run.stop`
+        cancels a task that never took its first step, `await task` raises
+        `CancelledError` — and `asyncio.CancelledError` is a `BaseException`, so
+        `handle_async` cannot turn it into an error frame and the host would wait out its
+        15-minute `agent_run_start` timeout with no answer at all. Re-raising is only
+        correct when *this* RPC was cancelled; a run cancelled underneath it still owes
+        the caller a result.
+        """
+        try:
+            return await task
+        except asyncio.CancelledError:
+            current = asyncio.current_task()
+            if current is not None and current.cancelling():
+                raise
+            print(f"Stopped run {run_id} still answered its synchronous caller", file=sys.stderr, flush=True)
+            return {"runId": run_id, "state": "cancelled", "text": "", "steps": 0, "toolCalls": 0}
 
     async def _launch_team(self, job: dict[str, Any], parent: dict[str, Any], role: dict[str, Any]) -> dict[str, Any]:
         # Child sessions contain only the bounded task brief. They never hydrate
@@ -853,7 +886,11 @@ class PythonSidecar:
         pending = self._pending_approvals.get(approval_id)
         if pending is None or pending.run_id != run_id or pending.future.done():
             return {"accepted": False}
-        self._conversations.record_event(run_id, {"type": "approval.decision", **parsed})
+        # The decision is the RPC's result and it is what unblocks the run, so
+        # it is delivered even if the audit store fails. The store write is a
+        # durable trace, not a precondition: losing it must not leave the run
+        # waiting forever on a future nobody will ever settle.
+        self._record_run_event(run_id, {"type": "approval.decision", **parsed})
         pending.future.set_result(decision)
         return {"accepted": True}
 
@@ -941,7 +978,10 @@ class PythonSidecar:
             async with lock:
                 return await self._execute_session_run(request, run_id, agent)
         except asyncio.CancelledError:
-            # A queued turn can be stopped before it acquires the session lock.
+            # A queued turn can be stopped before it acquires the session lock. The
+            # cancelled run gets its terminal accounting and its `agent.completed`
+            # exactly as `_execute_session_run` would have written them; the callback
+            # below stays silent because this path already delivered the event.
             result = {"runId": run_id, "state": "cancelled", "text": "", "steps": 0, "toolCalls": 0}
             self._finish_run(request, run_id, "cancelled")
             self._emit_terminal({
@@ -953,19 +993,86 @@ class PythonSidecar:
         finally:
             self._run_sessions.pop(run_id, None)
             self._active_runs.pop(run_id, None)
-            if not any(session == request["sessionId"] for session in self._run_sessions.values()):
+            if request["sessionId"] not in self._run_sessions.values():
                 self._session_locks.pop(request["sessionId"], None)
+
+    def _on_run_task_done(self, request: dict[str, Any], run_id: str, task: asyncio.Task[dict[str, Any]]) -> None:
+        """Close a run whose task died before its own terminal accounting ran.
+
+        `Task.cancel()` on a coroutine that never took its first step does not execute
+        one statement of `_execute_run`; this callback is then the only code that
+        observes the run at all. `_execute_session_run` and the cancellation branch of
+        `_execute_run` both account for their run before the task finishes, so this is
+        reached only for a task that raised or was cancelled pre-step.
+        """
+        if task.cancelled():
+            state = "cancelled"
+        elif task.exception() is not None:
+            # Retrieving the exception also stops asyncio printing "Task exception was
+            # never retrieved"; the traceback still belongs on stderr for diagnosis.
+            print(f"Run {run_id} failed with {task.exception()!r}", file=sys.stderr, flush=True)
+            state = "failed"
+        elif run_id not in self._completed_runs:
+            # Unreachable through the public RPCs: a task that returns has already run
+            # either `_execute_session_run`'s or the cancellation branch's accounting.
+            print(f"Run {run_id} finished without terminal accounting", file=sys.stderr, flush=True)
+            state = "failed"
+        else:
+            self._retry_terminal_delivery(run_id)
+            return
+        self._finish_run(request, run_id, state)
+        if state == "failed":
+            self._emit_terminal({
+                "type": "agent.failed",
+                "runId": run_id,
+                "error": "agent_run_failed",
+                "at": _timestamp(),
+            })
+        else:
+            self._emit_terminal({
+                "type": "agent.completed",
+                "runId": run_id,
+                "result": {"runId": run_id, "state": "cancelled", "text": "", "steps": 0, "toolCalls": 0},
+                "at": _timestamp(),
+            })
+        self._retry_terminal_delivery(run_id)
+
+    def _terminal_accounting(self, request: dict[str, Any], run_id: str, status: str) -> None:
+        """The durable state a finished run must leave behind, whatever ended it."""
+        try:
+            self._conversations.finish(run_id, status)
+        except Exception:
+            print("Agent run status could not be saved to conversation history", file=sys.stderr, flush=True)
+        for approval_id, pending in list(self._pending_approvals.items()):
+            if pending.run_id == run_id:
+                self._pending_approvals.pop(approval_id, None)
+                if not pending.future.done():
+                    pending.future.cancel()
+        self._active_runs.pop(run_id, None)
+        self._run_sessions.pop(run_id, None)
+        fingerprint = _run_fingerprint(request)
+        self._completed_runs[run_id] = fingerprint
+        self._completed_runs.move_to_end(run_id)
+        while len(self._completed_runs) > 256:
+            self._completed_runs.popitem(last=False)
+        message_id = request.get("messageId")
+        admission = self._admissions.get(message_id) if message_id else None
+        if admission and admission["runId"] == run_id:
+            admission["completed"] = True
+            self._prune_admissions()
 
     async def _execute_session_run(
         self, request: dict[str, Any], run_id: str, agent: ModelDrivenAgent,
     ) -> dict[str, Any]:
         task_id = request.get("taskId")
         final_status = "failed"
+        # Safe defaults ensure cancellation and failure events describe the run even
+        # when context construction itself fails.
         context_usage: dict[str, Any] | None = None
         now = _timestamp
         try:
-            # Freeze a fresh status projection at each coordinator turn. Results
-            # completed after dispatch are visible without polluting worker history.
+            # Freeze a fresh coordinator projection each turn. Worker results become
+            # visible without adding worker transcripts to the foreground session.
             persona = request.get("persona")
             if request.get("coordination"):
                 persona = {"id": "coordinator", "label": "协调助手", "systemPrompt": self._coordination.context(request) +
@@ -978,7 +1085,7 @@ class PythonSidecar:
             context_usage = {**context.usage, "memorySources": sources}
             context_usage["inputBytes"] = message_bytes([*memories, *context.messages]) if memories or context.messages else 0
             context_usage["maxInputBytes"] = max(1, available_bytes)
-            self._conversations.record_event(run_id, {"type": "context.loaded", "context": context_usage})
+            self._record_run_event(run_id, {"type": "context.loaded", "context": context_usage})
             self._emit({
                 "type": "agent.started",
                 "runId": run_id,
@@ -1069,60 +1176,83 @@ class PythonSidecar:
             self._finish_run(request, run_id, final_status)
 
     def _finish_run(self, request: dict[str, Any], run_id: str, status: str) -> None:
-        # A failing transcript store must not retain active reservations or invite
-        # an automatic replay. Never print the underlying error or run payload.
-        try:
-            self._conversations.finish(run_id, status)
-        except Exception:
-            print("Agent run status could not be saved to conversation history", file=sys.stderr, flush=True)
         self._coordination.parents.pop(run_id, None)
-        for approval_id, pending in list(self._pending_approvals.items()):
-            if pending.run_id == run_id:
-                self._pending_approvals.pop(approval_id, None)
-                if not pending.future.done():
-                    pending.future.cancel()
-        self._active_runs.pop(run_id, None)
-        self._completed_runs[run_id] = _run_fingerprint(request)
-        self._completed_runs.move_to_end(run_id)
-        while len(self._completed_runs) > 256:
-            self._completed_runs.popitem(last=False)
-        message_id = request.get("messageId")
-        admission = self._admissions.get(message_id) if message_id else None
-        if admission and admission["runId"] == run_id:
-            admission["completed"] = True
-            self._prune_admissions()
+        self._terminal_accounting(request, run_id, status)
 
     def _emit_terminal(self, event: dict[str, Any]) -> None:
-        # Exactly one terminal delivery attempt, even if history persistence or
-        # coordinator bookkeeping fails. Ordinary events still fail closed.
+        run_id = event.get("runId")
+        if isinstance(run_id, str) and run_id in self._terminal_emitted:
+            return
         try:
             self._coordination.observe(event)
         except Exception:
             print("Agent terminal coordinator status could not be saved", file=sys.stderr, flush=True)
-        try:
-            self._conversations.record_event(event["runId"], event)
-        except Exception:
-            print("Agent terminal event could not be saved to conversation history", file=sys.stderr, flush=True)
+        if isinstance(run_id, str):
+            try:
+                self._record_run_event(run_id, event)
+            except Exception:
+                print("Agent terminal event could not be saved to conversation history", file=sys.stderr, flush=True)
         if self._notification_sink is not None:
             try:
                 self._notification_sink("agent.stream", event)
             except Exception:
                 print("Agent terminal notification could not be delivered", file=sys.stderr, flush=True)
+                if isinstance(run_id, str):
+                    self._undelivered_terminals[run_id] = event
+                    self._undelivered_terminals.move_to_end(run_id)
+                    while len(self._undelivered_terminals) > 256:
+                        self._undelivered_terminals.popitem(last=False)
+                return
+        if isinstance(run_id, str):
+            self._terminal_emitted.add(run_id)
+            self._undelivered_terminals.pop(run_id, None)
+            if len(self._terminal_emitted) > 512:
+                self._terminal_emitted = set(sorted(self._terminal_emitted)[-256:])
+
+    def _retry_terminal_delivery(self, run_id: str) -> None:
+        event = self._undelivered_terminals.pop(run_id, None)
+        if event is not None:
+            self._emit_terminal(event)
 
     def _prune_admissions(self) -> None:
+        # Admissions are insertion ordered and the cap is a memory bound, not a
+        # promise to remember finished work. Finished entries are dropped first
+        # because they are no longer needed for duplicate suppression. If every
+        # entry is still running there is nothing finished to drop, so the
+        # oldest admission goes: a duplicate of an evicted request executes
+        # again rather than the table growing without limit.
         while len(self._admissions) > 256:
-            for message_id, admission in list(self._admissions.items()):
+            for message_id, admission in self._admissions.items():
                 if admission["completed"]:
                     del self._admissions[message_id]
                     break
             else:
-                return
+                self._admissions.popitem(last=False)
+
+    def _record_run_event(self, run_id: str, event: dict[str, Any], *, required: bool = False) -> bool:
+        """Persist a run event; only required transcript writes can stop a run."""
+        try:
+            self._conversations.record_event(run_id, event)
+            return True
+        except Exception:
+            event_type = event.get("type")
+            safe_type = event_type if isinstance(event_type, str) and re.fullmatch(r"[A-Za-z0-9_.-]{1,80}", event_type) else "unknown"
+            print(f"Agent run event {safe_type} could not be saved to conversation history", file=sys.stderr, flush=True)
+            if required:
+                raise
+            return False
 
     def _emit(self, event: dict[str, Any]) -> None:
         if event.get("type") != "agent.team_task" and hasattr(self, "_coordination"):
             self._coordination.observe(event)
         if isinstance(event.get("runId"), str):
-            self._conversations.record_event(event["runId"], event)
+            # The audit row is the durable trace, not the delivery. The UI only leaves
+            # `running` on `agent.completed` / `agent.failed`, so a failing conversation
+            # store must never be allowed to consume the event.
+            # A streamed text delta is part of the transcript itself; fail that run
+            # rather than complete with text that could not be recorded. Other events
+            # are best-effort audit rows and must not block the run or its approval.
+            self._record_run_event(event["runId"], event, required=event.get("type") == "agent.text")
         if self._notification_sink is not None:
             self._notification_sink("agent.stream", event)
 
@@ -1433,7 +1563,7 @@ def _normalize_ssh_inventory(
         package = arguments.get("package")
         if (
             not isinstance(manager, str)
-            or manager not in {"apt", "dnf"}
+            or manager not in {"apt", "dnf", "yum"}
             or not isinstance(package, str)
             or len(package) > 128
             or re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9+._:-]*", package) is None

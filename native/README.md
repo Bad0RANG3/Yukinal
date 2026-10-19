@@ -82,7 +82,11 @@ Windows verification used the NMake generator and passed all six registered
 CTest targets with the Agent and optional Paramiko test dependencies installed:
 the C++ config/policy/network tests, Python client tests, service HTTP
 integration, Python Agent tests, SSH mock integration, and Agent-to-SSH
-integration. Ubuntu CI additionally enables the real OpenSSH container test,
+integration. (2026-10-18: that list was superseded. The current suite registers
+**13** targets and the Python client/service-integration modules are no longer
+separate targets — they run inside `python_agent_tests`, whose glob now covers
+every `agent/tests/test_*.py`. See `docs/acceptance-handoff.md` for the current
+list.) Ubuntu CI additionally enables the real OpenSSH container test,
 which checks host-key and authentication failures, bounded command execution,
 `hardlink@openssh.com:1` publication, and collision-safe no-replace behavior.
 The local Windows run did not execute that container test because Docker is not

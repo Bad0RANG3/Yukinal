@@ -12,7 +12,7 @@ import { AddServerModal } from "./AddServerModal.js";
 import { ServerPropertiesWindow } from "./ServerPropertiesWindow.js";
 import { ServerTreeItem } from "./ServerTreeItem.js";
 
-export function ServerList({ onClose, onSelect, embedded = false }: { onClose?: () => void; onSelect?: () => void; embedded?: boolean }) {
+export function ServerList({ onClose, onSelect, onOpenWorkpage, embedded = false }: { onClose?: () => void; onSelect?: () => void; onOpenWorkpage?: () => void; embedded?: boolean }) {
   const selectedServerId = useWorkspaceStore((state) => state.selectedServerId);
   const selectServer = useWorkspaceStore((state) => state.selectServer);
   const syncServerSelection = useWorkspaceStore((state) => state.syncServerSelection);
@@ -69,7 +69,7 @@ export function ServerList({ onClose, onSelect, embedded = false }: { onClose?: 
       {filteredServers.length ? (
         <ul className="server-list">
           {filteredServers.map((server) => (
-            <ServerTreeItem key={server.id} server={server} selected={selectedServerId === server.id} disabled={agentBusy && selectedServerId !== server.id} onSelect={() => { selectServer(server.id); onSelect?.(); }}>
+            <ServerTreeItem key={server.id} server={server} selected={selectedServerId === server.id} disabled={agentBusy && selectedServerId !== server.id} onSelect={() => { selectServer(server.id); onSelect?.(); }} onOpenWorkpage={onOpenWorkpage}>
               <button type="button" role="menuitem" aria-label={`查看 ${server.name} 的属性`} onClick={() => setPropertiesId(server.id)}><Icon name="file" size="sm" />属性</button>
               {server.status === "connected" ? (
                 <button type="button" role="menuitem" aria-label={`断开 ${server.name}`} disabled={busy} onClick={() => action.mutate({ type: "disconnect", serverId: server.id })}><Icon name="disconnect" size="sm" />断开连接</button>

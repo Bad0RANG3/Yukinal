@@ -3,6 +3,7 @@
 #include "yukinal/desktop_host/content_revision.hpp"
 
 #include <algorithm>
+#include <chrono>
 #include <condition_variable>
 #include <ctime>
 #include <iomanip>
@@ -21,6 +22,10 @@ constexpr std::size_t kMaxCallIdChars = 256;
 constexpr std::size_t kMaxServerIdChars = 256;
 constexpr std::size_t kMaxEnvironmentChars = 64;
 constexpr std::size_t kMaxTickets = 256;
+// Observations are cheap, but they must stay bounded too: one entry per pending
+// sidecar-owned approval, purged on every write and capped with soonest-expiry
+// eviction.
+constexpr std::size_t kMaxObservedApprovals = 256;
 constexpr std::int64_t kMaxApprovalTtlSeconds = 180;
 
 constexpr const char* kToolServerExec = "server.exec";
@@ -96,6 +101,45 @@ bool json_optional_string_list_field(const nlohmann::json& value, const char* ke
   return true;
 }
 
+// The fields every `agent.waiting_approval` carries, host-ticketed or not. The
+// two record paths differ in what they do with them, not in what they accept.
+struct WaitingApproval {
+  std::string approval_id;
+  std::string run_id;
+  std::string tool_name;
+  std::int64_t expires_at = 0;
+};
+
+std::optional<WaitingApproval> parse_waiting_approval(const nlohmann::json& params,
+                                                      std::int64_t now) {
+  if (!params.is_object() || !params.contains("approval") ||
+      !params.at("approval").is_object()) {
+    return std::nullopt;
+  }
+  const auto& approval = params.at("approval");
+  WaitingApproval parsed;
+  std::string event_type;
+  std::string approval_run_id;
+  std::string expires_at;
+  if (!json_string_field(params, "type", event_type) ||
+      !json_string_field(params, "runId", parsed.run_id) ||
+      !json_string_field(approval, "approvalId", parsed.approval_id) ||
+      !json_string_field(approval, "runId", approval_run_id) ||
+      !json_string_field(approval, "toolName", parsed.tool_name) ||
+      !json_string_field(approval, "expiresAt", expires_at)) {
+    return std::nullopt;
+  }
+  if (event_type != "agent.waiting_approval" || approval_run_id != parsed.run_id ||
+      parsed.run_id.empty() || parsed.run_id.size() > kMaxRunIdChars ||
+      parsed.approval_id.empty() || parsed.approval_id.size() > kMaxApprovalIdChars) {
+    return std::nullopt;
+  }
+  const auto epoch = parse_iso8601_utc_seconds(expires_at);
+  if (!epoch.has_value() || *epoch <= now) return std::nullopt;
+  parsed.expires_at = *epoch;
+  return parsed;
+}
+
 }  // namespace
 
 bool is_host_approval_tool_name(const std::string& tool_name) {
@@ -152,13 +196,28 @@ struct HostApprovalLedger::Impl {
     Phase phase = Phase::Pending;
   };
 
+  // A sidecar-owned approval the host only observed. The host holds no ticket and
+  // no admission decision for it; the entry exists so a response to an approval
+  // the sidecar really announced keeps forwarding, while an id nobody announced
+  // is refused instead of being answered with a success the host never obtained.
+  struct Observation {
+    std::string run_id;
+    std::int64_t expires_at = 0;
+  };
+
   std::mutex mutex;
   std::condition_variable changed;
   std::unordered_map<std::string, Entry> entries;
+  std::unordered_map<std::string, Observation> observed;
 };
 
 HostApprovalLedger::HostApprovalLedger() : impl_(std::make_unique<Impl>()) {}
 HostApprovalLedger::~HostApprovalLedger() = default;
+
+HostApprovalLedger::UnknownApprovalError::UnknownApprovalError(
+    const std::string& approval_id)
+    : std::runtime_error("no approval \"" + approval_id +
+                         "\" was requested for this run") {}
 
 bool HostApprovalLedger::record_waiting_event(const nlohmann::json& params,
                                               std::int64_t now) {
@@ -301,12 +360,61 @@ bool HostApprovalLedger::record_waiting_event(const nlohmann::json& params,
   return true;
 }
 
+bool HostApprovalLedger::record_sidecar_approval(const nlohmann::json& params,
+                                                 std::int64_t now) {
+  const auto parsed = parse_waiting_approval(params, now);
+  if (!parsed.has_value()) return false;
+  // A host action approval is the ticket path's business: recording it here too
+  // would let a torn-down ticket fall back to "observed" and keep forwarding.
+  if (is_host_approval_tool_name(parsed->tool_name)) return false;
+
+  std::lock_guard lock(impl_->mutex);
+  for (auto entry = impl_->observed.begin(); entry != impl_->observed.end();) {
+    if (entry->second.expires_at <= now) {
+      entry = impl_->observed.erase(entry);
+    } else {
+      ++entry;
+    }
+  }
+  if (const auto existing = impl_->observed.find(parsed->approval_id);
+      existing != impl_->observed.end()) {
+    // The sidecar re-emits a pending approval with a fresh deadline; keep the
+    // observation aligned with it, and never let it shorten.
+    existing->second.run_id = parsed->run_id;
+    existing->second.expires_at = std::max(existing->second.expires_at, parsed->expires_at);
+    return true;
+  }
+  if (impl_->observed.size() >= kMaxObservedApprovals) {
+    // Bounded and evictable: unlike a ticket, dropping the oldest observation
+    // can only turn a forwardable response back into a refusal, which fails
+    // closed. Evict the soonest expiry.
+    auto oldest = impl_->observed.begin();
+    for (auto entry = impl_->observed.begin(); entry != impl_->observed.end(); ++entry) {
+      if (entry->second.expires_at < oldest->second.expires_at) oldest = entry;
+    }
+    impl_->observed.erase(oldest);
+  }
+  impl_->observed.emplace(parsed->approval_id,
+                          Impl::Observation{parsed->run_id, parsed->expires_at});
+  return true;
+}
+
 std::optional<HostApprovalLedger::ResponseToken> HostApprovalLedger::begin_response(
     const std::string& approval_id, const std::string& run_id,
     const std::string& decision, std::int64_t now) {
   std::lock_guard lock(impl_->mutex);
   const auto found = impl_->entries.find(approval_id);
-  if (found == impl_->entries.end()) return std::nullopt;
+  if (found == impl_->entries.end()) {
+    const auto observed = impl_->observed.find(approval_id);
+    if (observed != impl_->observed.end() && observed->second.expires_at > now) {
+      // The sidecar owns this approval; it holds the only admission future. The
+      // host acknowledges nothing it did not mint, so the response keeps
+      // forwarding and the sidecar's own answer is the user-visible result.
+      return std::nullopt;
+    }
+    if (observed != impl_->observed.end()) impl_->observed.erase(observed);
+    throw UnknownApprovalError(approval_id);
+  }
   auto& entry = found->second;
   if (entry.binding.expires_at <= now) {
     impl_->entries.erase(found);
@@ -353,8 +461,14 @@ void HostApprovalLedger::finish_response(const ResponseToken& token, bool accept
 }
 
 std::optional<HostApprovalLedger::TicketError> HostApprovalLedger::consume(
-    const ExecutionBinding& request, const std::function<std::int64_t()>& now) {
+    const ExecutionBinding& request, const std::function<std::int64_t()>& now,
+    std::chrono::milliseconds wait) {
   std::unique_lock lock(impl_->mutex);
+  // The wait is bounded by wall-clock arithmetic against `wait` (the host TTL by
+  // default), not by the number of wake-ups: a ticket parked in Responding can
+  // pin one of the four host workers for at most that long, and no live ticket
+  // outlives its own deadline inside a single bounded wait.
+  const auto deadline = std::chrono::steady_clock::now() + wait;
   for (;;) {
     const auto found = impl_->entries.find(request.approval_id);
     if (found == impl_->entries.end()) return TicketError::Missing;
@@ -366,9 +480,24 @@ std::optional<HostApprovalLedger::TicketError> HostApprovalLedger::consume(
     switch (entry.phase) {
       case Impl::Phase::Pending:
         return TicketError::NotApproved;
-      case Impl::Phase::Responding:
-        impl_->changed.wait_for(lock, std::chrono::seconds(1));
+      case Impl::Phase::Responding: {
+        const auto remaining = deadline - std::chrono::steady_clock::now();
+        if (remaining <= std::chrono::milliseconds::zero()) {
+          // Nobody answered in time. Burn the ticket instead of leaving an
+          // unanswerable request behind, and report expiry so the caller fails
+          // closed with the same user-visible error as a ticket that timed out.
+          impl_->entries.erase(found);
+          impl_->changed.notify_all();
+          return TicketError::Expired;
+        }
+        // Wake at least once a second so a ticket that expires while parked is
+        // noticed, but never past the bound.
+        const auto tick =
+            std::chrono::duration_cast<std::chrono::steady_clock::duration>(
+                std::chrono::seconds(1));
+        impl_->changed.wait_for(lock, std::min(remaining, tick));
         continue;
+      }
       case Impl::Phase::Approved: {
         const bool matched = entry.binding.matches(request);
         impl_->entries.erase(found);

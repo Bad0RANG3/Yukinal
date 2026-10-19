@@ -2,6 +2,7 @@ import type { ApprovalDecision, ApprovalRequest } from "@yukinal/shared";
 
 import { Icon } from "../../components/Icon.js";
 import { KeywordText } from "../../components/KeywordText.js";
+import { printableContent } from "../workpages/workpage-model.js";
 import { targetLabel } from "./transcript.js";
 
 /** Presentation only: the caller retains the real ticket, submission lock and host response. */
@@ -21,10 +22,14 @@ export function ApprovalCard({ approval, onApproval, busy, status }: {
     {approval.factsSummary.length ? <ul className="approval-facts" aria-label="审批依据">
       {approval.factsSummary.map((fact, index) => <li key={index}>{fact}</li>)}
     </ul> : null}
-    <details className="approval-input" open>
-      <summary>核对本次操作</summary>
-      <pre className="agent-entry-body approval-input-json">{JSON.stringify(approval.input, null, 2) ?? "未提供参数"}</pre>
+    <details className="approval-input">
+      <summary>查看具体输入</summary>
+      <pre className="agent-entry-body approval-input-json"><code>{printableContent(approval.input)}</code></pre>
     </details>
+    {approval.callId || approval.inputFingerprint ? <p className="approval-reference">审批标识：
+      {approval.callId ? <span title={approval.callId}>调用 <code>{approval.callId.slice(0, 12)}</code></span> : null}
+      {approval.inputFingerprint ? <span title={approval.inputFingerprint}>指纹 <code>{approval.inputFingerprint.slice(0, 12)}</code></span> : null}
+    </p> : null}
     {approval.sessionGrantable === false ? <p className="approval-note">此操作每次都需要单独批准，不能记住到本次运行。</p> : null}
     {status ? <p className="approval-resolved" role="status">{status}</p> : <>
       {busy ? <p className="approval-pending" role="status">正在提交审批决定…</p> : null}

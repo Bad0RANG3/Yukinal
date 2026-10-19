@@ -79,19 +79,53 @@ start when neither `YUKINAL_CONTROL_TOKEN` nor the explicit local-only
 routes live under `/v1/node/...`, take no tenant id, and derive the tenant from
 the authenticated node row, so a node can never act on another tenant's data.
 
-A node signs this canonical string over the method, the path (with query), the
-timestamp, a random nonce and the SHA-256 of the body:
+A node signs this canonical string over its own node id, the method, the path
+(with query), the timestamp, a random nonce and the SHA-256 of the body:
 
 ```
-<timestamp>\n<nonce>\n<METHOD>\n<path[?query]>\n<sha256-hex(body)>
+<node-id>\n<timestamp>\n<nonce>\n<METHOD>\n<path[?query]>\n<sha256-hex(body)>
 ```
 
 and sends `X-Yukinal-Node`, `X-Yukinal-Timestamp`, `X-Yukinal-Nonce` and
-`X-Yukinal-Signature`. The timestamp must be inside a 300-second window, and the
-nonce is recorded in `node_nonces` so it can be used exactly once — a replay is
-`401`. An unknown node, a stale timestamp, a bad signature and a replayed nonce
-all return the same `401`, so the API never confirms which node ids exist.
-`nodeauth.sign_headers()` is the client half of that contract.
+`X-Yukinal-Signature`. The node id is signed *and* sent as a header: the header is
+unsigned routing data on the wire, so the signature is what binds the request to
+the row that id names. Signing it is what makes a header swap fail — with the id
+outside the signature, one key registered to a node in each of two tenants would
+let the *same* signed bytes be replayed as either node, and only the header would
+decide which tenant's rows were reached. A node driver must therefore know its own
+node id when it signs; `nodeauth.sign_headers(private_key, node_id=..., ...)` is
+the client half of that contract.
+
+The timestamp must be inside a 300-second window, and the nonce is recorded in
+`node_nonces` so it can be used exactly once — a replay is `401`. Two bounds keep
+that record from becoming a write the caller controls: a nonce longer than 128
+characters is refused before it reaches the database (the column is
+`varchar(128)`; SQLite would store an over-long value verbatim and PostgreSQL
+would raise instead of answering), and each node may hold at most 128 nonces still
+inside the signature window. Both refusals are byte-identical to a signature
+failure, as is an unknown node, a stale timestamp and a replayed nonce, so the API
+never confirms which node ids exist or which check refused the request.
+
+The cap is enforced by a single `INSERT ... SELECT ... WHERE count < cap`, not by
+a count followed by an insert. That matters: the claim happens *before* signature
+verification, and the earlier count-then-insert shape let every concurrent request
+that passed the count first read the same stale value, so the table overshot by
+roughly the number of concurrent callers (measured: 188 rows against a cap of 128
+at 64-way concurrency, reachable without a valid key). The same test now stops at
+exactly 128.
+
+The cap bounds *unauthenticated garbage writes*; it is **not** a per-node rate
+limit, but it does behave like a coarse one. A node that keeps more than
+`128 / 300 s ≈ 0.43` requests per second inside the window will exhaust it, and —
+because the refusal must stay indistinguishable from a bad signature — the node
+is told its signature is invalid. Raise `MAX_OUTSTANDING_NONCES_PER_NODE` for a
+deployment whose nodes poll faster than that; do not treat the default as a
+capacity figure.
+
+One public key backs exactly one node, globally — `uq_nodes_public_key`. A
+per-tenant constraint would not be enough for the reason above: the two rows only
+have to differ in tenant. Registering a key that is already in use is
+`409 conflict`, and the response does not name the node or tenant that holds it.
 
 Registration accepts the public key as base64, hex, or an
 `ssh-ed25519 <base64>` line and stores one canonical base64 form.
@@ -145,14 +179,17 @@ fingerprint, so approving `systemctl restart nginx` on node A does not authorise
 
 The gate is checked twice: when the task is created (the queue means "ready to
 dispatch", so a task that can never run would otherwise hold the node's single
-active slot) and again on the `queued → running` edge, which catches a decision
-that lapsed or was withdrawn in between, or a policy that changed under the task.
-A refusal is `409 approval_required` and names the reason (`approval_expired`,
+active slot) and again on **every edge whose target is `running`** — `queued →
+running` and the `unknown → running` resume alike, because a resumption puts the
+same effect back on the same node, and it catches a decision that lapsed or was
+withdrawn in between, or a policy that changed under the task. A refusal is
+`409 approval_required` and names the reason (`approval_expired`,
 `approval_revoked`, …) and the fingerprint to approve; a task the policy refuses
-outright is `403 action_denied`, because no decision could clear it. On the
-channel the same rule holds: a task that is not cleared is not handed over, and
-`ready`/`synced` report it under `waiting` with its reason and fingerprint instead
-of looking like an idle node.
+outright is `403 action_denied`, because no decision could clear it. A refused
+edge changes nothing at all: the status stays where it was and `attempts` is not
+incremented. On the channel the same rule holds: a task that is not cleared is
+not handed over, and `ready`/`synced` report it under `waiting` with its reason
+and fingerprint instead of looking like an idle node.
 
 Assignment itself is a conditional update (`... WHERE id = ? AND status =
 'queued'`), so two workers that both selected the same queued task cannot both
@@ -246,6 +283,14 @@ default later cannot silently re-open a tenant that had already chosen.
 - **Tenant isolation.** Every node, task, approval and model config is scoped to
   a tenant. A cross-tenant identifier is `404`, never `403`, so the API never
   confirms that a row exists in another tenant.
+- **A disabled tenant is closed everywhere.** `tenants.disabled` takes a tenant
+  out of service, and *every* route under `/v1/tenants/{tenant_id}` answers `404
+  not_found` for it — the same answer a missing tenant gets, so the surface cannot
+  be used to probe which tenants exist. The check lives in the shared resolvers
+  (`require_tenant`, and `require_node`/`require_task`, which call it first), not
+  in individual handlers, so a route added later inherits it rather than having to
+  remember it. A disabled tenant's nodes are refused too: node authentication
+  answers the same `401` as an unknown node.
 - **Approval before an effectful action.** See above: the approval is bound to
   the exact action by fingerprint, it has a window and a use budget, and both
   creation and dispatch check it.
@@ -274,7 +319,7 @@ approval counts.
 ## Verified and unverified
 
 Verified locally against SQLite, with the real FastAPI app, the real SQLAlchemy
-models and the real Alembic migrations (129 tests):
+models and the real Alembic migrations (148 tests):
 
 ```bash
 .venv/bin/python -m unittest discover -s tests -p "test_*.py"
@@ -304,7 +349,58 @@ decision, `dangerous: auto` was `422`, and setting `dangerous: deny` refused a n
 `server.exec` with `403 action_denied` *and* stopped the one already authorised,
 which the channel then reported as `waiting.reason = policy_denied`.
 
-Not yet verified, and not implemented:
+The hardening claims above were measured, not only asserted. Reverting just those
+edits in a copy of the tree and re-running the same probes gave: the same signed
+headers reached a task list in the *other* tenant with only the unsigned
+`X-Yukinal-Node` header changed (`true` before, `401` after), and registering one
+key in two tenants was `201` twice before against `409` after; a resume of a
+denied action returned `200` and moved the task to `running` with `attempts` 1 → 2
+before, against `403 action_denied` with the status still `unknown` and `attempts`
+still 1 after; 6 of the 24 `{tenant_id}` routes (`GET`/`POST` on a node,
+`recoverable`, `GET`/`POST` on a task, `POST .../approvals`) still answered a
+disabled tenant with `200`/`201` in a copy of this tree with exactly the four edits
+above reverted, against none after — and the same probe against `HEAD`, which
+predates the previous round of fixes as well, reports 9; a 100000-character nonce
+was stored (`MAX(LENGTH(nonce)) = 100000`) and the request was `200` before,
+against `401` with zero rows after; and 200 garbage-signature requests wrote 200
+`node_nonces` rows before, against exactly 128 after (the cap), with a correctly
+signed 129th request from the same node refused for the same reason.
+
+Each item was also reverted on its own, with the rest of the tree left in place, so
+the tests that pin it can be named rather than inferred: item 1 turns 5 tests red
+(`test_canonical_request_binds_the_node_id`,
+`test_a_signature_for_one_node_id_does_not_verify_for_another`,
+`test_a_signature_cannot_be_moved_to_another_node_by_its_header`,
+`test_a_public_key_cannot_back_a_node_in_two_tenants`,
+`test_migration_matches_the_models`); item 2 turns exactly the 2 resume tests red;
+item 3 turns 7 rows of the disabled-tenant sweep red — the 6 the probe reaches plus
+`POST .../tasks`, which returns `201` in the test because its node has no active
+task while the probe's fixture node is already busy; item 4 turns the 2 nonce tests
+red. Reverting everything at once turns 43 red, because dropping the node id from
+the signing helper breaks every caller of it — which is why the per-item runs keep
+each signature intact and change only the behaviour under test.
+
+## Upgrading an existing deployment
+
+Two changes in this revision are not backwards compatible, and both are
+deliberate:
+
+1. **The signature now covers the node id.** A node driver that signed the old
+   canonical string must be updated in the same step as the server, otherwise
+   every request it makes is `401`. The server cannot accept both strings: the
+   old one is exactly the ambiguity the node id closes. Roll the server and the
+   node drivers together.
+2. **`nodes.public_key` is globally unique**, so a deployment that registered one
+   key on two nodes cannot install the constraint until that is resolved.
+   `b7c41d0e9a2f` checks for duplicates *before* altering anything and refuses
+   with a `SHA256:<16 chars>` fingerprint per duplicated key (up to 10) rather
+   than failing inside an `ALTER TABLE` and leaving the schema half-changed — a
+   failed run leaves the version at `fc2e168fa85c`, so re-running is safe. Re-point
+   the extra node (register its own key, or delete it) and re-run the upgrade.
+   The migration deliberately does not pick a winner: which of the two rows is the
+   real node is a fact only the operator has.
+
+## Not yet verified, and not implemented
 
 - **PostgreSQL itself.** `asyncpg` installs and the schema is dialect-neutral,
   but no PostgreSQL server exists in this environment, so the migrations and the

@@ -89,7 +89,12 @@ bool authorized(const httplib::Request& request, const std::string& token) {
   return constant_time_equal(authorization.substr(sizeof(prefix) - 1), token);
 }
 
-int error_status(const ExecResult& result) {
+int error_status(const ExecResult& result) { return error_status_for(result); }
+
+}  // namespace
+
+int error_status_for(const ExecResult& result) {
+  if (result.error_code == "denied_by_policy") return 403;
   if (result.error_code == "already_exists") return 409;
   if (result.error_code == "timeout") return 504;
   if (result.error_code == "invalid_parameters") return 422;
@@ -98,8 +103,6 @@ int error_status(const ExecResult& result) {
   if (result.error_code == "resolver_busy" || result.error_code == "resolver_unavailable") return 503;
   return 502;
 }
-
-}  // namespace
 
 bool serve(const ServiceConfig& config, const std::string& api_token, OperationRunner runner,
            std::optional<std::uint64_t> parent_pid) {

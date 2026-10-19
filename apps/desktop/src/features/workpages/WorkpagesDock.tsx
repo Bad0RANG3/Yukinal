@@ -32,11 +32,16 @@ function focusActiveTab() {
   document.getElementById(page ? tabId(page) : "workpage-tab-fixed-files")?.focus({ preventScroll: true });
 }
 
-export function WorkpagesLauncher({ onOpen, additional = false }: { onOpen?: () => void; additional?: boolean } = {}) {
+export function WorkpagesLauncher({ onOpen, onChooseTarget, additional = false }: { onOpen?: () => void; onChooseTarget?: () => void; additional?: boolean } = {}) {
   const serverId = useWorkspaceStore((state) => state.selectedServerId);
   const open = useWorkpagesStore((state) => state.openTool);
   const active = useWorkpagesStore((state) => state.collapsed ? null : state.pages.find((page) => page.id === state.activeId));
   const openFromLauncher = (kind: WorkpageTool) => {
+    if (!serverId) {
+      onChooseTarget?.();
+      onOpen?.();
+      return;
+    }
     open(kind, { serverId, additional });
     onOpen?.();
     requestAnimationFrame(focusActiveTab);
@@ -44,7 +49,7 @@ export function WorkpagesLauncher({ onOpen, additional = false }: { onOpen?: () 
   return <div className="workpages-launcher" aria-label="打开工作页">{WORKPAGE_TOOLS.map((kind) => <button key={kind} type="button" className="workpages-launcher-button team-operation-target" data-attention={`tool:${kind}`} data-server-id={serverId ?? undefined} aria-label={`${additional ? "新建" : "打开"}${WORKPAGE_LABEL[kind]}工作页`} aria-pressed={!additional && active?.kind === kind && active.serverId === serverId} onClick={() => openFromLauncher(kind)}><Icon name={PAGE_ICON[kind]} size="sm" /><span className="workpages-tool-label">{WORKPAGE_LABEL[kind]}</span><TeamActionCue serverId={serverId} surface={kind} /><TeamOperationOutline serverId={serverId} surface={kind} /></button>)}</div>;
 }
 
-function WorkpageAddMenu() {
+function WorkpageAddMenu({ onChooseTarget }: { onChooseTarget?: () => void }) {
   const [open, setOpen] = useState(false);
   const root = useRef<HTMLDivElement>(null);
   const trigger = useRef<HTMLButtonElement>(null);
@@ -55,15 +60,15 @@ function WorkpageAddMenu() {
     if (event.key === "Escape" && open) { event.preventDefault(); event.stopPropagation(); setOpen(false); trigger.current?.focus(); }
   }}>
     <button ref={trigger} type="button" className="icon-button workpages-add-trigger" aria-label="新增工作页" title="新增工作页" aria-haspopup="dialog" aria-expanded={open} onClick={() => setOpen((current) => !current)}><Icon name="plus" size="sm" /></button>
-    {open ? <div className="workpages-add-menu" role="dialog" aria-label="新增工作页"><WorkpagesLauncher additional onOpen={() => setOpen(false)} /></div> : null}
+    {open ? <div className="workpages-add-menu" role="dialog" aria-label="新增工作页"><WorkpagesLauncher additional onOpen={() => setOpen(false)} onChooseTarget={onChooseTarget} /></div> : null}
   </div>;
 }
 
-function WorkpagesToolbar({ tabs }: { tabs: ReactNode }) {
+function WorkpagesToolbar({ tabs, onChooseTarget }: { tabs: ReactNode; onChooseTarget?: () => void }) {
   const state = useWorkpagesStore();
   const hasInformation = state.pages.length > 0 || state.operationsOpen;
   return <div className="workpages-toolbar has-tabs">
-    {tabs}<WorkpageAddMenu />
+    {tabs}<WorkpageAddMenu onChooseTarget={onChooseTarget} />
     <div className="workpages-active-controls" />
     <div className="workpages-toolbar-actions">
       <button type="button" className="workpages-records-button" aria-label="操作记录" aria-pressed={state.operationsOpen && !state.collapsed} onClick={() => state.setOperationsOpen(state.collapsed || !state.operationsOpen)} title="操作记录、证据与最近关闭的工作页"><Icon name="activity" size="sm" /><span>操作记录</span></button>
@@ -73,7 +78,7 @@ function WorkpagesToolbar({ tabs }: { tabs: ReactNode }) {
 }
 
 /** Information occupies the middle surface; chat has its own foreground sheet. */
-export function WorkpagesDock({ onPopOut }: { onPopOut?: WorkpagePopOut }) {
+export function WorkpagesDock({ onPopOut, onChooseTarget }: { onPopOut?: WorkpagePopOut; onChooseTarget?: () => void }) {
   const state = useWorkpagesStore();
   const serverId = useWorkspaceStore((state) => state.selectedServerId);
   const dockRef = useRef<HTMLElement>(null);
@@ -103,7 +108,8 @@ export function WorkpagesDock({ onPopOut }: { onPopOut?: WorkpagePopOut }) {
   const selectTab = (index: number) => {
     const tab = tabs[index];
     if (!tab) return;
-    if (tab.fixed) state.openTool(tab.kind as WorkpageTool, { serverId });
+    if (tab.fixed && serverId) state.openTool(tab.kind as WorkpageTool, { serverId });
+    else if (tab.fixed) onChooseTarget?.();
     else if (tab.page) state.activate(tab.page.id);
   };
   const selectedIndex = state.collapsed ? -1 : tabs.findIndex((tab) => tab.page?.id === state.activeId);
@@ -113,7 +119,7 @@ export function WorkpagesDock({ onPopOut }: { onPopOut?: WorkpagePopOut }) {
     event.preventDefault(); selectTab(next); document.getElementById(tabs[next]!.id)?.focus({ preventScroll: true });
   };
   return <section ref={dockRef} data-compact={compact} className={`workpages-dock ${state.pages.length ? "has-workpages" : ""} ${state.expandedId ? "is-expanded" : ""} ${state.collapsed ? "is-collapsed" : ""}`} aria-label="工作页">
-    <WorkpagesToolbar tabs={<div className="workpage-tabs" role="tablist" aria-label="工作页标签">{tabs.map((tab, index) => {
+    <WorkpagesToolbar onChooseTarget={onChooseTarget} tabs={<div className="workpage-tabs" role="tablist" aria-label="工作页标签">{tabs.map((tab, index) => {
       const page = tab.page;
       const label = page && (page.kind === "artifact" || page.kind === "evidence") ? page.title : WORKPAGE_LABEL[tab.kind];
       const target = tab.fixed ? serverId : page?.serverId;
@@ -123,8 +129,9 @@ export function WorkpagesDock({ onPopOut }: { onPopOut?: WorkpagePopOut }) {
     {null}
     <div className={`workpages-stage ${state.pages.length ? "" : "is-empty"}`}>
       {renderPages.map((page) => {
+        const open = state.pages.some((item) => item.id === page.id);
         const visible = isVisible(page);
-        return <WorkpageFrame key={page.id} page={page} active={page.id === state.activeId} visible={visible} promoteControls={visible && visibleCount === 1} serverName={page.serverId ? names.get(page.serverId) ?? page.serverId : "本机"} expanded={state.expandedId === page.id} onPopOut={onPopOut} />;
+        return <WorkpageFrame key={page.id} page={page} active={page.id === state.activeId} open={open} visible={visible} promoteControls={visible && visibleCount === 1} serverName={page.serverId ? names.get(page.serverId) ?? page.serverId : "本机"} expanded={state.expandedId === page.id} onPopOut={onPopOut} />;
       })}
     </div>
     <WorkpageOperations />
@@ -140,7 +147,7 @@ function WorkpageHeading({ page, titleId, serverName, promoteControls, children 
   return <><header ref={heading} hidden={Boolean(target)} className="workpage-heading"><Icon name={PAGE_ICON[page.kind]} size="sm" /><strong id={titleId} title={page.kind === "artifact" || page.kind === "evidence" ? page.title : undefined}>{page.kind === "artifact" || page.kind === "evidence" ? page.title : WORKPAGE_LABEL[page.kind]}</strong><span className="workpage-target" title={serverName}>{serverName}</span>{target ? null : children}</header>{target ? createPortal(children, target) : null}</>;
 }
 
-function WorkpageFrame({ page, active, visible, promoteControls, serverName, expanded, onPopOut }: { page: Workpage; active: boolean; visible: boolean; promoteControls: boolean; serverName: string; expanded: boolean; onPopOut?: WorkpagePopOut }) {
+function WorkpageFrame({ page, active, open, visible, promoteControls, serverName, expanded, onPopOut }: { page: Workpage; active: boolean; open: boolean; visible: boolean; promoteControls: boolean; serverName: string; expanded: boolean; onPopOut?: WorkpagePopOut }) {
   const titleId = useId();
   const { close, setDock, toggleExpanded, activate } = useWorkpagesStore();
   const [popOutError, setPopOutError] = useState<string | null>(null);
@@ -158,7 +165,7 @@ function WorkpageFrame({ page, active, visible, promoteControls, serverName, exp
     catch (error) { setPopOutError(errorMessage(error)); }
     finally { setOpening(false); }
   };
-  return <section hidden={!visible} id={`workpage-panel-${page.id}`} role="tabpanel" aria-labelledby={titleId} className={`workpage-frame team-operation-target workpage-kind-${page.kind} workpage-dock-${page.dock} ${active ? "is-active" : ""}`} data-active={active} onFocusCapture={() => { if (!active) activate(page.id); }}>
+  return <section hidden={!visible} id={open ? `workpage-panel-${page.id}` : undefined} role={open ? "tabpanel" : undefined} aria-labelledby={open ? titleId : undefined} className={`workpage-frame team-operation-target workpage-kind-${page.kind} workpage-dock-${page.dock} ${active ? "is-active" : ""}`} data-active={active} onFocusCapture={() => { if (open && !active) activate(page.id); }}>
     <WorkpageHeading page={page} titleId={titleId} serverName={serverName} promoteControls={promoteControls}><div className="workpage-controls">
       <button type="button" className="icon-button workpage-dock-control" aria-label={page.dock === "left" ? "移到右侧" : "移到左侧"} title={page.dock === "left" ? "移到右侧" : "移到左侧"} onClick={() => setDock(page.id, page.dock === "left" ? "right" : "left")}><DockIcon right={page.dock === "left"} /></button>
       <button type="button" className="icon-button" aria-label={expanded ? "还原工作页" : "展开工作页"} title={expanded ? "还原" : "展开"} onClick={() => toggleExpanded(page.id)}><ExpandIcon expanded={expanded} /></button>

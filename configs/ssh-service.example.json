@@ -1,6 +1,11 @@
 {
   "listen_port": 8765,
   "api_token_env": "YUKINAL_SSH_API_TOKEN",
+  "server_exec_denylist": [
+    "rm -rf /",
+    "mkfs",
+    {"pattern": "shutdown", "regex": true, "case_insensitive": true}
+  ],
   "targets": [
     {
       "target_id": "staging-web-01",
@@ -12,7 +17,11 @@
         "type": "private_key",
         "private_key_file": "./id_ed25519",
         "passphrase_env": "YUKINAL_SSH_KEY_PASSPHRASE"
-      }
+      },
+      "server_exec_denylist": [
+        "systemctl stop nginx",
+        {"pattern": "DROP\\s+TABLE", "regex": true, "case_insensitive": true}
+      ]
     }
   ]
 }

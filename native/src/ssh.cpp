@@ -29,15 +29,18 @@
 #include <winsock2.h>
 #include <ws2tcpip.h>
 #include <bcrypt.h>
+#include <windows.h>
 #else
 #include <arpa/inet.h>
 #include <fcntl.h>
 #include <netdb.h>
+#include <poll.h>
 #include <sys/socket.h>
 #include <unistd.h>
 #include <openssl/evp.h>
 #endif
 
+#include "exit_status.hpp"
 #include "ssh_network.hpp"
 #include "ssh_credentials.hpp"
 #include "ssh_timeouts.hpp"
@@ -896,15 +899,19 @@ ssize_t proxy_tls_write(libssh2_socket_t, const void* buffer, std::size_t length
 class SshResources {
  public:
   ~SshResources() {
-    if (bounded_metadata_cleanup_ && session_) {
-      // Metadata requests have already received their operation reply. Do not
-      // wait for another peer acknowledgement during cleanup, especially after
-      // a phase timed out; shutting down our socket makes libssh2 free locally.
+    if (shutdown_socket_before_cleanup_ && session_) {
+      // Metadata discovery has its own total deadline. Keep its cleanup from
+      // extending that deadline while the remote SFTP endpoint is unresponsive.
 #ifdef _WIN32
       if (socket_ != kInvalidSocket) shutdown(socket_, SD_BOTH);
 #else
       if (socket_ != kInvalidSocket) shutdown(socket_, SHUT_RDWR);
 #endif
+      libssh2_session_set_blocking(session_, 0);
+    }
+    if (graceful_channel_cleanup_ && session_) {
+      // One-shot commands have returned their result. Make a bounded attempt to
+      // finish the SSH close exchange so the peer can reap its channel promptly.
       libssh2_session_set_blocking(session_, 0);
     }
     if (agent_) {
@@ -915,16 +922,46 @@ class SshResources {
     if (sftp_) libssh2_sftp_shutdown(sftp_);
     if (channel_) {
       libssh2_channel_set_blocking(channel_, 0);
-      libssh2_channel_close(channel_);
-      libssh2_channel_free(channel_);
+      if (graceful_channel_cleanup_ && session_ && socket_ != kInvalidSocket) {
+        const auto cleanup_deadline = Clock::now() + std::chrono::milliseconds(250);
+        int close_result = LIBSSH2_ERROR_EAGAIN;
+        do {
+          close_result = libssh2_channel_close(channel_);
+          if (close_result != LIBSSH2_ERROR_EAGAIN) break;
+        } while (wait_for_ssh(socket_, session_, cleanup_deadline));
+        if (close_result != 0) abort_socket();
+      } else {
+        libssh2_channel_close(channel_);
+      }
+      int free_result = libssh2_channel_free(channel_);
+      if (free_result == LIBSSH2_ERROR_EAGAIN && graceful_channel_cleanup_) {
+        abort_socket();
+        free_result = libssh2_channel_free(channel_);
+      }
+      (void)free_result;
     }
     if (known_hosts_) libssh2_knownhost_free(known_hosts_);
     if (session_) {
       libssh2_session_set_blocking(session_, 0);
-      libssh2_session_free(session_);
+      const int free_result = libssh2_session_free(session_);
+      if (free_result == LIBSSH2_ERROR_EAGAIN && graceful_channel_cleanup_) {
+        abort_socket();
+        (void)libssh2_session_free(session_);
+      }
     }
     proxy_tls_.reset();
     close_socket(socket_);
+  }
+
+  void abort_socket() {
+    if (socket_ == kInvalidSocket) return;
+#ifdef _WIN32
+    shutdown(socket_, SD_BOTH);
+#else
+    shutdown(socket_, SHUT_RDWR);
+#endif
+    close_socket(socket_);
+    socket_ = kInvalidSocket;
   }
 
   bool initialize_session() {
@@ -941,7 +978,8 @@ class SshResources {
     return true;
   }
 
-  bool bounded_metadata_cleanup_ = false;
+  bool shutdown_socket_before_cleanup_ = false;
+  bool graceful_channel_cleanup_ = false;
   Socket socket_ = kInvalidSocket;
   SslPtr proxy_tls_{nullptr, SSL_free};
   Libssh2SessionContext session_context_;
@@ -1061,7 +1099,7 @@ bool connect_authenticated(const TargetConfig& target, Clock::time_point deadlin
                            detail::SftpMetadataDeadline* metadata_deadline = nullptr) {
   using Phase = detail::SftpMetadataDeadline::Phase;
   if (metadata_deadline) {
-    resources->bounded_metadata_cleanup_ = true;
+    resources->shutdown_socket_before_cleanup_ = true;
     deadline = metadata_deadline->enter(Phase::host_key);
   }
   if (initialize_libssh2() != 0) {
@@ -1387,6 +1425,7 @@ struct TerminalInputCommand {
 struct TerminalInputQueue {
   std::mutex mutex;
   std::condition_variable changed;
+  std::atomic_bool stop_requested{false};
   std::deque<TerminalInputCommand> commands;
   std::size_t queued_data_bytes = 0;
   std::size_t expected_auth_responses = 0;
@@ -1400,117 +1439,289 @@ constexpr std::size_t kMaxTerminalInputJsonBytes = kMaxTerminalInputFrameBytes *
 constexpr std::size_t kMaxQueuedTerminalInputBytes = 1024 * 1024;
 constexpr std::size_t kMaxQueuedTerminalCommands = 256;
 
-void read_terminal_input(const std::shared_ptr<TerminalInputQueue>& input) {
-  std::string line;
-  while (std::getline(std::cin, line)) {
-    StringWiper line_wiper{&line};
-    if (line.size() > kMaxTerminalInputJsonBytes) {
+enum class TerminalInputReadStatus { data, timeout, eof, error };
+
+TerminalInputReadStatus read_terminal_input_chunk(
+    const std::shared_ptr<TerminalInputQueue>& input, std::array<char, 4096>* buffer,
+    std::size_t* bytes_read) {
+  if (!buffer || !bytes_read) return TerminalInputReadStatus::error;
+  *bytes_read = 0;
+  if (input->stop_requested.load()) return TerminalInputReadStatus::timeout;
+#ifdef _WIN32
+  const HANDLE standard_input = GetStdHandle(STD_INPUT_HANDLE);
+  if (standard_input == nullptr || standard_input == INVALID_HANDLE_VALUE) {
+    return TerminalInputReadStatus::error;
+  }
+
+  DWORD available = 0;
+  if (PeekNamedPipe(standard_input, nullptr, 0, nullptr, &available, nullptr)) {
+    if (available == 0) {
+      std::this_thread::sleep_for(std::chrono::milliseconds(20));
+      return TerminalInputReadStatus::timeout;
+    }
+    DWORD received = 0;
+    const DWORD requested = static_cast<DWORD>(std::min<std::size_t>(buffer->size(), available));
+    if (!ReadFile(standard_input, buffer->data(), requested, &received, nullptr)) {
+      return GetLastError() == ERROR_BROKEN_PIPE ? TerminalInputReadStatus::eof
+                                                 : TerminalInputReadStatus::error;
+    }
+    if (received == 0) return TerminalInputReadStatus::eof;
+    *bytes_read = received;
+    return TerminalInputReadStatus::data;
+  }
+
+  const DWORD peek_error = GetLastError();
+  if (peek_error == ERROR_BROKEN_PIPE) return TerminalInputReadStatus::eof;
+  if (GetFileType(standard_input) == FILE_TYPE_DISK) {
+    DWORD received = 0;
+    if (!ReadFile(standard_input, buffer->data(), static_cast<DWORD>(buffer->size()),
+                  &received, nullptr)) {
+      return TerminalInputReadStatus::error;
+    }
+    if (received == 0) return TerminalInputReadStatus::eof;
+    *bytes_read = received;
+    return TerminalInputReadStatus::data;
+  }
+  if (peek_error != ERROR_INVALID_HANDLE && peek_error != ERROR_INVALID_FUNCTION) {
+    return TerminalInputReadStatus::error;
+  }
+  // Direct console use is uncommon (the desktop host connects this worker with
+  // pipes), but keep it cancellable too. Consume key events rather than entering
+  // a blocking ReadConsole call so destruction can always join the reader.
+  DWORD mode = 0;
+  if (!GetConsoleMode(standard_input, &mode)) return TerminalInputReadStatus::error;
+  const DWORD wait_result = WaitForSingleObject(standard_input, 20);
+  if (wait_result == WAIT_TIMEOUT) return TerminalInputReadStatus::timeout;
+  if (wait_result != WAIT_OBJECT_0) return TerminalInputReadStatus::error;
+  INPUT_RECORD records[64]{};
+  DWORD record_count = 0;
+  if (!ReadConsoleInputW(standard_input, records, 64, &record_count)) {
+    return TerminalInputReadStatus::error;
+  }
+  std::wstring characters;
+  characters.reserve(record_count);
+  for (DWORD index = 0; index < record_count; ++index) {
+    if (records[index].EventType != KEY_EVENT || !records[index].Event.KeyEvent.bKeyDown) continue;
+    const wchar_t character = records[index].Event.KeyEvent.uChar.UnicodeChar;
+    if (character == L'\r') characters.push_back(L'\n');
+    else if (character != L'\0') characters.push_back(character);
+  }
+  if (characters.empty()) return TerminalInputReadStatus::timeout;
+  const int encoded_size = WideCharToMultiByte(CP_UTF8, WC_ERR_INVALID_CHARS,
+      characters.data(), static_cast<int>(characters.size()), nullptr, 0, nullptr, nullptr);
+  if (encoded_size <= 0) return TerminalInputReadStatus::error;
+  std::string encoded(static_cast<std::size_t>(encoded_size), '\0');
+  if (WideCharToMultiByte(CP_UTF8, WC_ERR_INVALID_CHARS, characters.data(),
+                          static_cast<int>(characters.size()), encoded.data(), encoded_size,
+                          nullptr, nullptr) != encoded_size) {
+    return TerminalInputReadStatus::error;
+  }
+  const auto count = std::min(encoded.size(), buffer->size());
+  std::copy_n(encoded.data(), count, buffer->data());
+  *bytes_read = count;
+  return TerminalInputReadStatus::data;
+#else
+  pollfd descriptor{STDIN_FILENO, POLLIN, 0};
+  const int ready = ::poll(&descriptor, 1, 40);
+  if (ready == 0) return TerminalInputReadStatus::timeout;
+  if (ready < 0) {
+    if (errno == EINTR) return TerminalInputReadStatus::timeout;
+    return TerminalInputReadStatus::error;
+  }
+  const auto count = ::read(STDIN_FILENO, buffer->data(), buffer->size());
+  if (count == 0) return TerminalInputReadStatus::eof;
+  if (count < 0) {
+    if (errno == EINTR || errno == EAGAIN || errno == EWOULDBLOCK) {
+      return TerminalInputReadStatus::timeout;
+    }
+    return TerminalInputReadStatus::error;
+  }
+  *bytes_read = static_cast<std::size_t>(count);
+  return TerminalInputReadStatus::data;
+#endif
+}
+
+bool queue_terminal_input_line(const std::shared_ptr<TerminalInputQueue>& input,
+                               std::string line) {
+  StringWiper line_wiper{&line};
+  if (line.size() > kMaxTerminalInputJsonBytes) {
+    std::lock_guard lock(input->mutex);
+    input->invalid = true;
+    input->changed.notify_all();
+    return false;
+  }
+  try {
+    auto message = nlohmann::json::parse(line);
+    wipe(&line);
+    JsonStringWiper message_wiper{&message};
+    if (!message.is_object() || !message.contains("type") || !message["type"].is_string()) {
       std::lock_guard lock(input->mutex);
       input->invalid = true;
-      break;
+      input->changed.notify_all();
+      return false;
     }
-    try {
-      auto message = nlohmann::json::parse(line);
-      wipe(&line);
-      JsonStringWiper message_wiper{&message};
-      if (!message.is_object() || !message.contains("type") || !message["type"].is_string()) {
+    const std::string type = message["type"].get<std::string>();
+    TerminalInputCommand command;
+    if (type == "write" && message.size() == 2 && message.contains("data") &&
+        message["data"].is_string()) {
+      command.kind = TerminalInputCommand::Kind::write;
+      command.data = message["data"].get<std::string>();
+      if (command.data.size() > kMaxTerminalInputFrameBytes) {
         std::lock_guard lock(input->mutex);
         input->invalid = true;
-        break;
+        input->changed.notify_all();
+        return false;
       }
-      const std::string type = message["type"].get<std::string>();
-      TerminalInputCommand command;
-      if (type == "write" && message.size() == 2 && message.contains("data") &&
-          message["data"].is_string()) {
-        command.kind = TerminalInputCommand::Kind::write;
-        command.data = message["data"].get<std::string>();
-        if (command.data.size() > kMaxTerminalInputFrameBytes) {
-          std::lock_guard lock(input->mutex);
-          input->invalid = true;
-          break;
-        }
-      } else if (type == "resize" && message.size() == 3 && message.contains("columns") &&
-                 message.contains("rows") && message["columns"].is_number_unsigned() &&
-                 message["rows"].is_number_unsigned()) {
-        const auto columns = message["columns"].get<unsigned int>();
-        const auto rows = message["rows"].get<unsigned int>();
-        if (columns == 0 || columns > 1000 || rows == 0 || rows > 1000) {
-          std::lock_guard lock(input->mutex);
-          input->invalid = true;
-          break;
-        }
-        command.kind = TerminalInputCommand::Kind::resize;
-        command.columns = static_cast<std::uint16_t>(columns);
-        command.rows = static_cast<std::uint16_t>(rows);
-      } else if (type == "auth_response" && message.size() == 2 &&
-                 message.contains("responses") && message["responses"].is_array() &&
-                 message["responses"].size() <= 16) {
-        command.kind = TerminalInputCommand::Kind::auth_response;
-        bool valid_responses = true;
-        for (auto& response : message["responses"]) {
-          if (!response.is_string()) {
-            valid_responses = false;
-            break;
-          }
-          auto& secret = response.get_ref<std::string&>();
-          if (secret.size() > 4096) {
-            valid_responses = false;
-            break;
-          }
-          command.responses.push_back(std::move(secret));
-        }
-        std::lock_guard lock(input->mutex);
-        if (!valid_responses || !input->auth_prompt_active ||
-            command.responses.size() != input->expected_auth_responses) {
-          for (auto& response : command.responses) wipe(&response);
-          input->invalid = true;
-          input->changed.notify_all();
-          break;
-        }
-        input->auth_prompt_active = false;
-        input->expected_auth_responses = 0;
-        input->commands.push_back(std::move(command));
-        input->changed.notify_all();
-        continue;
-      } else if (type == "close" && message.size() == 1) {
-        command.kind = TerminalInputCommand::Kind::close;
-        std::lock_guard lock(input->mutex);
-        input->commands.push_back(std::move(command));
-        input->changed.notify_all();
-        break;
-      } else {
+    } else if (type == "resize" && message.size() == 3 && message.contains("columns") &&
+               message.contains("rows") && message["columns"].is_number_unsigned() &&
+               message["rows"].is_number_unsigned()) {
+      const auto columns = message["columns"].get<unsigned int>();
+      const auto rows = message["rows"].get<unsigned int>();
+      if (columns == 0 || columns > 1000 || rows == 0 || rows > 1000) {
         std::lock_guard lock(input->mutex);
         input->invalid = true;
-        break;
+        input->changed.notify_all();
+        return false;
       }
-
-      std::unique_lock lock(input->mutex);
-      input->changed.wait(lock, [&] {
-        return input->eof || input->auth_prompt_active ||
-               (input->commands.size() < kMaxQueuedTerminalCommands &&
-                input->queued_data_bytes + command.data.size() <= kMaxQueuedTerminalInputBytes);
-      });
-      if (input->eof || input->auth_prompt_active) {
+      command.kind = TerminalInputCommand::Kind::resize;
+      command.columns = static_cast<std::uint16_t>(columns);
+      command.rows = static_cast<std::uint16_t>(rows);
+    } else if (type == "auth_response" && message.size() == 2 &&
+               message.contains("responses") && message["responses"].is_array() &&
+               message["responses"].size() <= 16) {
+      command.kind = TerminalInputCommand::Kind::auth_response;
+      bool valid_responses = true;
+      for (auto& response : message["responses"]) {
+        if (!response.is_string()) {
+          valid_responses = false;
+          break;
+        }
+        auto& secret = response.get_ref<std::string&>();
+        if (secret.size() > 4096) {
+          valid_responses = false;
+          break;
+        }
+        command.responses.push_back(std::move(secret));
+      }
+      std::lock_guard lock(input->mutex);
+      if (!valid_responses || !input->auth_prompt_active ||
+          command.responses.size() != input->expected_auth_responses) {
+        for (auto& response : command.responses) wipe(&response);
         input->invalid = true;
         input->changed.notify_all();
-        break;
+        return false;
       }
-      input->queued_data_bytes += command.data.size();
+      input->auth_prompt_active = false;
+      input->expected_auth_responses = 0;
       input->commands.push_back(std::move(command));
       input->changed.notify_all();
-    } catch (const nlohmann::json::exception&) {
-      wipe(&line);
+      return true;
+    } else if (type == "close" && message.size() == 1) {
+      command.kind = TerminalInputCommand::Kind::close;
+      std::lock_guard lock(input->mutex);
+      input->commands.push_back(std::move(command));
+      input->changed.notify_all();
+      return false;
+    } else {
       std::lock_guard lock(input->mutex);
       input->invalid = true;
+      input->changed.notify_all();
+      return false;
+    }
+
+    std::unique_lock lock(input->mutex);
+    input->changed.wait(lock, [&] {
+      return input->stop_requested.load() || input->eof || input->auth_prompt_active ||
+             (input->commands.size() < kMaxQueuedTerminalCommands &&
+              input->queued_data_bytes + command.data.size() <= kMaxQueuedTerminalInputBytes);
+    });
+    if (input->stop_requested.load()) return false;
+    if (input->eof || input->auth_prompt_active) {
+      input->invalid = true;
+      input->changed.notify_all();
+      return false;
+    }
+    input->queued_data_bytes += command.data.size();
+    input->commands.push_back(std::move(command));
+    input->changed.notify_all();
+    return true;
+  } catch (const nlohmann::json::exception&) {
+    wipe(&line);
+    std::lock_guard lock(input->mutex);
+    input->invalid = true;
+    input->changed.notify_all();
+    return false;
+  }
+}
+
+void read_terminal_input(const std::shared_ptr<TerminalInputQueue>& input) {
+  std::string pending_line;
+  std::array<char, 4096> buffer{};
+  bool input_eof = false;
+  while (!input->stop_requested.load()) {
+    std::size_t bytes_read = 0;
+    const auto status = read_terminal_input_chunk(input, &buffer, &bytes_read);
+    if (status == TerminalInputReadStatus::timeout) continue;
+    if (status == TerminalInputReadStatus::eof) {
+      input_eof = true;
       break;
     }
+    if (status == TerminalInputReadStatus::error) {
+      std::lock_guard lock(input->mutex);
+      input->invalid = true;
+      input->changed.notify_all();
+      break;
+    }
+    for (std::size_t index = 0; index < bytes_read; ++index) {
+      const char character = buffer[index];
+      if (character == '\n') {
+        if (!pending_line.empty() && pending_line.back() == '\r') pending_line.pop_back();
+        std::string line = std::move(pending_line);
+        pending_line.clear();
+        if (!queue_terminal_input_line(input, std::move(line))) goto finished;
+        continue;
+      }
+      pending_line.push_back(character);
+      if (pending_line.size() > kMaxTerminalInputJsonBytes) {
+        std::lock_guard lock(input->mutex);
+        input->invalid = true;
+        input->changed.notify_all();
+        goto finished;
+      }
+    }
   }
+  if (input_eof && !pending_line.empty() && !input->stop_requested.load()) {
+    if (!pending_line.empty() && pending_line.back() == '\r') pending_line.pop_back();
+    (void)queue_terminal_input_line(input, std::move(pending_line));
+  }
+finished:
+  wipe(&pending_line);
   {
     std::lock_guard lock(input->mutex);
     input->eof = true;
   }
   input->changed.notify_all();
 }
+
+class TerminalInputReader {
+ public:
+  explicit TerminalInputReader(std::shared_ptr<TerminalInputQueue> input)
+      : input_(std::move(input)), reader_([input = input_] { read_terminal_input(input); }) {}
+
+  ~TerminalInputReader() {
+    if (!reader_.joinable()) return;
+    input_->stop_requested.store(true);
+    input_->changed.notify_all();
+    reader_.join();
+  }
+
+  TerminalInputReader(const TerminalInputReader&) = delete;
+  TerminalInputReader& operator=(const TerminalInputReader&) = delete;
+
+ private:
+  std::shared_ptr<TerminalInputQueue> input_;
+  std::thread reader_;
+};
 
 bool emit_terminal_message(const nlohmann::json& message) {
   std::cout << message.dump(-1, ' ', false, nlohmann::json::error_handler_t::replace)
@@ -1642,7 +1853,7 @@ int run_terminal_session(const TargetConfig& target, std::uint16_t columns,
     return 2;
   }
   const auto input = std::make_shared<TerminalInputQueue>();
-  std::thread(read_terminal_input, input).detach();
+  TerminalInputReader input_reader(input);
   TerminalAuthContext terminal_auth{input};
   ExecResult connection_result;
   SshResources resources;
@@ -1655,6 +1866,9 @@ int run_terminal_session(const TargetConfig& target, std::uint16_t columns,
                                            : connection_result.error_message}});
     return 2;
   }
+  // The terminal process is one-shot; its final frame is the last data the
+  // caller needs from this SSH session.
+  resources.graceful_channel_cleanup_ = true;
   if (!set_session_timeout(resources.session_, deadline)) {
     emit_terminal_message({{"type", "error"}, {"code", "timeout"}, {"message", "SSH terminal startup timed out"}});
     return 2;
@@ -1686,6 +1900,12 @@ int run_terminal_session(const TargetConfig& target, std::uint16_t columns,
 
   bool running = true;
   bool failed = false;
+  // `exit_status_received` distinguishes "the peer sent exit-status" from "the
+  // peer closed without one"; `exit_code` alone cannot, because libssh2 seeds a
+  // channel's status to zero and a legitimately received RFC 4254 uint32 may also
+  // narrow to a negative `int`. The JSON frame below is driven by the flag, so a
+  // received status is never downgraded to `null`. See `interpret_exit_status`.
+  bool exit_status_received = false;
   int exit_code = -1;
   std::array<char, 8192> buffer{};
   while (running) {
@@ -1773,7 +1993,20 @@ int run_terminal_session(const TargetConfig& target, std::uint16_t columns,
     }
     if (!running) break;
     if (libssh2_channel_eof(resources.channel_)) {
-      exit_code = libssh2_channel_get_exit_status(resources.channel_);
+      // `libssh2_channel_eof` also becomes true when a CHANNEL_CLOSE arrives
+      // without an "exit-status" request, and libssh2 defaults the numeric
+      // status field to zero, so reading it unconditionally would report a
+      // false success for a server that never sent the request. Only a received
+      // status is reported; otherwise the frame's `exit_code` stays JSON `null`
+      // to mean "not received". A received status is passed through verbatim
+      // (see `interpret_exit_status`), including a negative narrowed value.
+      const auto exit_status =
+          detail::interpret_exit_status(libssh2_channel_has_exit_status(resources.channel_),
+                                        libssh2_channel_get_exit_status(resources.channel_));
+      if (exit_status.received) {
+        exit_status_received = true;
+        exit_code = exit_status.value;
+      }
       break;
     }
     if (!made_progress) {
@@ -1787,8 +2020,8 @@ int run_terminal_session(const TargetConfig& target, std::uint16_t columns,
     (void)libssh2_channel_close(resources.channel_);
   }
   emit_terminal_message({{"type", "closed"},
-                         {"exit_code", exit_code < 0 ? nlohmann::json(nullptr)
-                                                       : nlohmann::json(exit_code)}});
+                         {"exit_code", exit_status_received ? nlohmann::json(exit_code)
+                                                            : nlohmann::json(nullptr)}});
   return failed ? 1 : 0;
 }
 
@@ -2121,6 +2354,9 @@ static ExecResult run_ssh_command_with_limits(const TargetConfig& target,
   const auto deadline = started + timeout;
   SshResources resources;
   if (!connect_authenticated(target, deadline, &resources, &result)) return result;
+  // This session serves one structured request. The result has no further use
+  // for the connection, so release the socket locally after the result is read.
+  resources.graceful_channel_cleanup_ = true;
 
   if (!set_session_timeout(resources.session_, deadline)) {
     fail(&result, "timeout", "SSH command timed out");
@@ -2196,12 +2432,20 @@ static ExecResult run_ssh_command_with_limits(const TargetConfig& target,
   }
 
   if (result.error_code.empty()) {
-    result.exit_code = libssh2_channel_get_exit_status(resources.channel_);
-    if (result.exit_code < 0) {
+    // See `interpret_exit_status`: libssh2's numeric status alone cannot report
+    // the absence of the "exit-status" request, so the companion
+    // `libssh2_channel_has_exit_status` flag is the gate. Anything the peer
+    // actually sent is reported verbatim, including values that libssh2's
+    // uint32-to-int narrowing makes negative (RFC 4254 allows the full range).
+    const auto exit_status =
+        detail::interpret_exit_status(libssh2_channel_has_exit_status(resources.channel_),
+                                      libssh2_channel_get_exit_status(resources.channel_));
+    if (!exit_status.received) {
       fail(&result, "result_unknown", "The SSH connection closed before an exit status was received");
     } else if (result.output_truncated && !preserve_truncated_output) {
       fail(&result, "output_limit", "SSH output exceeded the configured 64 KiB per-stream limit");
     } else {
+      result.exit_code = exit_status.value;
       result.completed = true;
     }
   }
@@ -2226,6 +2470,18 @@ static ExecResult server_exec_operation(const TargetConfig& target,
   if (!target.allow_server_exec) {
     ExecResult result;
     fail(&result, "operation_not_allowed", "server.exec requires a one-shot host authorization");
+    return result;
+  }
+  // Operator-configured command blacklist: a pure additional deny layer that runs
+  // after the one-shot capability gate above (which it must never mask) and before
+  // any command string is built or any SSH connection is attempted. Matching is on
+  // the raw `request.command` only -- `workdir`/`env` cannot influence the decision
+  // -- and the message deliberately never echoes the command or the matched pattern.
+  std::string denied_pattern;
+  if (server_exec_command_is_denied(target.server_exec_denylist, request.command, &denied_pattern)) {
+    ExecResult result;
+    fail(&result, "denied_by_policy",
+         "the server.exec command is blocked by the configured command blacklist");
     return result;
   }
   std::string command;
@@ -2409,9 +2665,9 @@ ExecResult package_inspect(const TargetConfig& target, const std::string& manage
   }
   const std::string package_arg = "'" + package + "'";
   const std::string command = manager == "apt"
-      ? "if command -v dpkg-query >/dev/null 2>&1; then dpkg-query --showformat='${Status}\\t${Version}\\n' --show -- " +
+      ? "if command -v apt-get >/dev/null 2>&1 && command -v dpkg-query >/dev/null 2>&1; then dpkg-query --showformat='${Status}\\t${Version}\\n' --show -- " +
             package_arg + " 2>/dev/null || printf '%s\\n' absent; else printf '%s\\n' unsupported; fi"
-      : "if command -v rpm >/dev/null 2>&1; then rpm --queryformat='installed\\t%{VERSION}-%{RELEASE}\\n' --query -- " +
+      : "if command -v " + manager + " >/dev/null 2>&1 && command -v rpm >/dev/null 2>&1; then rpm --queryformat='installed\\t%{VERSION}-%{RELEASE}\\n' --query -- " +
             package_arg + " 2>/dev/null || printf '%s\\n' absent; else printf '%s\\n' unsupported; fi";
   return run_ssh_command(target, command, timeout_seconds);
 }
@@ -2459,7 +2715,9 @@ ExecResult package_install(const TargetConfig& target, const std::string& manage
   const std::string command = manager == "apt"
       ? "DEBIAN_FRONTEND=noninteractive apt-get install --yes --no-install-recommends --no-remove -- " +
             package_arg + " 2>&1"
-      : "dnf install --assumeyes --setopt=install_weak_deps=False -- " + package_arg + " 2>&1";
+      : (manager == "dnf"
+             ? "dnf install --assumeyes --setopt=install_weak_deps=False -- " + package_arg + " 2>&1"
+             : "yum install --assumeyes -- " + package_arg + " 2>&1");
   return run_ssh_command_with_timeout_limit(target, command, timeout_seconds, 600);
 }
 

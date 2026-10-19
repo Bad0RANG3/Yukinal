@@ -1,6 +1,6 @@
 /** Bounded package-manager operations exposed to the Agent host bridge. */
 
-export const PACKAGE_MANAGERS = ["apt", "dnf"] as const;
+export const PACKAGE_MANAGERS = ["apt", "dnf", "yum"] as const;
 export type PackageManager = (typeof PACKAGE_MANAGERS)[number];
 
 export interface PackageInspectInput {

@@ -2,7 +2,8 @@
  * Main navigation skeleton:
  *
  *   Activity | Board | Teams | Settings <- primary nav
- *   Overview | Terminal | Files | Logs | Services  <- server-scoped pages
+ *   Overview | Activity <- server inspector pages
+ *   Files | Terminal | Logs | Services <- server-scoped workpages in the center
  *   AI workspace (persistent center) | Activity / selected server (right)
  *
  * Server selection is contextual; it does not need its own navigation entry.

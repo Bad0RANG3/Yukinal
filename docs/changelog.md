@@ -2,7 +2,45 @@
 
 本文件记录对用户有意义的版本变化和交付状态。详细实现与历史讨论可通过 Git 记录追溯。
 
-## 未发布
+## 2.0.0 — 2026-10-20
+
+重写后首个正式发行目标：采用 C++ WebView 桌面宿主、独立结构化 SSH 服务、Python Agent 和 React 界面，并提供 Windows NSIS、macOS DMG 与 Debian Linux 安装包。此提交的全平台门禁与安装器 smoke 正在 GitHub Actions 验证；安装包未签名，macOS 未公证，真实 Provider/MCP/用户 SSH 主机与安装后 GUI 文件传输仍需实际环境验收。发布资产应以对应的成功 workflow 为准。
+
+## 2.0.0-rc.7 — 2026-10-20
+
+新增 Python Agent 的显式 opt-in live Provider 工具循环探针与本机 OpenAI-compatible stub 测试；远程自定义 endpoint 限定为 HTTPS，loopback stub 可免 API key。离线探针回归 6/6 通过。GitHub Actions [Run 39319681035](https://github.com/Bad0RANG3/Yukinal/actions/runs/39319681035) 的 Windows NSIS、Ubuntu DEB、macOS DMG 构建、完整 gate 与安装 smoke 全部通过；Ubuntu CTest 9/9，含 OpenSSH 容器集成。该候选结果不代表真实 MCP/SSH 目标任务、A/O/F/R 全路径或安装版三平台 GUI 验收已经完成。
+
+## 2.0.0-rc.6 — 2026-10-20
+
+修复 Windows 运行发布门禁时的 symlink 用例误报：Windows 文件权限模型不提供 POSIX 可执行位，测试现在只在 POSIX 系统验证该位；macOS 仍会验证 Python.framework 文件链接展开时保留可执行权限。GitHub Actions [Run 39309839659](https://github.com/Bad0RANG3/Yukinal/actions/runs/39309839659) 的第 2 次 attempt 全绿：Windows NSIS、Ubuntu DEB、macOS DMG 均完成安装/启动/卸载 smoke，并验证独立用户数据保留。macOS 首次 job 在 hdiutil 创建 DMG 时失败，同一提交重跑通过；该结果确认 runner 的重试通过，不代表真实 Provider、OpenSSH、GUI 拖放和签名/公证已验收。
+
+## 2.0.0-rc.5 — 2026-10-20
+
+修复 macOS Agent 冻结载荷暂存：RC.3 的 macOS job 发现 PyInstaller 会在 Python.framework 中产生内部 symlink，而发布 manifest 只接受普通文件。构建现在只展开目标仍在 Agent runtime 内的链接，并拒绝越界链接、目录循环和特殊文件；新增覆盖展开和越界拒绝的测试。修复 Windows NSIS 构建参数把路径双重引号传入 `OutFile` 导致的安装器编译失败。等待 RC.5 三平台完整验证。
+
+## 2.0.0-rc.4 — 2026-10-20
+
+修复 macOS/Linux 候选门禁中发现的 SSH 终端子进程生命周期问题：远端 shell 关闭后，桌面宿主收到 `closed` 帧会关闭工作进程的 stdin，确保输入读取线程退出并回收子进程。终端宿主集成 mock 现在会等待 stdin EOF，以覆盖此行为。rc.4 等待三平台全门禁和安装器 smoke 结果。
+
+## 2.0.0-rc.3 — 2026-10-20
+
+发布候选工作流现在会在三个操作系统上分别创建并填充 `agent/.venv`，保证全量门禁与 PyInstaller 构建使用同一安装好的 Python 环境。此前 Windows 干净 runner 完成门禁后，在冻结 Agent 构建时因该虚拟环境不存在而退出；macOS/Linux 的 Windows 路径模拟测试也已在 rc.2 修复。rc.3 等待新的三平台安装器 smoke 结果。
+
+## 2.0.0-rc.2 — 2026-10-20
+
+修复首轮跨平台 CI 暴露的问题：macOS/Linux 跑门禁时，对 Windows 工具链的模拟测试错误地使用 runner 本机的 POSIX 路径拼接，导致三个 guardrail 测试失败。路径解析现在按目标平台选择；Windows 本地完整门禁及对应 guardrail 测试通过。新一轮三平台安装器 CI 正在运行。
+
+## 2.0.0-rc.1 — 2026-10-20
+
+这是重写后首个跨平台安装包候选，尚不是稳定版。除桌面工作区标签导航、Agent 会话恢复、SSH 认证挑战、流式传输和控制平面改进外，本候选增加 Windows NSIS、macOS DMG、Debian Linux 安装包构建与安装/启动/卸载 smoke。自动 smoke 不替代真实 Provider、SSH、GUI 文件拖放、签名和公证验收；发布状态见[交付与发布](./release.md)。
+
+- 2026-10-19 **桌面端工作页改为顶部浏览器式标签行**：文件／终端／日志／服务的打开入口从 `AgentHeader` 右侧控制区移到 `AgentHeader` 之下的独立一行（`apps/desktop/src/features/workpages/WorkspaceTabStrip.tsx`），四个启动按钮与已打开的工作页标签并排；标签从 `WorkpagesDock` 内部搬到了这一行，内容舞台不再被标签顶动，对话区始终留在下方。标签横向滚动时启动按钮不跟着滚走，窄容器下只折叠按钮文字（1000px）、提示文案（780px）与服务器名（560px），入口本身始终可见。启动按钮并入标签行后不再单独保留 `WorkpagesLauncher`，`agent-history.css` 中针对它的折叠规则随之迁到 `apps/desktop/src/styles/workpages-strip.css`。
+
+  只做视图导航，不涉及执行语义：没有"自动批准""替我继续"一类入口，也没有按标签的进度模型（不存在这层数据，造出来就是伪造）；审批仍然只能在对话里的审批卡上给出，权限模式与运行模式不变，运行中切换服务器依旧被拒绝，关闭标签只切可见性、不改每页打开时捕获的 `serverId`，终端会话照旧保留。被关闭而仍挂载的终端残留帧不再带 `role="tabpanel"`／`aria-labelledby`（标签已不存在，保留配对会让读屏的标签/面板关系断掉），焦点在关闭后回退到后继标签、无后继时回退到启动按钮。
+
+  另新增一个已持久化但尚未暴露入口的方向轴 `workpagesOrientation`（`horizontal`/`vertical`，默认 `horizontal`，落在 `preferences-store.ts` 并进 `partialize` 与 `sanitizePreferences` 白名单）：同一个值同时决定标签行排布方向与方向键轴向（`apps/desktop/src/features/workpages/tab-navigation.ts`），v1 只渲染横向以便日后加设置项时无需再改存储结构。**未做**满宽 40px 原生标题行（需同步升级 `window-shell.ts` 的 refine、`windows_window_frame.cpp` 的校验与 `paint_caption_surface` 的绘制分支，属于原生侧工作）、垂直标签的切换 UI，以及"更多标签"溢出菜单。**未做真实桌面宿主与真实供体的实机验收**，原生对照（拖动、双击最大化、≥1181px 融合路径与非融合降级路径）仍需单独验收。验证：`pnpm check` 绿；`apps/desktop` 333 项测试 332 通过 1 跳过；另见[工作页标签栏设计说明](./workspace-tabs-spec.md)。
+
+- 2026-10-19 **`server.exec` 命令黑名单**：C++ SSH 服务配置新增 `server_exec_denylist`，可写在根级（服务级，所有 target 继承）和每个 `targets[i]` 内（在该 target 自己的条目之前追加，只能增不能减，target 未写该键也照样继承根级名单）。条目可以是裸字符串（区分大小写的字面量）或 `{"pattern","regex","case_insensitive"}` 对象；最多 256 条，单条模式不超过 1024 UTF-8 字节。匹配前对命令和字面量做同一套空白归一化（连续空白折成一个空格再去首尾），字面量按子串匹配，`regex` 条目按 ECMAScript `regex_search`（`std::regex::optimize`，`case_insensitive` 时加 `std::regex::icase`）。名单只在两处程序代码里生效，且都只减不增：C++ SSH 服务在 `server_exec_operation` 里、在原有 `allow_server_exec` 一次性能力门之后、在任何命令拼接与 SSH 连接之前拒绝；C++ 桌面宿主改用 `YUKINAL_SSH_SERVICE_CONFIG` 指向文件里的根级名单，在**消耗一次性批准票据之前**拒绝，并在非空时把名单盖章进临时单目标配置。拒绝错误码统一为 `denied_by_policy`（HTTP 403），报文不回显命令或被命中的模式；配置解析期即校验，名单畸形（类型错、超过 256 条、空模式、超长模式、非布尔标志、未知键、正则编译失败）会让服务启动失败而不是带着空名单运行。该能力只约束 Agent 的 `server.exec`，不影响人在自己终端里手敲命令，也不替代审批流程。**它是纵深防御护栏而不是沙箱**：匹配只发生在原始命令字符串上、不做 shell 展开，`r''m`、`$IFS`、base64 管道等混淆写法可以绕过。两处有意的不对称：桌面宿主只读该文件的**根级** `server_exec_denylist`（忽略同一文件里 `targets[*]` 下的名单，后者只作用于服务侧）；且打包清单的启动段（`scripts/package.mjs:467`）只转发 `YUKINAL_AGENT_ENTRY`/`YUKINAL_SSH_SERVICE_BINARY`/`YUKINAL_DATA_DIR`，因此标准安装包启动时不会转发 `YUKINAL_SSH_SERVICE_CONFIG`——此时宿主侧名单为空、只有服务侧名单生效，而显式导出该变量的开发/CLI 启动两侧都生效。
 
 - **文档与仓库卫生整理（三轮审计）**：第一轮清理仓库根部误留的构建/验证 `.txt` 临时记录（`build*`/`ctest*`/`pnpm*`/`pub*`/`push*`/`commit*`/`test_out.txt`），并在 `.gitignore` 中按根目录锚定忽略，避免再次误提交。第二轮修正仍指向已删除 Rust/Tauri 宿主与 legacy Node 回退的过期文档（`CONTRIBUTING.md`、`SECURITY.md`、`agent/README.md`），删除 `.editorconfig` 中已无对应源码的 `[*.rs]` 段。第三轮合并 `package.json` 中重复声明的 `smoke:*` 脚本（同一命令原为两条键），并把 `docs/README.md` 索引补上 `native-desktop-host.md` 与 `cpp-desktop-handoff.md`。新增英文 [README](../README.md) 与中文 [README.zh-CN.md](../README.zh-CN.md)，顶部互相跳转，含徽章、架构图、组件表、功能状态表以及构建/配置/错误/安全速查。源码与接口版本未变。
 

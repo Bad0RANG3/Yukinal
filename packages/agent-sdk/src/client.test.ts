@@ -92,6 +92,23 @@ test("a request that is never answered times out instead of hanging", async () =
   client.close();
 });
 
+test("a closed transport fails in-flight requests and rejects new ones immediately", async () => {
+  const transport = createLoopbackTransport(() => undefined);
+  const client = new AgentClient(transport, { clientVersion: "test", requestTimeoutMs: 10_000 });
+  const inFlight = client.describe();
+  // Closing the transport is what a crashed sidecar does; the client must not keep
+  // accepting work that nothing can answer.
+  transport.close();
+  await assert.rejects(inFlight, /agent connection closed/);
+
+  const startedAt = Date.now();
+  await assert.rejects(client.ping(), /agent client is closed/);
+  assert.ok(Date.now() - startedAt < 1000, "a new request must fail fast rather than wait for the timeout");
+  // Idempotency: a later explicit close() must not throw or change the outcome.
+  client.close();
+  await assert.rejects(client.ping(), /agent client is closed/);
+});
+
 test("protocol version is a single shared constant", () => {
   assert.equal(YUKINAL_RPC_VERSION, "1.0");
 });

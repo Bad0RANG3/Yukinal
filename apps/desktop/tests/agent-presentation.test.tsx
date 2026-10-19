@@ -44,7 +44,7 @@ test("ordinary and native approvals share the complete real input review before 
   assert.equal(ordinary, shared);
   assert.ok(native.includes(shared));
   assert.equal((native.match(/approval-input-json/g) ?? []).length, 1);
-  const exactInput = renderToStaticMarkup(<pre className="agent-entry-body approval-input-json">{JSON.stringify(ticket.input, null, 2)}</pre>);
+  const exactInput = renderToStaticMarkup(<pre className="agent-entry-body approval-input-json"><code>{JSON.stringify(ticket.input, null, 2)}</code></pre>);
   assert.ok(shared.includes(exactInput));
   assert.ok(shared.includes(ticket.factsSummary[0]!));
   assert.ok(shared.indexOf("approval-input-json") < shared.indexOf("approval-actions"));

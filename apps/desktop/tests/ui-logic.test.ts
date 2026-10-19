@@ -5,7 +5,7 @@ import { callDesktop } from "../src/lib/ipc.js";
 import { installHost, removeHost } from "./host-mock.js";
 import { PRIMARY_NAV, useWorkspaceStore } from "../src/stores/workspace-store.js";
 import { buildServerInput, type ServerFormValues } from "../src/features/servers/server-form.js";
-import { RunLifecycle } from "../src/features/agent/run-lifecycle.js";
+import { resetAdmissionOnFailure, RunLifecycle, type PendingAdmission } from "../src/features/agent/run-lifecycle.js";
 import {
   AUDIO_ATTACHMENT_ACCEPT,
   audioAttachmentUrl,
@@ -41,9 +41,9 @@ afterEach(() => {
 test("server selection opens its workspace without resetting the current server's tab", () => {
   const workspace = useWorkspaceStore.getState();
   workspace.selectServer("srv_first");
-  workspace.setServerPage("files");
+  workspace.setServerPage("activity");
   workspace.selectServer("srv_first");
-  assert.equal(useWorkspaceStore.getState().serverPage, "files");
+  assert.equal(useWorkspaceStore.getState().serverPage, "activity");
   workspace.setPrimary("settings");
   workspace.selectServer("srv_second");
   assert.equal(useWorkspaceStore.getState().primary, "servers");
@@ -64,7 +64,7 @@ test("Activity replaces the dashboard and navigation preserves the current targe
   assert.equal(useWorkspaceStore.getInitialState().primary, "activity");
   const workspace = useWorkspaceStore.getState();
   workspace.selectServer("srv_role_target");
-  workspace.setServerPage("logs");
+  workspace.setServerPage("activity");
   workspace.setAgentDraft("尚未发送的排查内容");
   workspace.selectProvider("prv_existing", "ops-model");
   workspace.setPrimary("agents");
@@ -72,7 +72,7 @@ test("Activity replaces the dashboard and navigation preserves the current targe
   const state = useWorkspaceStore.getState();
   assert.equal(state.primary, "agents");
   assert.equal(state.selectedServerId, "srv_role_target");
-  assert.equal(state.serverPage, "logs");
+  assert.equal(state.serverPage, "activity");
   assert.equal(state.agentDraft, "尚未发送的排查内容");
   assert.equal(state.selectedProviderId, "prv_existing");
   assert.equal(state.selectedModel, "ops-model");
@@ -118,6 +118,50 @@ test("native string errors become visible Error messages", async () => {
   await assert.rejects(callDesktop(IPC_COMMANDS.serverConnect, { serverId: "srv_test" }), {
     name: "Error", message: "SSH authentication failed",
   });
+});
+
+/**
+ * The other half of tolerating an unknown field: tolerating it silently would be worse
+ * than throwing. `provider_list` is one of the commands the C++ host forwards verbatim
+ * from the Python sidecar, so a field the sidecar adds must not break the call — but the
+ * UI still has to say that the contract and the sidecar disagree.
+ */
+test("a sidecar response with an unknown field parses, and the addition is reported", async (context) => {
+  const warn = context.mock.method(console, "warn", () => {});
+  const provider = {
+    id: "prv_sidecar", kind: "openai-compatible", label: "Sidecar",
+    baseUrl: "https://api.example.test/v1", model: "example-model",
+    enabled: true, createdAt: "2026-01-01T00:00:00Z", updatedAt: "2026-01-01T00:00:00Z",
+  };
+  installHost({
+    invoke: async () => ({
+      providers: [
+        { ...provider, sidecarAddedField: { nested: true } },
+        { ...provider, id: "prv_known" },
+      ],
+    }),
+  });
+
+  const response = await callDesktop(IPC_COMMANDS.providerList, {});
+  assert.equal(response.providers.length, 2, "a tolerated field must not drop the entry that carries it");
+  assert.equal(response.providers[0]?.id, "prv_sidecar", "known fields stay readable next to the addition");
+  assert.equal(warn.mock.calls.length, 1, "the drift must be reported exactly once");
+  const [, reported] = warn.mock.calls[0]?.arguments ?? [];
+  assert.match(String(reported), /sidecarAddedField/);
+});
+
+test("a host-composed response with an unknown field still fails loudly", async () => {
+  // The tolerance is scoped to the sidecar-forwarded rows. `agent_status` is built by the
+  // host itself, so an unknown field there is a disagreement inside this repository and
+  // must keep throwing rather than joining the tolerant path.
+  installHost({
+    invoke: async () => ({
+      running: true, pid: 1, protocolVersion: "1.0", agentVersion: "1.0.0", toolCount: 1,
+      entry: "python-agent/yukinal-agent.exe", startedAt: "2026-01-01T00:00:00Z", lastExit: null,
+      hostAddedField: true,
+    }),
+  });
+  await assert.rejects(callDesktop(IPC_COMMANDS.agentStatus, {}), { name: "ZodError" });
 });
 
 const formValues: ServerFormValues = {
@@ -258,6 +302,51 @@ test("run lifecycle accepts one start and ignores duplicate or stale terminal ev
   assert.equal(lifecycle.finish("run_b"), false);
   assert.equal(lifecycle.finish("run_a"), true);
   assert.equal(lifecycle.finish("run_a"), false);
+});
+
+test("every terminal start failure clears the pending admission in useAgentRun", async () => {
+  // Hooks need a DOM to render, and this suite deliberately has none. The wiring is
+  // therefore pinned at the source level: all three terminal paths (sidecar exit,
+  // automatic restart, thrown start) must call the same reset, or a retry would reuse
+  // a runId/messageId the new sidecar never admitted.
+  const { readFile } = await import("node:fs/promises");
+  const source = await readFile(new URL("../src/features/agent/useAgentRun.ts", import.meta.url), "utf8");
+  const calls = source.match(/resetAdmissionOnFailure\(pendingAdmission\)/g) ?? [];
+  assert.equal(calls.length, 3, "sidecar exit, restart record and start() catch must all clear the admission");
+
+  const sidecarExit = source.slice(source.indexOf("if (!running || sidecarRunning !== false) return;"));
+  assert.ok(sidecarExit.slice(0, 500).includes("resetAdmissionOnFailure(pendingAdmission)"), "sidecar exit must drop the admission");
+  const restart = source.slice(source.indexOf("if (next === null || next === seenRestart.current) return;"));
+  assert.ok(restart.slice(0, 700).includes("resetAdmissionOnFailure(pendingAdmission)"), "an automatic restart must drop the admission");
+  const startBody = source.slice(source.indexOf("const start = useCallback"));
+  const startCatch = startBody.slice(startBody.indexOf("} catch (error) {"));
+  assert.ok(startCatch.slice(0, 500).includes("resetAdmissionOnFailure(pendingAdmission)"), "a thrown start must drop the admission");
+
+  // The retry path reads this ref; keeping it non-null is exactly the bug.
+  assert.ok(source.includes("const reusable ="), "the retry must still reuse only a live admission");
+});
+
+test("a failed admission is dropped so the retry cannot reuse a dead run", () => {
+  const admission: PendingAdmission = {
+    runId: "run_dead",
+    messageId: "msg_dead",
+    sessionId: "ses_1",
+    prompt: "restart nginx",
+    parts: [{ type: "text", text: "restart nginx" }],
+    taskId: null,
+    routingKey: "{}",
+  };
+  const ref = { current: admission as PendingAdmission | null };
+  // Retryable failure (resume rejected): the admission is kept on purpose, so this
+  // helper is only expected to be called by the terminal paths. Pin the contract.
+  assert.equal(ref.current?.runId, "run_dead");
+  resetAdmissionOnFailure(ref);
+  assert.equal(ref.current, null, "a retry after this failure must mint a fresh runId/messageId");
+
+  // Sidecar exit / restart / thrown start all go through the same reset, and it must be
+  // safe to call twice.
+  resetAdmissionOnFailure(ref);
+  assert.equal(ref.current, null);
 });
 
 test("transcript caps history without dropping the newest entries", () => {

@@ -19,7 +19,7 @@ from sqlalchemy import inspect
 from sqlalchemy.ext.asyncio import create_async_engine
 from sqlalchemy.pool import NullPool
 
-from support import AUTH, SERVICE_ROOT, TOKEN, ControlPlaneTestCase, new_key
+from support import AUTH, SERVICE_ROOT, TOKEN, ControlPlaneTestCase, new_key, public_key
 
 from yukinal_control_plane import actions
 from yukinal_control_plane.app import create_app
@@ -370,6 +370,10 @@ class ControlPlaneTests(ControlPlaneTestCase):
                 tuple(constraint["column_names"])
                 for constraint in inspector.get_unique_constraints("tool_policies")
             }
+            node_uniques = {
+                tuple(constraint["column_names"])
+                for constraint in inspector.get_unique_constraints("nodes")
+            }
         finally:
             sync_engine.dispose()
         self.assertEqual(migrated, set(Base.metadata.tables) | {"alembic_version"})
@@ -381,6 +385,17 @@ class ControlPlaneTests(ControlPlaneTestCase):
         self.assertIn(("tenants", ("tenant_id",)), tool_policy_fks)
         self.assertIn(("tenants", ("tenant_id",)), tenant_policy_fks)
         self.assertIn(("tenant_id", "kind"), tool_policy_uniques)
+        # One key, one node: the migrated schema carries what the models declare,
+        # which is what makes a signature's node id binding rather than advisory.
+        self.assertIn(("public_key",), node_uniques)
+        self.assertEqual(
+            node_uniques,
+            {
+                tuple(column.name for column in constraint.columns)
+                for constraint in Base.metadata.tables["nodes"].constraints
+                if constraint.__class__.__name__ == "UniqueConstraint"
+            },
+        )
 
         command.downgrade(config, "base")
         sync_engine = sqlalchemy.create_engine(f"sqlite:///{migration_db.as_posix()}")
@@ -389,6 +404,96 @@ class ControlPlaneTests(ControlPlaneTestCase):
         finally:
             sync_engine.dispose()
         self.assertEqual(remaining, {"alembic_version"})
+
+    def test_the_public_key_uniqueness_migration_refuses_existing_duplicates(self) -> None:
+        """A deployment that already holds a duplicated key is told, not half-altered.
+
+        The API allowed one key on two nodes, so such rows can exist. Adding the
+        constraint would otherwise fail inside ``ALTER TABLE`` with a driver error
+        and leave the schema in an unknown state; the migration checks first and
+        refuses with the key's fingerprint, naming nothing else.
+        """
+        migration_db = Path(self._temporary.name) / "duplicates.db"
+        url = f"sqlite+aiosqlite:///{migration_db.as_posix()}"
+        config = Config(str(SERVICE_ROOT / "alembic.ini"))
+        config.set_main_option("sqlalchemy.url", url)
+        command.upgrade(config, "fc2e168fa85c")
+
+        key = new_key()
+        # The stored form is the API's, so build it the same way registration does.
+        stored_key = public_key(key)
+
+        sync_engine = sqlalchemy.create_engine(f"sqlite:///{migration_db.as_posix()}")
+        try:
+            with sync_engine.begin() as connection:
+                connection.execute(
+                    sqlalchemy.text(
+                        "INSERT INTO tenants (id, name, disabled, created_at) VALUES "
+                        "('ten_one', 'One', 0, '2026-01-01 00:00:00'), "
+                        "('ten_two', 'Two', 0, '2026-01-01 00:00:00')"
+                    )
+                )
+                for node_id, tenant_id in (("nod_a", "ten_one"), ("nod_b", "ten_two")):
+                    connection.execute(
+                        sqlalchemy.text(
+                            "INSERT INTO nodes (id, tenant_id, name, public_key, created_at) "
+                            "VALUES (:id, :tenant, :name, :key, '2026-01-01 00:00:00')"
+                        ),
+                        {"id": node_id, "tenant": tenant_id, "name": node_id, "key": stored_key},
+                    )
+        finally:
+            sync_engine.dispose()
+
+        with self.assertRaises(RuntimeError) as refused:
+            command.upgrade(config, "head")
+        message = str(refused.exception)
+        self.assertIn("registered to more than one node", message)
+        self.assertIn("SHA256:", message)
+        # No tenant name, node name or id leaks into the refusal.
+        self.assertNotIn("ten_one", message)
+        self.assertNotIn("nod_a", message)
+
+        # The schema is still at the previous revision: the failed upgrade did not
+        # leave the version table claiming a constraint that is not there.
+        sync_engine = sqlalchemy.create_engine(f"sqlite:///{migration_db.as_posix()}")
+        try:
+            self.assertNotIn(
+                ("public_key",),
+                {
+                    tuple(constraint["column_names"])
+                    for constraint in inspect(sync_engine).get_unique_constraints("nodes")
+                },
+            )
+            with sync_engine.connect() as connection:
+                version = connection.execute(
+                    sqlalchemy.text("SELECT version_num FROM alembic_version")
+                ).scalar()
+        finally:
+            sync_engine.dispose()
+        self.assertEqual(version, "fc2e168fa85c")
+
+        # Once the duplicate is re-pointed the same migration succeeds.
+        sync_engine = sqlalchemy.create_engine(f"sqlite:///{migration_db.as_posix()}")
+        try:
+            with sync_engine.begin() as connection:
+                connection.execute(
+                    sqlalchemy.text("UPDATE nodes SET public_key = :key WHERE id = 'nod_b'"),
+                    {"key": public_key(new_key())},
+                )
+        finally:
+            sync_engine.dispose()
+        command.upgrade(config, "head")
+        sync_engine = sqlalchemy.create_engine(f"sqlite:///{migration_db.as_posix()}")
+        try:
+            self.assertIn(
+                ("public_key",),
+                {
+                    tuple(constraint["column_names"])
+                    for constraint in inspect(sync_engine).get_unique_constraints("nodes")
+                },
+            )
+        finally:
+            sync_engine.dispose()
 
 
 if __name__ == "__main__":

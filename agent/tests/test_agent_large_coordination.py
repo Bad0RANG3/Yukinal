@@ -122,7 +122,11 @@ class Oracle:
                 if predicate():
                     return
                 await self.changed.wait()
-        await asyncio.wait_for(find(), 8)
+        # Full Windows CI runs the same durable-workflow scenarios under much
+        # heavier scheduling load than the focused local test. Keep the event
+        # based assertion, but allow the workers enough time to publish their
+        # terminal states before declaring a coordination failure.
+        await asyncio.wait_for(find(), 30)
 
     def evidence(self, name, extra):
         self.check(not self.violations, "All strict prompt/model/tool checks must pass")

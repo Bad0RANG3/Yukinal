@@ -77,7 +77,7 @@ export interface TransferItemFailure {
   stagingResidue?: string;
 }
 
-/** Progress contains metadata only; file bytes and absolute local paths stay in Rust. */
+/** Progress contains metadata only; file bytes and absolute local paths stay host-side. */
 export interface TransferSnapshot {
   transferId: string;
   serverId: string;

@@ -37,7 +37,7 @@ test("returning to Activity preserves the AI draft and selected target", () => {
   const workspace = useWorkspaceStore.getState();
   workspace.setAgentDraft("保留这段排查问题");
   workspace.selectServer("srv_a");
-  workspace.setServerPage("files");
+  workspace.setServerPage("activity");
   assert.equal(useWorkspaceStore.getState().serverDetailOpen, true);
   workspace.setPrimary("activity");
   assert.equal(useWorkspaceStore.getState().primary, "activity");
@@ -45,5 +45,5 @@ test("returning to Activity preserves the AI draft and selected target", () => {
   assert.equal(useWorkspaceStore.getState().selectedServerId, "srv_a");
   assert.equal(useWorkspaceStore.getState().agentDraft, "保留这段排查问题");
   workspace.selectServer("srv_a");
-  assert.equal(useWorkspaceStore.getState().serverPage, "files");
+  assert.equal(useWorkspaceStore.getState().serverPage, "activity");
 });

@@ -93,6 +93,7 @@ async def _authenticate(websocket: WebSocket, session_factory: async_sessionmake
         async with session.begin():
             node = await service.authenticate_node(
                 session,
+                nonce_session_factory=session_factory,
                 node_id=headers.get(nodeauth.HEADER_NODE),
                 timestamp=headers.get(nodeauth.HEADER_TIMESTAMP),
                 nonce=headers.get(nodeauth.HEADER_NONCE),

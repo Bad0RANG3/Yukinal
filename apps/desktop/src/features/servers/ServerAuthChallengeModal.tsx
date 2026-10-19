@@ -12,7 +12,7 @@ import { callDesktop, subscribeDesktop } from "../../lib/ipc.js";
  * Renders one server-issued keyboard-interactive challenge at a time.
  *
  * Responses remain component memory until submitted, then travel through a command to a
- * one-shot Rust channel. Nothing is persisted and the modal never invents a challenge.
+ * one-shot host channel. Nothing is persisted and the modal never invents a challenge.
  */
 export function ServerAuthChallengeModal() {
   const [challenges, setChallenges] = useState<ServerAuthChallengeEvent[]>([]);

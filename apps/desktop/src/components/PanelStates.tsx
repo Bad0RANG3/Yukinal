@@ -120,7 +120,7 @@ export function EmptyPanel({
  * 浏览器预览的占位。
  *
  * 标题永远是「浏览器预览」，所以不开放为参数：这四处说的是同一件事 ——
- * 原生能力只在 Tauri 壳里可用，而预览**不伪造**远端数据。每个页面的正文
+ * 原生能力只在桌面宿主里可用，而预览**不伪造**远端数据。每个页面的正文
  * 各自说明自己缺的是什么，那才是需要传进来的部分。
  */
 export function PreviewEmpty({ icon, body }: { icon?: IconName; body: React.ReactNode }) {

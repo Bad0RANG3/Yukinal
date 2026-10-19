@@ -1,4 +1,4 @@
-/** Sidecar requests that are executed by the Rust host, never by Node. */
+/** Sidecar requests the C++ desktop host executes, never the sidecar itself. */
 
 import type {
   Evidence,
@@ -222,9 +222,11 @@ export type HostContextResponse =
 /**
  * Why one MCP server is not usable right now.
  *
- * This tuple is the TypeScript half of `McpFailureCode::ALL` in
- * `apps/desktop/src-tauri/src/commands/mcp.rs`; a Rust test asserts the two lists agree
- * word for word. Kept as a tuple (not a bare union) for the reason spelled out above
+ * This tuple is the TypeScript half of the host's failure-code vocabulary
+ * (`native/desktop_host/src/ipc_router.cpp`); the retired Rust list it used to cite
+ * (`apps/desktop/src-tauri/src/commands/mcp.rs`) no longer exists, so the two sides are
+ * aligned by the fixture plus the consistency pins rather than by a shared generator.
+ * Kept as a tuple (not a bare union) for the reason spelled out above
  * `HOST_CONTEXT_KINDS`: `z.enum` needs a value at runtime.
  */
 export const MCP_CATALOG_FAILURE_CODES = [
@@ -299,8 +301,8 @@ export interface HostMcpToolCallOutput {
 }
 
 /**
- * A result content block, mirroring `McpContentBlock`
- * (`crates/core/src/mcp/descriptor.rs`, `#[serde(tag = "type")]`).
+ * A result content block, mirroring the host's `McpContentBlock` handling
+ * (`native/desktop_host/src/ipc_router.cpp`, tagged by `type`).
  *
  * Blocks this repo does not model (image / audio / resource / resource_link) arrive as
  * `other` with the raw value: the host moves content, the adapter decides what to show.

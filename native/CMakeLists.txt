@@ -162,7 +162,9 @@ if(YUKINAL_BUILD_TESTS)
   enable_testing()
 endif()
 if(YUKINAL_BUILD_SSH_SERVICE)
-  find_package(OpenSSL REQUIRED COMPONENTS Crypto SSL)
+  # Keep libssh2 on the crypto major version validated by the SSH integration
+  # tests; OpenSSL 4 currently changes the macOS Ed25519 handshake behavior.
+  find_package(OpenSSL 3.0...<4.0 REQUIRED COMPONENTS Crypto SSL)
 endif()
 
 if(YUKINAL_BUILD_SSH_SERVICE)
@@ -186,6 +188,11 @@ target_link_libraries(yukinal_ssh_core
   PRIVATE libssh2::libssh2 Threads::Threads OpenSSL::SSL OpenSSL::Crypto
 )
 target_compile_definitions(yukinal_ssh_core PRIVATE CPPHTTPLIB_OPENSSL_SUPPORT)
+if(MSVC)
+  # SSH diagnostics and tests include UTF-8 Chinese user-facing text. Do not let
+  # the active Windows console code page change how those source files compile.
+  target_compile_options(yukinal_ssh_core PUBLIC /utf-8)
+endif()
 if(WIN32 AND YUKINAL_FETCH_DEPS AND YUKINAL_BUNDLE_WINDOWS_OPENSSL)
   add_dependencies(yukinal_ssh_core yukinal_openssl)
 endif()
@@ -221,23 +228,11 @@ if(YUKINAL_BUILD_TESTS)
   add_test(NAME yukinal_ssh_tests COMMAND yukinal_ssh_tests)
 
   find_package(Python3 3.11 COMPONENTS Interpreter REQUIRED)
-  add_test(
-    NAME python_client_tests
-    COMMAND ${Python3_EXECUTABLE} -m unittest discover -s ${CMAKE_CURRENT_SOURCE_DIR}/../agent/tests -p test_client.py -v
-  )
-  set_tests_properties(python_client_tests PROPERTIES
-    ENVIRONMENT "PYTHONPATH=${CMAKE_CURRENT_SOURCE_DIR}/../agent/src"
-  )
-
-  add_test(
-    NAME service_http_integration
-    COMMAND ${Python3_EXECUTABLE} -m unittest discover -s ${CMAKE_CURRENT_SOURCE_DIR}/../agent/tests -p test_service_integration.py -v
-  )
-  set_tests_properties(service_http_integration PROPERTIES
-    ENVIRONMENT "PYTHONPATH=${CMAKE_CURRENT_SOURCE_DIR}/../agent/src;YUKINAL_SSH_SERVICE_BINARY=$<TARGET_FILE:yukinal-ssh-service>"
-    TIMEOUT 30
-  )
-
+  # Every `agent/tests/test_*.py` module is covered by the single `python_agent_tests`
+  # target below (it used to be a `test_agent_*.py` glob plus one-off registrations of
+  # `test_client.py` / `test_service_integration.py`). Registering modules in two places
+  # double-counted them and left `test_network_snapshot.py`, `test_provider_store.py`,
+  # `test_reasoning_effort.py` and `test_system_snapshot.py` out of every gate.
   add_test(
     NAME ssh_container_harness_tests
     COMMAND ${Python3_EXECUTABLE} -m unittest discover -s ${CMAKE_CURRENT_SOURCE_DIR}/../scripts -p test_ssh_container.py -v
@@ -253,11 +248,11 @@ if(YUKINAL_BUILD_TESTS)
     if(YUKINAL_AGENT_IMPORT_RESULT EQUAL 0)
       add_test(
         NAME python_agent_tests
-        COMMAND ${Python3_EXECUTABLE} -m unittest discover -s ${CMAKE_CURRENT_SOURCE_DIR}/../agent/tests -p test_agent_*.py -v
+        COMMAND ${Python3_EXECUTABLE} -m unittest discover -s ${CMAKE_CURRENT_SOURCE_DIR}/../agent/tests -p test_*.py -v
       )
       set_tests_properties(python_agent_tests PROPERTIES
-        ENVIRONMENT "PYTHONPATH=${CMAKE_CURRENT_SOURCE_DIR}/../agent/src"
-        TIMEOUT 90
+        ENVIRONMENT "PYTHONPATH=${CMAKE_CURRENT_SOURCE_DIR}/../agent/src;YUKINAL_SSH_SERVICE_BINARY=$<TARGET_FILE:yukinal-ssh-service>"
+        TIMEOUT 300
       )
     else()
       message(STATUS "Agent dependencies are not installed; python_agent_tests is not registered (install agent[agent])")

@@ -258,8 +258,8 @@ class SshServiceClient:
     def package_inspect(
         self, target_id: str, manager: str, package: str, timeout_seconds: int = 10
     ) -> SshOperationResult:
-        if manager not in ("apt", "dnf"):
-            raise ValueError("manager must be apt or dnf")
+        if manager not in ("apt", "dnf", "yum"):
+            raise ValueError("manager must be apt, dnf, or yum")
         if not isinstance(package, str) or not _PACKAGE_REF.fullmatch(package):
             raise ValueError("package must be a safe package reference")
         return self._execute_operation(
@@ -274,9 +274,9 @@ class SshServiceClient:
         version: str | None = None,
         timeout_seconds: int = 180,
     ) -> SshOperationResult:
-        """Install one validated apt or dnf package through the structured operation."""
-        if manager not in ("apt", "dnf"):
-            raise ValueError("manager must be apt or dnf")
+        """Install one validated apt, dnf, or yum package through the structured operation."""
+        if manager not in ("apt", "dnf", "yum"):
+            raise ValueError("manager must be apt, dnf, or yum")
         if not isinstance(package, str) or not _PACKAGE_REF.fullmatch(package):
             raise ValueError("package must be a safe package reference")
         if version is not None and (

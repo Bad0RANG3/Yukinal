@@ -63,13 +63,17 @@ export function ConversationSettings(props: ConversationSettingsProps) {
     <details className="agent-settings-advanced">
       <summary><span>更多设置</span><span className="agent-settings-policy-label">{policy.label}</span><Icon name="chevronDown" size="xs" /></summary>
       <div className="agent-settings-advanced-body">
-        <label className="agent-settings-field"><span>目标策略</span>
-          <select aria-label="目标策略" aria-describedby={`${props.id}-policy`} value={props.runPolicy ?? "environment"} disabled={!editable}
-            onChange={(event) => change(props.onRunPolicyChange, RUN_POLICY_ORDER.find((value) => (value ?? "environment") === event.target.value) ?? null)}>
-            {RUN_POLICY_ORDER.map((value) => <option key={value ?? "environment"} value={value ?? "environment"}>{runPolicySpec(value).label}</option>)}
-          </select>
-        </label>
-        <p className="agent-settings-description" id={`${props.id}-policy`}>{policy.summary}</p>
+        <div className="agent-settings-field" role="group" aria-label="目标策略" aria-labelledby={`${props.id}-policy-title`} aria-describedby={`${props.id}-policy`}>
+          <span id={`${props.id}-policy-title`}>目标策略</span>
+          <ul className="agent-settings-options">
+            {RUN_POLICY_ORDER.map((value) => <li key={value ?? "environment"}>
+              <button type="button" className={`agent-settings-option${value === props.runPolicy ? " is-selected" : ""}`} aria-pressed={value === props.runPolicy} disabled>
+                <span className="agent-settings-option-label">{runPolicySpec(value).label}</span>
+              </button>
+            </li>)}
+          </ul>
+        </div>
+        <p className="agent-settings-warning" id={`${props.id}-policy`} role="status">当前 Agent Node 暂不支持策略选择；请求携带策略标识会被拒绝。运行由“运行方式”和“批准方式”约束。{warning ? ` ${warning}` : ""}</p>
         {props.roles.length ? <label className="agent-settings-field"><span>处理角色</span>
           <select aria-label="处理角色" value={props.selectedRoleId ?? ""} disabled={!editable}
             onChange={(event) => { if (editable) props.onSelectRole?.(event.target.value || null); }}>

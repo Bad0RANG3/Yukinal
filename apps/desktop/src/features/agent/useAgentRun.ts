@@ -31,6 +31,9 @@ import {
 import { useCallback, useEffect, useRef, useState } from "react";
 
 import { callDesktop, isDesktopShell, subscribeDesktop, type AgentEventName, type DesktopEventPayload, type DesktopSubscription } from "../../lib/ipc.js";
+import { errorMessage } from "../../lib/format.js";
+import { resetAdmissionOnFailure, type AdmissionRef, type PendingAdmission } from "./run-lifecycle.js";
+import { ASSISTANT_REPLY_NOT_SAVED, assistantReplyNotSaved } from "./session-persistence.js";
 import type { AgentTeam } from "../agent-nist/agent-nist.js";
 import { useTeamRuntimeStore } from "../agent-nist/team-runtime-store.js";
 import { AgentRunStream, appendStreamBatch, settleStreamText, type RunStreamScope } from "./run-stream.js";
@@ -125,7 +128,7 @@ export function useAgentRun(options: {
    * 运行以终态回复结束时的回调 —— 落库的唯一入口。
    * 通过 ref 读取，因此订阅只建立一次也不会拿到过期的闭包。
    */
-  onAssistantMessage?: (text: string, identity: ReplyIdentity, sessionId: string) => void;
+  onAssistantMessage?: (text: string, identity: ReplyIdentity, sessionId: string) => boolean | void | Promise<boolean | void>;
   /** 运行开始等待审批；面板据此把 Agent 面板带到前景。 */
   onApprovalRequested?: () => void;
   /** sidecar 存活信号；false 表示进程已经不在了。 */
@@ -155,16 +158,7 @@ export function useAgentRun(options: {
    * This is the UI half of the durable admission contract: a retry reuses the same
    * `messageId` and `runId` instead of inserting another user message or forking a run.
    */
-  const pendingAdmission = useRef<{
-    runId: string;
-    messageId: string;
-    sessionId: string;
-    prompt: string;
-    parts: AgentPromptPart[];
-    taskId?: string | null;
-    routingKey: string;
-    uiContext?: string;
-  } | null>(null);
+  const pendingAdmission: AdmissionRef = useRef<PendingAdmission | null>(null);
 
   const [entries, setEntries] = useState<Entry[]>([]);
   const [running, setRunning] = useState(false);
@@ -198,7 +192,17 @@ export function useAgentRun(options: {
     useTeamRuntimeStore.getState().stage(eventRunId, result.state === "completed" ? "completed" : result.state === "cancelled" ? "cancelled" : "failed");
     setContextUsage(result.context ?? null);
     if (result.text) {
-      if (scope.sessionId) onAssistantMessage.current?.(result.text, scope.identity, scope.sessionId);
+      if (scope.sessionId) {
+        void Promise.resolve(onAssistantMessage.current?.(result.text, scope.identity, scope.sessionId))
+          .then((persisted) => {
+            if (mounted.current && assistantReplyNotSaved(persisted)) {
+              setEntries((current) => appendEntries(current, [{ kind: "error", text: ASSISTANT_REPLY_NOT_SAVED }]));
+            }
+          })
+          .catch((error: unknown) => {
+            if (mounted.current) setEntries((current) => appendEntries(current, [{ kind: "error", text: errorMessage(error) }]));
+          });
+      }
       setEntries((current) => settleStreamText(current, result.text, scope.identity, streamedText));
     } else if (result.state === "failed" && result.error) {
       const error = result.error;
@@ -343,6 +347,7 @@ export function useAgentRun(options: {
   useEffect(() => {
     if (!running || sidecarRunning !== false) return;
     if (!stream.fail()) return;
+    resetAdmissionOnFailure(pendingAdmission);
     useTeamRuntimeStore.getState().runs.filter((run) => ["starting", "thinking", "running_tool", "waiting_approval"].includes(run.stage)).forEach((run) => useTeamRuntimeStore.getState().stage(run.id, "interrupted"));
     setRunning(false);
     setRunId(null);
@@ -369,6 +374,7 @@ export function useAgentRun(options: {
     seenRestart.current = next;
     if (!running) return;
     if (!stream.fail()) return;
+    resetAdmissionOnFailure(pendingAdmission);
     useTeamRuntimeStore.getState().runs.filter((run) => ["starting", "thinking", "running_tool", "waiting_approval"].includes(run.stage)).forEach((run) => useTeamRuntimeStore.getState().stage(run.id, "interrupted"));
     setRunning(false);
     setRunId(null);
@@ -485,6 +491,7 @@ export function useAgentRun(options: {
     } catch (error) {
       // A terminal event or a view change wins over a late RPC response/error.
       if (!stream.fail(scope)) return "started";
+      resetAdmissionOnFailure(pendingAdmission);
       useTeamRuntimeStore.getState().stage(expectedRunId, "failed");
       setRunning(false);
       setStopping(false);

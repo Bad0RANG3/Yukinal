@@ -12,8 +12,8 @@ on:
 jobs:
   gate:
     name: pnpm check (${{ matrix.os }})
-    # Release packaging is not implemented yet; keep the tag-triggered check workflow
-    # focused on the dependency advisory audit.
+    # The release-candidate workflow runs the full gate before building platform
+    # installers, so the tag-triggered check workflow only repeats the advisory audit.
     if: github.event_name != 'push' || github.ref_type != 'tag'
     strategy:
       fail-fast: false
@@ -23,13 +23,19 @@ jobs:
             openssh_container_test: ON
           - os: windows-latest
             openssh_container_test: OFF
-          - os: macos-latest
+          # Match the Intel macOS installer target and validate OpenSSL 3.
+          - os: macos-15-intel
             openssh_container_test: OFF
     runs-on: ${{ matrix.os }}
+    permissions:
+      contents: read
     env:
       YUKINAL_SSH_CMAKE_BUILD_DIR: native/build-check
     steps:
+      # The gate runs package install scripts; do not persist checkout credentials in .git/config.
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
 
       - uses: pnpm/action-setup@008330803749db0355799c700092d9a85fd074e9 # v6.0.9
         with:
@@ -44,7 +50,10 @@ jobs:
         with:
           python-version: "3.14"
           cache: pip
-          cache-dependency-path: agent/pyproject.toml
+          # The gate installs both Python projects; the key must cover both manifests.
+          cache-dependency-path: |
+            agent/pyproject.toml
+            services/control-plane/pyproject.toml
 
       - name: Install Linux system deps (WebKitGTK for the C++ desktop host)
         if: matrix.os == 'ubuntu-latest'
@@ -52,8 +61,18 @@ jobs:
           sudo apt-get update
           sudo apt-get install -y libwebkit2gtk-4.1-dev librsvg2-dev libsecret-1-dev build-essential curl wget file libssl-dev
 
+      - name: Install OpenSSL 3 (macOS)
+        if: matrix.os == 'macos-15-intel'
+        run: brew install openssl@3
+
       - name: Install Python Agent and SSH test dependencies
         run: python -m pip install -e "agent[agent,models,test]"
+
+      # The gate runs the control-plane suite unconditionally; without these deps the
+      # step would either skip silently (the old behaviour) or fail on a clean runner.
+      # The `test` extra is enough: CI only exercises the SQLite path, so `postgres` stays out.
+      - name: Install control-plane test dependencies
+        run: python -m pip install -e "services/control-plane[test]"
 
       - name: Add NMake to PATH
         if: matrix.os == 'windows-latest'
@@ -70,7 +89,12 @@ jobs:
           if (-not $nmake) { throw 'NMake was not found in the selected Visual Studio installation.' }
           Add-Content -LiteralPath $env:GITHUB_PATH -Value (Split-Path -Parent $nmake)
 
+      - name: Configure C++ SSH service, desktop host, and tests (macOS)
+        if: matrix.os == 'macos-15-intel'
+        run: cmake -S native -B native/build-check -DCMAKE_BUILD_TYPE=RelWithDebInfo -DYUKINAL_FETCH_DEPS=ON -DYUKINAL_BUILD_TESTS=ON -DYUKINAL_ENABLE_SSH_CONTAINER_TEST=${{ matrix.openssh_container_test }} -DOPENSSL_ROOT_DIR="$(brew --prefix openssl@3)"
+
       - name: Configure C++ SSH service, desktop host, and tests
+        if: matrix.os != 'macos-15-intel'
         run: cmake -S native -B native/build-check -DCMAKE_BUILD_TYPE=RelWithDebInfo -DYUKINAL_FETCH_DEPS=ON -DYUKINAL_BUILD_TESTS=ON -DYUKINAL_ENABLE_SSH_CONTAINER_TEST=${{ matrix.openssh_container_test }}
 
       - name: Build C++ targets
@@ -87,7 +111,11 @@ jobs:
 
       # check.mjs runs CTest against this build, then the JavaScript/contract gates.
       - run: pnpm install --frozen-lockfile
+      # YUKINAL_CONTROL_PLANE_REQUIRED turns "the control-plane interpreter vanished"
+      # into a red gate on CI instead of a silent skip.
       - run: pnpm check
+        env:
+          YUKINAL_CONTROL_PLANE_REQUIRED: "1"
 
   advisory:
     name: dependency advisory audit

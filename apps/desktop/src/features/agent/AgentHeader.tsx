@@ -58,11 +58,11 @@ export function AgentHeader({
           type="button"
           className={`agent-task-trigger ${historyOpen ? "is-active" : ""}`}
           aria-label={`切换任务：${taskTitle}`}
-          title="最近对话与搜索"
-          disabled={running}
+          title={running ? "运行中，结束后可切换任务" : "最近对话与搜索"}
+          aria-disabled={running || undefined}
           aria-expanded={historyOpen}
           aria-haspopup="dialog"
-          onClick={onToggleHistory}
+          onClick={() => { if (!running) onToggleHistory(); }}
         >
           <span>{taskTitle}</span><Icon name="chevronDown" size="sm" />
         </button>

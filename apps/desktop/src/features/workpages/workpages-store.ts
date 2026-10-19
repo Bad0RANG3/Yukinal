@@ -29,7 +29,7 @@ function showPage(state: WorkpagesState, page: Workpage): Partial<WorkpagesState
   const dropped = pages.filter((item) => !item.pinned && item.id !== page.id).slice(0, Math.max(0, pages.length - 8));
   return {
     pages: pages.filter((item) => !dropped.some((candidate) => candidate.id === item.id)),
-    recent: dropped.length ? [...dropped, ...state.recent.filter((item) => !dropped.some((droppedPage) => droppedPage.id === item.id))].slice(0, 12) : state.recent,
+    recent: dropped.length ? [...dropped, ...state.recent.filter((item) => item.id !== page.id && !dropped.some((droppedPage) => droppedPage.id === item.id))].slice(0, 12) : state.recent.filter((item) => item.id !== page.id),
     retainedTerminals: page.kind === "terminal" && !state.retainedTerminals.some((item) => item.id === page.id) ? [...state.retainedTerminals, page] : state.retainedTerminals,
     activeId: page.id, expandedId: state.expandedId ? page.id : null, collapsed: false,
   };

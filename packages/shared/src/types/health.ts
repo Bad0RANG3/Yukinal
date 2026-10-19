@@ -1,12 +1,16 @@
 /**
  * Health thresholds — the single vocabulary for "is this server ok?".
  *
- * The canonical values live in `packages/shared/fixtures/health_thresholds.json`
- * (single source consumed by the Rust core via include_str!); this const is pinned
- * to that JSON by `health.test.ts`, so TS and Rust can never disagree silently.
+ * The canonical values live in `packages/shared/fixtures/health_thresholds.json`. Two
+ * readers keep it honest: `health.test.ts` pins this const to the JSON, and the Python
+ * agent's own copy is asserted equal to the same file
+ * (`agent/tests/test_system_snapshot.py:109-113`). There is no C++ consumer today — the
+ * host validates the *class* strings it is handed, not the numbers — so the earlier claim
+ * that the Rust core compiled this in with `include_str!` described a host that no longer
+ * exists.
  *
- * Rule: raw numbers become health classes exactly once, here, and in the Rust
- * mirror (`crates/core/src/health.rs`) — UI and Agent never compute it differently.
+ * Rule: raw numbers become health classes exactly once per language, and both sides are
+ * pinned to this fixture rather than to each other.
  */
 
 export const HEALTH_THRESHOLDS = {
@@ -17,7 +21,7 @@ export const HEALTH_THRESHOLDS = {
 
 export type HealthClass = "healthy" | "warning" | "critical";
 
-/** usagePercent → health class (same arithmetic as the Rust mirror). */
+/** usagePercent → health class (the same arithmetic the Python agent uses). */
 export function healthClass(
   usagePercent: number,
   thresholds: { warning: number; critical: number } = HEALTH_THRESHOLDS.cpu,

@@ -9,7 +9,7 @@ import {
  *
  * The screen must answer "where did this happen, what is the state now, what can
  * I do next" from a stable category, never by matching the message text. The
- * category comes from the shared taxonomy so the Rust host and this UI agree on
+ * category comes from the shared taxonomy so the host and this UI agree on
  * what each wire code means.
  */
 export interface FailureDisplay {

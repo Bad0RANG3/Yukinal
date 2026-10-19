@@ -494,6 +494,42 @@ struct SidecarClient::Impl {
     }
   }
 
+  // Called when start() fails before any worker thread exists (for example a
+  // spawn that never created a child). It publishes a stopped state without
+  // waiting on a monitor thread that does not exist, so a following stop() or
+  // status() cannot observe a half-started sidecar.
+  void abort_start() {
+    close_stdin();
+    terminate_process();
+    {
+      std::lock_guard lock(mutex);
+      running = false;
+      exited = true;
+      process_started = false;
+      pid = 0;
+    }
+    exited_cv.notify_all();
+    {
+      std::lock_guard lock(host_mutex);
+      host_shutdown = true;
+    }
+    host_cv.notify_all();
+    cleanup_handles();
+  }
+
+  // Stop()'s last-resort state reset. It is used only after the child was
+  // terminated and the monitor still did not publish an exit; clearing the
+  // published lifecycle flags keeps stop()/status() from hanging forever.
+  void force_exited_state() {
+    {
+      std::lock_guard lock(mutex);
+      running = false;
+      exited = true;
+      pid = 0;
+    }
+    exited_cv.notify_all();
+  }
+
   void reset() {
     close_stdin();
     // Give the Agent a short window to exit cleanly after stdin closes before
@@ -582,14 +618,6 @@ SidecarStartResult SidecarClient::start(std::chrono::milliseconds timeout) {
   }
 
   {
-    std::lock_guard lock(impl_->mutex);
-    impl_->running = true;
-    impl_->exited = false;
-    impl_->last_exit.reset();
-    impl_->host_shutdown = false;
-    impl_->process_started = true;
-  }
-  {
     std::lock_guard lock(impl_->host_mutex);
     impl_->host_queue.clear();
   }
@@ -599,33 +627,48 @@ SidecarStartResult SidecarClient::start(std::chrono::milliseconds timeout) {
     impl_->stderr_partial.clear();
   }
 
-  spawn_process(launch);
-  impl_->monitor_thread = std::thread([this] { impl_->monitor_process(); });
-  impl_->stdout_thread = std::thread([this] {
-    std::string buffer;
-    std::string chunk;
-    while (read_stream(true, chunk)) {
-      buffer += chunk;
-      chunk.clear();
-      impl_->process_stdout_buffer(buffer);
-    }
-    impl_->process_stdout_buffer(buffer);
-    if (!buffer.empty() && buffer.back() == '\r') buffer.pop_back();
-    impl_->process_frame_line(buffer);
-  });
-  impl_->stderr_thread = std::thread([this] {
-    std::string chunk;
-    while (read_stream(false, chunk)) {
-      impl_->append_stderr_chunk(chunk);
-      chunk.clear();
-    }
-  });
-  impl_->host_workers.reserve(kHostWorkerCount);
-  for (std::size_t index = 0; index < kHostWorkerCount; ++index) {
-    impl_->host_workers.emplace_back([this] { impl_->host_worker(); });
-  }
-
+  // Publish `running`/`process_started` only after a child exists. A failed
+  // spawn (missing program, CreateProcess failure, invalid UTF-8) therefore
+  // leaves the client stopped, with no monitor thread that stop() would wait
+  // on forever. Any later failure in thread creation tears the child down via
+  // stop() before the exception escapes.
+  bool spawned = false;
   try {
+    spawn_process(launch);
+    spawned = true;
+    {
+      std::lock_guard lock(impl_->mutex);
+      impl_->running = true;
+      impl_->exited = false;
+      impl_->last_exit.reset();
+      impl_->host_shutdown = false;
+      impl_->process_started = true;
+    }
+    impl_->monitor_thread = std::thread([this] { impl_->monitor_process(); });
+    impl_->stdout_thread = std::thread([this] {
+      std::string buffer;
+      std::string chunk;
+      while (read_stream(true, chunk)) {
+        buffer += chunk;
+        chunk.clear();
+        impl_->process_stdout_buffer(buffer);
+      }
+      impl_->process_stdout_buffer(buffer);
+      if (!buffer.empty() && buffer.back() == '\r') buffer.pop_back();
+      impl_->process_frame_line(buffer);
+    });
+    impl_->stderr_thread = std::thread([this] {
+      std::string chunk;
+      while (read_stream(false, chunk)) {
+        impl_->append_stderr_chunk(chunk);
+        chunk.clear();
+      }
+    });
+    impl_->host_workers.reserve(kHostWorkerCount);
+    for (std::size_t index = 0; index < kHostWorkerCount; ++index) {
+      impl_->host_workers.emplace_back([this] { impl_->host_worker(); });
+    }
+
     const auto initialize = request(
         "initialize",
         {{"protocolVersion", "1.0"}, {"clientVersion", launch.client_version},
@@ -643,7 +686,11 @@ SidecarStartResult SidecarClient::start(std::chrono::milliseconds timeout) {
       impl_->tool_count = tool_count;
     }
   } catch (...) {
-    stop();
+    if (spawned) {
+      stop();
+    } else {
+      impl_->abort_start();
+    }
     throw;
   }
   return status_to_start_result();
@@ -681,8 +728,16 @@ void SidecarClient::stop(std::chrono::milliseconds timeout) {
   }
   if (!exited) {
     impl_->terminate_process();
+    // The monitor thread normally publishes the exit promptly, but a failed or
+    // wedged spawn must never leave stop() blocked forever. After a bounded
+    // wait, reset the published process state so stop() and status() agree that
+    // nothing is running; cleanup_handles() still runs below.
     std::unique_lock lock(impl_->mutex);
-    impl_->exited_cv.wait(lock, [this] { return impl_->exited; });
+    if (!impl_->exited_cv.wait_for(lock, std::chrono::seconds(5),
+                                   [this] { return impl_->exited; })) {
+      lock.unlock();
+      impl_->force_exited_state();
+    }
   }
 
   {
@@ -707,11 +762,61 @@ void SidecarClient::stop(std::chrono::milliseconds timeout) {
   }
 }
 
+void SidecarClient::cancel_timed_out_run(
+    const std::string& method, const std::optional<nlohmann::json>& run_id) noexcept {
+  // `agent.run.stop` itself is excluded: if it timed out, retrying it here would
+  // recurse forever. A stop frame is a request, not a notification, because the
+  // Python sidecar only acts on frames that carry an id.
+  if (method == "agent.run.stop" || !run_id.has_value() || !run_id->is_string()) return;
+  const auto run = run_id->get<std::string>();
+  if (run.empty() || run.size() > 256) return;
+  try {
+    std::shared_ptr<Impl::PendingRequest> pending_request;
+    nlohmann::json frame;
+    long long request_id = 0;
+    {
+      std::lock_guard lock(impl_->mutex);
+      if (!impl_->running) return;
+      request_id = impl_->next_request_id++;
+      pending_request = std::make_shared<Impl::PendingRequest>();
+      impl_->pending[request_id] = pending_request;
+      frame = {{"jsonrpc", "2.0"},
+               {"id", request_id},
+               {"method", "agent.run.stop"},
+               {"params", {{"runId", run}}}};
+    }
+    std::string write_error;
+    if (!impl_->write_line(frame, write_error)) {
+      std::lock_guard lock(impl_->mutex);
+      impl_->pending.erase(request_id);
+      return;
+    }
+    // Bounded and best-effort: a sidecar that is already wedged must not delay
+    // the caller's timeout error any further.
+    std::unique_lock lock(pending_request->mutex);
+    (void)pending_request->cv.wait_for(lock, std::chrono::milliseconds(1000),
+                                       [&] { return pending_request->done; });
+    lock.unlock();
+    std::lock_guard state_lock(impl_->mutex);
+    impl_->pending.erase(request_id);
+  } catch (...) {
+    // Cleanup on an error path must never throw a second error.
+  }
+}
+
 nlohmann::json SidecarClient::request(const std::string& method, nlohmann::json params,
                                       std::chrono::milliseconds timeout) {
   std::shared_ptr<Impl::PendingRequest> pending_request;
   nlohmann::json frame;
   long long request_id = 0;
+  // The run a timed-out `agent.run.*` request was working on. Captured before
+  // `params` is moved into the frame so the cleanup below can address the same
+  // run even after the request has been abandoned here.
+  std::optional<nlohmann::json> run_id;
+  if (method.rfind("agent.run.", 0) == 0 && params.is_object() &&
+      params.contains("runId") && params.at("runId").is_string()) {
+    run_id = params.at("runId");
+  }
   {
     std::lock_guard lock(impl_->mutex);
     if (!impl_->running) throw SidecarError("The Agent sidecar is not running");
@@ -734,8 +839,15 @@ nlohmann::json SidecarClient::request(const std::string& method, nlohmann::json 
 
   std::unique_lock lock(pending_request->mutex);
   if (!pending_request->cv.wait_for(lock, timeout, [&] { return pending_request->done; })) {
-    std::lock_guard state_lock(impl_->mutex);
-    impl_->pending.erase(request_id);
+    {
+      std::lock_guard state_lock(impl_->mutex);
+      impl_->pending.erase(request_id);
+    }
+    // The pending entry is gone and its mutex is released before cleanup, so
+    // the stop request can use the normal transport without deadlocking the
+    // stdout reader that would answer it.
+    lock.unlock();
+    cancel_timed_out_run(method, run_id);
     throw SidecarError("The Agent sidecar request timed out");
   }
   if (pending_request->has_error) {

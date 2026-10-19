@@ -128,11 +128,12 @@ Native calls use an in-process WebView binding, not an HTTP API.
 parameters, responses, and event payloads come from `packages/shared`. The C++ host
 validates the RPC framing and each migrated command's inputs. Events are subscribed
 by name and delivered through the same bridge. Commands return a stable error until
-their C++ implementation is migrated; they must not silently fall back to Rust.
+their C++ implementation is migrated; they must not silently fall back to a host that
+no longer exists in this repository.
 
 The C++ host opens or creates the same `yukinal.db` used by the current desktop.
 `YUKINAL_DATA_DIR` overrides the platform app-data directory, matching the legacy
-host. It applies the ordered schema migrations through version 36, one transaction
+host. It applies the ordered schema migrations through version 37, one transaction
 per version, refuses newer databases, and makes a checksummed SQLite backup before
 migrating a nonempty existing database. If an upgrade fails, it restores that copy
 and removes the failed connection's WAL/SHM files. Server CRUD, OS credential
@@ -161,8 +162,10 @@ C++; the React UI keeps using the shared IPC contract.
    RPC handlers (`host.tool.execute`, investigation and MCP) are next.
 5. Port task history, schedules, recovery, audit and remaining UI commands. Validate
    each command and event against the shared contracts and existing desktop tests.
-6. Build and smoke-test Windows, macOS, and Linux installers (not implemented yet;
-   see [the Rust removal plan](./rust-removal-plan.md)).
+6. The candidate workflow builds and installation-smokes Windows NSIS, macOS DMG,
+   and Debian Linux packages. Real provider/SSH tasks, GUI file-manager drag/drop,
+   signing, notarization, upgrades, and restart acceptance remain; see
+   [release status](./release.md).
 
 ## Native-host storage and server CRUD
 
@@ -181,7 +184,7 @@ as a mismatch rather than silently replaced. Unmigrated commands return
 The application can be launched with `--dev-url
 http://127.0.0.1:1420` or `--ui-dir <directory-containing-index.html>`. Pass
 `--data-dir <absolute-path>` to select a data directory for development.
-On Windows, double-click `启动Yukinal.bat` to restart this checkout's desktop
+On Windows, run `scripts/start-desktop-preview.bat` to restart this checkout's desktop
 preview with mock data. It closes matching desktop processes and their children,
 updates the existing native build, restarts this checkout's Vite service in the
 background, and opens a visible window with a separate profile under

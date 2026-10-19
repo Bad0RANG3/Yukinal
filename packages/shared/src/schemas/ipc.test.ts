@@ -1,9 +1,21 @@
 /**
- * Contract tests for the IPC command schemas (one side of the pair; the other lives
- * in `crates/core/src/ipc.rs` and asserts the *same* fixtures against serde output).
+ * Contract tests for the IPC command schemas.
  *
- * The fixtures in `packages/shared/fixtures/ipc/` are the single canonical JSON each
- * side must accept/emit; a parse here is a promise that the Rust contract test keeps.
+ * The fixtures in `packages/shared/fixtures/ipc/` are the canonical JSON the gates must
+ * accept. They are *shared* fixtures, not a mirror: the retired Rust contract test that
+ * asserted the same files against serde output is gone with `crates/`, so nothing on the
+ * native side reads this directory today. The two sides are kept aligned by these
+ * fixtures plus `consistency.ts` — not by one implementation consuming the other's file.
+ *
+ * Strictness is a property of *who authors the payload*:
+ *  - a response the C++ host composes field by field (`agent_status`,
+ *    `server_connect`, the host-key replies, ...) is strict — an unknown key there is a
+ *    real disagreement between two files in this repo;
+ *  - a response the host forwards verbatim from the Python sidecar
+ *    (`SIDECAR_FORWARDED_COMMANDS`) tolerates unknown keys, because the sidecar is a
+ *    separately-versioned process whose answer this repo does not own. Compatibility
+ *    must not be a parse crash; the added key is reported instead. See the regression
+ *    test further down.
  */
 
 import assert from "node:assert/strict";
@@ -20,6 +32,10 @@ import {
   EVENT_SCHEMAS,
   IpcServerIdSchema,
   IPC_SCHEMAS,
+  SIDECAR_FORWARDED_COMMANDS,
+  forwardedResponseSchema,
+  strictResponseSchema,
+  unknownResponseKeys,
 } from "./ipc.js";
 
 const FIXTURE_DIR = new URL("../../fixtures/ipc/", import.meta.url);
@@ -48,6 +64,11 @@ test("the exited agent_status variant parses too", () => {
 });
 
 test("a status carrying an automatic-restart record parses, and the field stays optional", () => {
+  // The shape parses — but nothing produces it. `agent_status` is composed field by field
+  // by the C++ host, and that branch never sets `restart`; there is no supervisor in the
+  // host that could restart a sidecar. The field is kept because the UI branches on it,
+  // not because a producer exists; see the schema comment on `AgentStatusSchema.restart`.
+  //
   // Not covered by the per-command loop above: there is only one fixture per command
   // name, and `agent_status.json` is the shape an idle supervisor reports.
   const parsed = AgentStatusSchema.safeParse(fixture("agent_status_restarted"));
@@ -103,9 +124,146 @@ test("a result on a sync response is validated, not passed through", () => {
   assert.equal(IPC_SCHEMAS.agent_run_start.response.safeParse(malformed).success, false);
 });
 
-test("responses are strict: a serde drift (extra field) must fail, not be stripped", () => {
+test("host-authored responses stay strict: an extra field must fail, not be stripped", () => {
+  // `agent_status` is composed by the C++ host field by field, so an extra key means two
+  // files in this repo disagree. Keeping this strict is what makes the looser gate below a
+  // deliberate reading of *where a payload comes from* rather than a blanket weakening.
   const drifted = { ...(fixture("agent_status") as Record<string, unknown>), toolCount: 1, os: "klingon" };
   assert.equal(AgentStatusSchema.safeParse(drifted).success, false);
+  assert.equal((SIDECAR_FORWARDED_COMMANDS as readonly string[]).includes("agent_status"), false);
+});
+
+test("the sidecar-forwarded set is exactly the commands the host forwards verbatim", () => {
+  // Pinned by name: the set is a property of `IpcRouter::agent_run_command` /
+  // `provider_command` (native/desktop_host/src/ipc_router.cpp), which hand the sidecar's
+  // JSON back as the response frame without rebuilding it. A command moving in or out of
+  // that list changes how much compatibility this contract owes a foreign process, so the
+  // move has to be recorded here.
+  assert.deepEqual(
+    [...SIDECAR_FORWARDED_COMMANDS].sort(),
+    [
+      "agent_context_reset",
+      "agent_context_reset_all",
+      "agent_memory_delete",
+      "agent_memory_list",
+      "agent_memory_save",
+      "agent_run_start",
+      "agent_run_stop",
+      "provider_activate",
+      "provider_delete",
+      "provider_list",
+      "provider_models",
+      "provider_save",
+      "provider_test",
+    ],
+  );
+});
+
+/** A field the sidecar could add without the UI being updated: top level, and nested. */
+function driftedForwardedResponse(command: string): Record<string, unknown> {
+  const base = fixture(command) as Record<string, unknown>;
+  const drifted: Record<string, unknown> = { ...base, sidecarAddedField: { nested: true } };
+  for (const [key, value] of Object.entries(drifted)) {
+    if (Array.isArray(value) && value.length > 0 && typeof value[0] === "object" && value[0] !== null) {
+      drifted[key] = [{ ...(value[0] as Record<string, unknown>), sidecarAddedNestedField: 7 }, ...value.slice(1)];
+    } else if (typeof value === "object" && value !== null && !Array.isArray(value)) {
+      drifted[key] = { ...(value as Record<string, unknown>), sidecarAddedNestedField: 7 };
+    }
+  }
+  return drifted;
+}
+
+test("a sidecar response with an unknown extra field parses instead of breaking the UI", () => {
+  // The regression this pins: the host does not re-shape what the sidecar answered
+  // (`ipc_router.cpp` returns `client.request(...)` as the response frame), and the sidecar
+  // is a separately-versioned process. Before this route, one added field anywhere in the
+  // payload — top level or nested — turned a successful agent/provider call into a parse
+  // exception in the UI.
+  for (const command of SIDECAR_FORWARDED_COMMANDS) {
+    const drifted = driftedForwardedResponse(command);
+    const schema = IPC_SCHEMAS[command].response as unknown as { safeParse: (value: unknown) => { success: boolean } };
+    let parsed: { success: boolean };
+    assert.doesNotThrow(() => {
+      parsed = schema.safeParse(drifted);
+    }, `${command} threw on an unknown field`);
+    assert.equal(parsed!.success, true, `${command} rejected a response carrying one added field`);
+  }
+});
+
+/**
+ * Commands the host implements but nothing in `apps/desktop/src` calls.
+ *
+ * Recorded rather than deleted, and recorded *here* so the state is auditable: each of
+ * these is a specified, host-implemented operation that no UI surface reaches yet, and the
+ * annotation on its row in `ipc.ts` says which case it is. A reviewer who sees a schema and
+ * a fixture should not have to guess whether anything calls it.
+ *
+ * Two things must stay true, and this test is what keeps them true: the row still exists
+ * (deleting one is a contract change, not cleanup), and it is still not called from the UI.
+ * When a call site appears, the name moves out of this list — deliberately.
+ */
+const HOST_IMPLEMENTED_WITHOUT_A_UI_CALL_SITE = [
+  "agent_kill",
+  "investigation_task_status_update",
+  "investigation_schedule_tick",
+  "remote_file_read",
+  "file_transfer_get",
+] as const;
+
+test("host-implemented commands with no UI call site stay implemented and stay recorded", () => {
+  for (const command of HOST_IMPLEMENTED_WITHOUT_A_UI_CALL_SITE) {
+    assert.ok(
+      Object.hasOwn(IPC_SCHEMAS, command),
+      `${command} is recorded as host-implemented with no UI call site, so its row must exist`,
+    );
+    // The fixture is the proof the host's answer still fits the declared shape; without it
+    // "implemented" would be an assertion about code nobody exercises.
+    const parsed = IPC_SCHEMAS[command as IpcCommandName].response.safeParse(fixture(command));
+    assert.equal(parsed.success, true, `${command} has a fixture its response schema rejects`);
+  }
+});
+
+test("a forwarded response keeps its known fields, and the addition stays observable", () => {
+  // Tolerance must not mean "stop looking": the known fields still have to arrive intact
+  // and the unknown key has to remain reportable, otherwise a drifting sidecar becomes
+  // invisible. `unknownResponseKeys` is what the desktop gate turns into a diagnostic.
+  const drifted = driftedForwardedResponse("provider_list");
+  const parsed = IPC_SCHEMAS.provider_list.response.parse(drifted) as { providers: { id: string }[] };
+  assert.equal(parsed.providers.length, (fixture("provider_list") as { providers: unknown[] }).providers.length);
+  assert.equal(typeof parsed.providers[0]?.id, "string");
+
+  const keys = unknownResponseKeys(forwardedResponseSchema(IPC_SCHEMAS.provider_list.response), drifted);
+  assert.deepEqual([...keys].sort(), ["sidecarAddedField", "sidecarAddedNestedField"]);
+});
+
+test("tolerating an addition did not stop rejecting a missing field or a wrong type", () => {
+  const missing = IPC_SCHEMAS.agent_run_start.response.safeParse({ started: true });
+  assert.equal(missing.success, false, "a response without its required runId must still fail");
+
+  const wrongType = IPC_SCHEMAS.provider_test.response.safeParse({ ok: false });
+  assert.equal(wrongType.success, false, "`ok` is the literal true; false is still drift");
+
+  const forwarded = fixture("provider_list") as Record<string, unknown>;
+  assert.equal(
+    IPC_SCHEMAS.provider_list.response.safeParse({ ...forwarded, sidecarAddedField: 1, providers: [] }).success,
+    true,
+  );
+});
+
+test("the strict reading of a forwarded response is still available", () => {
+  // The loosening is a reading, not a deletion: `strictResponseSchema` reconstructs the
+  // pre-tolerance gate from the same source, so a test (or a future audit) can still ask
+  // "would this have failed before?" and get the same answer the strict rows give.
+  const drifted = driftedForwardedResponse("agent_run_start");
+  const tolerant = IPC_SCHEMAS.agent_run_start.response.safeParse(drifted);
+  assert.equal(tolerant.success, true);
+
+  const strict = strictResponseSchema(IPC_SCHEMAS.agent_run_start.response).safeParse(drifted);
+  assert.equal(strict.success, false);
+  assert.deepEqual(
+    strict.success ? [] : strict.error.issues.map((issue) => issue.code).filter((code) => code === "unrecognized_keys"),
+    ["unrecognized_keys"],
+  );
 });
 
 test("empty payloads reject unknown keys", () => {
@@ -238,7 +396,7 @@ test("MCP OAuth config crosses IPC without carrying tokens", () => {
           oauth: {
             issuer: "https://auth.example.com",
             clientId: "desktop-client",
-            // Rust always serialises the flow: rows written before it existed default to
+            // The host always writes the flow: rows written before it existed default to
             // `authorization_code`, so the wire shape never has to guess.
             flow: "device_code",
             // Same for the client authentication: rows written before it existed are public.
@@ -362,7 +520,7 @@ test("server ids on the wire must be opaque srv_ ids", () => {
 /* ── 主机指纹（ADR 0012） ───────────────────────────────────────────────────── */
 
 test("the unpinned status shape has no fingerprint field at all", () => {
-  // 未核验不等于「指纹是空字符串」也不等于「指纹是 null」：Rust 会整个省掉这个字段，
+  // 未核验不等于「指纹是空字符串」也不等于「指纹是 null」：宿主会整个省掉这个字段，
   // 而界面要靠它的**缺席**显示「未核验」。这条钉住的是这个区别，不是 JSON 的美观。
   const unpinned = IPC_SCHEMAS.server_host_key_status.response.safeParse(
     fixture("server_host_key_status_unpinned"),
@@ -803,7 +961,7 @@ test("a saved provider can be any of the three kinds, and native ones carry no w
 });
 
 test("provider_list can carry all three kinds at once", () => {
-  // 读路径（数据库 → Rust → IPC → 界面）曾经把每一行都当成 openai-compatible 解码，
+  // 读路径（数据库 → 侧车 → IPC → 界面）曾经把每一行都当成 openai-compatible 解码，
   // 所以这份 fixture 里三种 kind 同时存在，而不是只有被硬编码的那一种。
   const parsed = IPC_SCHEMAS.provider_list.response.safeParse(fixture("provider_list"));
   assert.equal(parsed.success, true);

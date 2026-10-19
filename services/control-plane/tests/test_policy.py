@@ -460,6 +460,89 @@ class PolicyReachesQueuedWorkTests(ControlPlaneTestCase):
         # The decision still exists; the queue simply may not advance.
         self.assertEqual(self.get_approval(self.tenant_id, approval_id)["state"], "approved")
 
+    def test_the_gate_covers_the_resume_edge_and_not_only_the_queue(self) -> None:
+        """``unknown -> running`` is a dispatch decision like ``queued -> running``.
+
+        A task whose outcome became unknown is *resumed* — the same act of putting
+        an effect on a node — so the authorisation is re-checked there too. Gating
+        only the queued edge left this as a way back onto a node for an action the
+        tenant has since denied.
+        """
+        approval_id = self.approve(self.tenant_id, self.node_id, EXEC, EXEC_PAYLOAD)
+        task_id = self.create_task(self.tenant_id, self.node_id, EXEC, EXEC_PAYLOAD)["body"]["id"]
+        self.assertEqual(self.move(self.tenant_id, task_id, "running"), 200)
+        started = self.get_task(self.tenant_id, task_id)
+        self.assertEqual(started["attempts"], 1)
+
+        # The node restarted, so the task's outcome is unknown and it is offered
+        # to a human as recoverable rather than replayed automatically.
+        heartbeat = self.client.post(
+            f"/v1/tenants/{self.tenant_id}/nodes/{self.node_id}/heartbeat",
+            json={"restarted": True},
+            headers=AUTH,
+        )
+        self.assertEqual(heartbeat.json()["marked_unknown"], [task_id])
+        self.assertEqual(self.get_task(self.tenant_id, task_id)["status"], "unknown")
+
+        # The tenant now denies the tier the resumption would need.
+        self.put_policy(
+            self.tenant_id, tierModes={"read": "auto", "write": "ask", "dangerous": "deny"}
+        )
+        refused = self.client.post(
+            f"/v1/tenants/{self.tenant_id}/tasks/{task_id}/status",
+            json={"status": "running"},
+            headers=AUTH,
+        )
+        self.assertEqual(refused.status_code, 403, refused.text)
+        self.assertEqual(refused.json()["code"], "action_denied")
+
+        # Refused means nothing moved: not the status and not the attempt count,
+        # which would otherwise climb on every refused resume.
+        after = self.get_task(self.tenant_id, task_id)
+        self.assertEqual(after["status"], "unknown")
+        self.assertEqual(after["attempts"], 1)
+        self.assertNotIn("task.transition", self._transition_audit(task_id))
+        # The approval is untouched: the policy refused the action, not the decision.
+        self.assertEqual(self.get_approval(self.tenant_id, approval_id)["state"], "approved")
+
+    def test_a_withdrawn_decision_stops_a_resume_as_well_as_a_start(self) -> None:
+        """The other half of the resume gate: the recorded decision is re-read.
+
+        A decision that was withdrawn after the task started must stop the
+        resumption too, otherwise revocation would only bind work that had not
+        begun.
+        """
+        approval_id = self.approve(
+            self.tenant_id, self.node_id, EXEC, EXEC_PAYLOAD, max_uses=2
+        )
+        task_id = self.create_task(self.tenant_id, self.node_id, EXEC, EXEC_PAYLOAD)["body"]["id"]
+        self.assertEqual(self.move(self.tenant_id, task_id, "running"), 200)
+        heartbeat = self.client.post(
+            f"/v1/tenants/{self.tenant_id}/nodes/{self.node_id}/heartbeat",
+            json={"restarted": True},
+            headers=AUTH,
+        )
+        self.assertEqual(heartbeat.json()["marked_unknown"], [task_id])
+
+        self.assertEqual(self.revoke(self.tenant_id, approval_id).status_code, 200)
+        refused = self.client.post(
+            f"/v1/tenants/{self.tenant_id}/tasks/{task_id}/status",
+            json={"status": "running"},
+            headers=AUTH,
+        )
+        self.assertEqual(refused.status_code, 409, refused.text)
+        self.assertEqual(refused.json()["code"], "approval_required")
+        self.assertEqual(self.get_task(self.tenant_id, task_id)["status"], "unknown")
+        self.assertEqual(self.get_task(self.tenant_id, task_id)["attempts"], 1)
+
+    def _transition_audit(self, task_id: str) -> list[dict]:
+        audit = self.client.get(f"/v1/tenants/{self.tenant_id}/audit", headers=AUTH).json()
+        return [
+            event
+            for event in audit
+            if event["action"] == "task.transition" and event["subject_id"] == task_id
+        ]
+
     def test_deny_leaves_other_tiers_alone(self) -> None:
         self.put_policy(
             self.tenant_id, tierModes={"read": "auto", "write": "deny", "dangerous": "ask"}

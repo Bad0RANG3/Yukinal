@@ -13,9 +13,11 @@
  * Merging them would put a server's launch command into the agent's prompt-adjacent data and the
  * agent's tool descriptions into the settings form. Neither belongs there.
  *
- * Every shape here mirrors `apps/desktop/src-tauri/src/commands/mcp.rs` field for field. The Rust
- * DTOs are the source of truth; if they change, this file is wrong and the Zod schemas next to it
- * will reject the payload at the IPC gate rather than letting a half-read object into the UI.
+ * Every shape here mirrors the host's MCP command surface
+ * (`native/desktop_host/src/ipc_router.cpp`) field for field. The host DTOs and these
+ * interfaces are kept aligned by the shared fixtures; if the host changes, this file is
+ * wrong and the Zod schemas next to it will reject the payload at the IPC gate rather than
+ * letting a half-read object into the UI.
  */
 
 import type {
@@ -66,7 +68,7 @@ export interface McpExitRecord {
   code?: number | null;
   signal?: string | null;
   at: string;
-  /** Human-readable form of the two fields above, produced by Rust. */
+  /** Human-readable form of the two fields above, produced by the host. */
   reason: string;
 }
 
@@ -97,7 +99,7 @@ export interface McpServerStatus {
 /** Why a configured server is not usable right now. Absent means "nothing known is wrong". */
 export interface McpServerUnavailable {
   code: McpCatalogFailureCode;
-  /** The Rust error text, verbatim: it names the next step. */
+  /** The host's error text, verbatim: it names the next step. */
   message: string;
 }
 

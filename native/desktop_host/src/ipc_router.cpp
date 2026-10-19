@@ -5,6 +5,7 @@
 #include "yukinal/desktop_host/desktop_oauth.hpp"
 #include "yukinal/desktop_host/desktop_ssh.hpp"
 #include "yukinal/desktop_host/desktop_target.hpp"
+#include "header_safety.hpp"
 #include "yukinal/desktop_host/desktop_terminal.hpp"
 #include "yukinal/desktop_host/host_trust.hpp"
 #include "yukinal/desktop_host/network_proxy.hpp"
@@ -14,6 +15,7 @@
 
 #ifdef YUKINAL_DESKTOP_HOST_WITH_SSH_CORE
 #include "host_key.hpp"
+#include "yukinal/config.hpp"
 #endif
 
 #include <algorithm>
@@ -25,6 +27,7 @@
 #include <cstdlib>
 #include <ctime>
 #include <filesystem>
+#include <fstream>
 #include <iomanip>
 #include <initializer_list>
 #include <map>
@@ -48,6 +51,187 @@
 #include <unistd.h>
 extern char** environ;
 #endif
+
+/**
+ * Operator `server.exec` command blacklist.
+ *
+ * The blacklist is configured ONLY in the C++ SSH service JSON file named by the
+ * existing `YUKINAL_SSH_SERVICE_CONFIG` environment variable; there is no
+ * settings UI and no database row. The file is re-read for every effectful
+ * `server.exec` request, so an operator edit takes effect without restarting the
+ * host.
+ *
+ * `denylist_detail` is a named namespace (not the file's anonymous namespace)
+ * for one reason only: `native/desktop_host/tests/test_ipc_router.cpp` links
+ * against this translation unit and calls the loader directly. Nothing here is
+ * declared in a public header.
+ *
+ * Every failure to understand a *configured* file is reported as
+ * `loaded_ok == false`, which the caller turns into a fail-closed
+ * `denied_by_policy`.
+ */
+namespace yukinal::desktop_host::denylist_detail {
+
+/** The largest SSH service config file the host reads before failing closed. */
+inline constexpr std::uintmax_t kMaxServerExecDenylistConfigBytes = 1024 * 1024;
+
+#ifdef YUKINAL_DESKTOP_HOST_WITH_SSH_CORE
+using ConfiguredServerExecDenyList = yukinal::ssh_service::ServerExecDenyList;
+#else
+// A build without the in-process SSH core carries no denylist schema, so nothing
+// is configured and nothing can be denied.
+struct ConfiguredServerExecDenyList {};
+#endif
+
+struct ConfiguredServerExecDenyListResult {
+  ConfiguredServerExecDenyList list;
+  // `false` means a configured file exists but could not be honored; the caller
+  // must fail closed rather than run the command.
+  bool loaded_ok = true;
+};
+
+/** Serializes a loaded list for the ephemeral one-target payload. */
+inline nlohmann::json configured_server_exec_denylist_to_json(
+    const ConfiguredServerExecDenyList& list) {
+#ifdef YUKINAL_DESKTOP_HOST_WITH_SSH_CORE
+  return yukinal::ssh_service::server_exec_denylist_to_json(list);
+#else
+  (void)list;
+  return nlohmann::json::array();
+#endif
+}
+
+/** Whether the list configures at least one entry. */
+inline bool configured_server_exec_denylist_is_empty(
+    const ConfiguredServerExecDenyList& list) {
+#ifdef YUKINAL_DESKTOP_HOST_WITH_SSH_CORE
+  return list.entries.empty();
+#else
+  (void)list;
+  return true;
+#endif
+}
+
+/** Whether the command matches the loaded list; never throws. */
+inline bool configured_server_exec_command_is_denied(
+    const ConfiguredServerExecDenyList& list, const std::string& command,
+    std::string* matched_pattern = nullptr) {
+#ifdef YUKINAL_DESKTOP_HOST_WITH_SSH_CORE
+  return yukinal::ssh_service::server_exec_command_is_denied(list, command,
+                                                             matched_pattern);
+#else
+  (void)list;
+  (void)command;
+  (void)matched_pattern;
+  return false;
+#endif
+}
+
+/**
+ * Reads the file-level list. `false` means a file is configured but the
+ * operator's policy is not knowable: missing, unreadable, not a regular file,
+ * larger than 1 MiB, bad JSON, a non-object root, or a malformed entry. An absent
+ * `server_exec_denylist` key is NOT a failure; it configures no entries.
+ *
+ * No parser message is ever surfaced: it would originate in operator config.
+ */
+inline bool load_server_exec_denylist_from_file(
+    const std::string& config_path, ConfiguredServerExecDenyList& out) {
+#ifdef YUKINAL_DESKTOP_HOST_WITH_SSH_CORE
+  out = ConfiguredServerExecDenyList{};
+  std::error_code error;
+  const std::filesystem::path path = std::filesystem::u8path(config_path);
+  if (!std::filesystem::is_regular_file(path, error) || error) return false;
+  const auto size = std::filesystem::file_size(path, error);
+  if (error || size > kMaxServerExecDenylistConfigBytes) return false;
+  std::ifstream stream(path, std::ios::binary);
+  if (!stream.is_open()) return false;
+  std::string contents(static_cast<std::size_t>(size), '\0');
+  stream.read(contents.data(), static_cast<std::streamsize>(contents.size()));
+  if (stream.gcount() != static_cast<std::streamsize>(contents.size())) return false;
+  const auto document = nlohmann::json::parse(contents, nullptr, false);
+  if (document.is_discarded() || !document.is_object()) return false;
+  const auto found = document.find("server_exec_denylist");
+  if (found == document.end() || found->is_null()) return true;
+  try {
+    out = yukinal::ssh_service::parse_server_exec_denylist(
+        *found, "config.server_exec_denylist");
+  } catch (const std::exception&) {
+    return false;
+  }
+  return true;
+#else
+  (void)config_path;
+  out = ConfiguredServerExecDenyList{};
+  return true;
+#endif
+}
+
+/**
+ * The host-facing loader. `YUKINAL_SSH_SERVICE_CONFIG` unset or empty means no
+ * operator file is configured, so the empty list allows everything.
+ */
+inline ConfiguredServerExecDenyListResult load_configured_server_exec_denylist(
+    const std::optional<std::string>& configured_path) {
+  ConfiguredServerExecDenyListResult result;
+  if (!configured_path.has_value()) return result;
+  const auto& raw = *configured_path;
+  const auto first =
+      std::find_if_not(raw.begin(), raw.end(), [](unsigned char byte) {
+        return std::isspace(byte) != 0;
+      });
+  if (first == raw.end()) return result;
+  const auto last = std::find_if_not(raw.rbegin(), raw.rend(),
+                                     [](unsigned char byte) {
+                                       return std::isspace(byte) != 0;
+                                     })
+                        .base();
+  const std::string trimmed(first, last);
+  result.loaded_ok = load_server_exec_denylist_from_file(trimmed, result.list);
+  return result;
+}
+
+/**
+ * Exported ONLY for `native/desktop_host/tests/test_ipc_router.cpp`; the symbol
+ * is otherwise internal to ipc_router.cpp. Returns
+ * `{"loaded": bool, "entries": <the ephemeral payload array>}`.
+ *
+ * Deliberately NOT `inline`: an unused inline function emits no definition, and
+ * the test links against this translation unit.
+ */
+nlohmann::json load_server_exec_denylist_for_test(
+    const std::string& config_path) {
+  ConfiguredServerExecDenyList list;
+  const bool loaded = load_server_exec_denylist_from_file(config_path, list);
+  return {{"loaded", loaded},
+          {"entries", configured_server_exec_denylist_to_json(list)}};
+}
+
+/** Exported for the test only: the loader reading `YUKINAL_SSH_SERVICE_CONFIG`. */
+nlohmann::json load_configured_server_exec_denylist_for_test() {
+  const char* raw = std::getenv("YUKINAL_SSH_SERVICE_CONFIG");
+  const auto result = load_configured_server_exec_denylist(
+      raw == nullptr ? std::nullopt
+                     : std::optional<std::string>(std::string(raw)));
+  return {{"loaded", result.loaded_ok},
+          {"entries", configured_server_exec_denylist_to_json(result.list)}};
+}
+
+/**
+ * Exported for the test only: the exact load-then-match decision the host makes
+ * before it consumes the one-shot approval ticket. Mirrors the call site rather
+ * than reimplementing it, so a passing test means the real path is wired.
+ * Returns `{"loaded": bool, "denied": bool}`.
+ */
+nlohmann::json server_exec_denylist_decision_for_test(
+    const std::string& config_path, const std::string& command) {
+  const auto result = load_configured_server_exec_denylist(
+      std::optional<std::string>(config_path));
+  return {{"loaded", result.loaded_ok},
+          {"denied", configured_server_exec_command_is_denied(result.list, command, nullptr)}};
+}
+
+}  // namespace yukinal::desktop_host::denylist_detail
 
 namespace yukinal::desktop_host {
 namespace {
@@ -3959,8 +4143,8 @@ std::optional<nlohmann::json> validate_ssh_effectful_action_input(
         !input.at("manager").is_string() || !input.at("package").is_string()) {
       return fail("package.install input is invalid");
     }
-    if (!is_one_of(input.at("manager").get<std::string>(), {"apt", "dnf"})) {
-      return fail("package manager must be apt or dnf");
+    if (!is_one_of(input.at("manager").get<std::string>(), {"apt", "dnf", "yum"})) {
+      return fail("package manager must be apt, dnf, or yum");
     }
     if (!safe_package_ref(input.at("package").get<std::string>())) {
       return fail("package must be a safe reference without shell metacharacters");
@@ -4163,6 +4347,38 @@ nlohmann::json handle_ssh_effectful_action_target(
                             std::nullopt);
   }
   const auto input = tool_call.value("input", nlohmann::json::object());
+  // Operator policy: the `server.exec` command blacklist is enforced here, BEFORE
+  // the one-shot approval ticket below is consumed, so a denied command never
+  // burns the operator's approval. A configured blacklist that cannot be loaded
+  // fails closed. Other effectful tools are untouched.
+  denylist_detail::ConfiguredServerExecDenyList command_denylist;
+  if (tool_name == kToolServerExec) {
+    auto loaded = denylist_detail::load_configured_server_exec_denylist(
+        read_environment("YUKINAL_SSH_SERVICE_CONFIG"));
+    if (!loaded.loaded_ok) {
+      return host_tool_failed(
+          "denied_by_policy",
+          "the configured server.exec command blacklist could not be loaded", false,
+          std::nullopt);
+    }
+    command_denylist = std::move(loaded.list);
+    if (!denylist_detail::configured_server_exec_denylist_is_empty(command_denylist)) {
+      ServerExecInput denylist_candidate;
+      if (!parse_server_exec_input(input, denylist_candidate).empty()) {
+        // Unreachable: `validate_ssh_effectful_action_input` already rejected this
+        // call above. Kept fail-closed rather than silently allowing the command.
+        return host_tool_failed("invalid_input", "server.exec input is invalid", false,
+                                std::nullopt);
+      }
+      if (denylist_detail::configured_server_exec_command_is_denied(
+              command_denylist, denylist_candidate.command, nullptr)) {
+        return host_tool_failed(
+            "denied_by_policy",
+            "the server.exec command is blocked by the configured command blacklist", false,
+            std::nullopt);
+      }
+    }
+  }
   if (auto violation = task_guardrail_violation(*task, tool_name, input);
       violation.has_value()) {
     const auto code = json_text_field(*violation, "code");
@@ -4274,6 +4490,13 @@ nlohmann::json handle_ssh_effectful_action_target(
           "the resolved SSH target does not match the approved server", false, std::nullopt);
     }
     resolved_target["allow_server_exec"] = true;
+    // Stamp the operator's blacklist into the ephemeral one-target payload so the
+    // service re-checks the same policy. The list comes from the operator's own
+    // config file, never from model input.
+    if (!denylist_detail::configured_server_exec_denylist_is_empty(command_denylist)) {
+      resolved_target["server_exec_denylist"] =
+          denylist_detail::configured_server_exec_denylist_to_json(command_denylist);
+    }
   }
   return response;
 }
@@ -9039,9 +9262,11 @@ IpcReply IpcRouter::connection_command(const std::string& method,
   }
 
   if (method == "server_auth_respond" || method == "server_auth_cancel") {
-    // Keyboard-interactive prompts are owned by the C++ PTY worker. Until a PTY
-    // registers a challenge there is nothing to accept, which is the correct
-    // answer for an idle desktop.
+    // Keyboard-interactive: the challenge is created by the PTY worker (see
+    // TerminalManager) and answered here. An id the terminal does not know is an
+    // explicit error, not `accepted:false` — a silent "success" for a challenge
+    // nobody is waiting on is exactly the misleading receipt FIX-9 removed from
+    // the approval entry.
     const bool respond = method == "server_auth_respond";
     const std::set<std::string> fields =
         respond ? std::set<std::string>{"authId", "responses"}
@@ -9053,18 +9278,31 @@ IpcReply IpcRouter::connection_command(const std::string& method,
     if (auth_id.empty() || utf8_character_count(auth_id) > 256) {
       return failure("INVALID_PARAMS", "authentication challenge id is invalid");
     }
+    std::vector<std::string> answers;
     if (respond) {
       const auto& responses = params.at("responses");
       if (!responses.is_array() || responses.size() > 16) {
         return failure("INVALID_PARAMS", "authentication responses are invalid");
       }
+      answers.reserve(responses.size());
       for (const auto& response : responses) {
         if (!response.is_string() || response.get<std::string>().size() > 4096) {
           return failure("INVALID_PARAMS", "authentication responses are invalid");
         }
+        answers.push_back(response.get<std::string>());
       }
     }
-    return {true, {{"accepted", false}}};
+    if (terminals_ == nullptr) {
+      return failure("UNAVAILABLE", "the terminal host is not running");
+    }
+    std::string error;
+    const bool accepted =
+        respond ? terminals_->respond_auth(auth_id, answers, error)
+                : terminals_->cancel_auth(auth_id, error);
+    if (!accepted) {
+      return failure("AUTH_CHALLENGE_UNKNOWN", error.empty() ? "no authentication challenge is waiting" : error);
+    }
+    return {true, {{"accepted", true}}};
   }
 
   if (!only_fields(params, {"serverId"}, {"serverId"}) || !params.at("serverId").is_string()) {
@@ -9235,13 +9473,23 @@ void IpcRouter::configure_sidecar() {
                                          const nlohmann::json& params) {
     // A host action approval ticket is minted here, from the raw notification,
     // before the `hostInput` it fingerprints is stripped from the projected event.
-    if (method == "agent.stream" && params.is_object() &&
+    const bool waiting_approval =
+        method == "agent.stream" && params.is_object() &&
         params.value("type", std::string()) == "agent.waiting_approval" &&
-        params.contains("approval") && params.at("approval").is_object() &&
-        is_host_approval_tool_name(
-            params.at("approval").value("toolName", std::string()))) {
+        params.contains("approval") && params.at("approval").is_object();
+    if (waiting_approval) {
+      const bool host_action = is_host_approval_tool_name(
+          params.at("approval").value("toolName", std::string()));
       try {
-        approvals_.record_waiting_event(params, now_epoch_seconds());
+        if (host_action) {
+          approvals_.record_waiting_event(params, now_epoch_seconds());
+        } else {
+          // Every other approval is sidecar-owned: the host holds no admission
+          // decision for it, so it must keep forwarding, but it must also be able
+          // to tell a response to an approval the sidecar really announced apart
+          // from an id nobody ever requested.
+          approvals_.record_sidecar_approval(params, now_epoch_seconds());
+        }
       } catch (const std::exception&) {
         // A malformed or unsupported approval simply mints no ticket; the
         // effectful action that uses it later fails closed.
@@ -9375,6 +9623,7 @@ IpcReply IpcRouter::agent_run_command(const std::string& method,
   if (!params.is_object()) {
     return failure("INVALID_PARAMS", method + " requires an object payload");
   }
+  auto forwarded_params = params;
   if ((method == "agent_run_start" || method == "agent_context_reset" || method == "agent_team_tasks") &&
       params.contains("sessionId") && params["sessionId"].is_string() && database_) {
     try {
@@ -9389,6 +9638,42 @@ IpcReply IpcRouter::agent_run_command(const std::string& method,
         requested = target;
       }
       if (expected != requested) return failure("CONTEXT_SCOPE_MISMATCH", "Conversation belongs to another server");
+      if (method == "agent_run_start" && requested.is_string()) {
+        const auto server_id = requested.get<std::string>();
+        nlohmann::json server_list;
+        try {
+          server_list = database_->list_servers();
+        } catch (...) {
+          return failure("STORAGE_ERROR", "Could not read the Agent target server");
+        }
+        const auto servers = server_list.value("servers", nlohmann::json::array());
+        const nlohmann::json* selected_server = nullptr;
+        for (const auto& candidate : servers) {
+          if (json_text_field(candidate, "id") == server_id) {
+            selected_server = &candidate;
+            break;
+          }
+        }
+        if (selected_server == nullptr) {
+          return failure("NOT_FOUND", "Agent target server was not found");
+        }
+        const auto metadata = selected_server->value("metadata", nlohmann::json::object());
+        auto environment = json_text_field(metadata, "environment");
+        if (!is_one_of(environment, {"local", "development", "staging", "production", "unknown"})) {
+          environment = "unknown";
+        }
+        nlohmann::json target = {
+            {"host", "remote"}, {"serverId", server_id}, {"environment", environment}};
+        if (params.contains("target") && params["target"].is_object() &&
+            params["target"].contains("workspaceId") &&
+            params["target"]["workspaceId"].is_string()) {
+          target["workspaceId"] = params["target"]["workspaceId"];
+        }
+        // The target environment must come from the host-owned server record.
+        // Otherwise the sidecar's fallback "unknown" disagrees with a saved
+        // development/staging/production environment and blocks all remote reads.
+        forwarded_params["target"] = std::move(target);
+      }
     } catch (...) {
       return failure("NOT_FOUND", "Agent conversation was not found");
     }
@@ -9403,7 +9688,7 @@ IpcReply IpcRouter::agent_run_command(const std::string& method,
   if (method != "agent_approval_respond") {
     try {
       auto& client = ensure_sidecar();
-      return {true, client.request(found->second, params, timeout)};
+      return {true, client.request(found->second, forwarded_params, timeout)};
     } catch (const SidecarRpcError& error) {
       return failure(sidecar_error_code(error.code()), error.what());
     } catch (const SidecarError& error) {
@@ -9411,10 +9696,12 @@ IpcReply IpcRouter::agent_run_command(const std::string& method,
     }
   }
 
-  // Approval responses are the one Agent command the host also mirrors into its
+  // Approval responses are the only Agent command the host also mirrors into its
   // own ticket ledger: a host action ticket only becomes executable when the
-  // sidecar accepted an approve-once decision. The sidecar still owns the actual
-  // admission decision, so a decision the host does not track still forwards.
+  // sidecar accepted an approve-once decision. The sidecar still owns admission
+  // for every other approval (a filesystem or MCP write the host never ticketed),
+  // but those still announced themselves here, so the router can tell a response
+  // to a real, in-flight approval apart from a forged or long-gone id.
   std::string approval_id;
   std::string approval_run_id;
   std::string decision;
@@ -9426,10 +9713,22 @@ IpcReply IpcRouter::agent_run_command(const std::string& method,
     return failure("INVALID_PARAMS",
                    "agent_approval_respond requires approvalId, runId and decision");
   }
+  // An explicit whitelist, not just a length check: `approve_session` has never
+  // been grantable for a host action (the ledger refuses it) and the sidecar
+  // rejects it too, so accepting it here would only surface a misleading receipt.
+  if (!is_one_of(decision, {"approve_once", "reject"})) {
+    return failure("INVALID_PARAMS",
+                   "approval decision must be approve_once or reject");
+  }
   std::optional<HostApprovalLedger::ResponseToken> token;
   try {
     token = approvals_.begin_response(approval_id, approval_run_id, decision,
                                       now_epoch_seconds());
+  } catch (const HostApprovalLedger::UnknownApprovalError& error) {
+    // The host has no admission decision for this id and never saw the sidecar
+    // announce it: it must not report a success it never obtained, and it must
+    // not forward a response for an approval that is not in flight.
+    return failure("AGENT_APPROVAL_UNKNOWN", error.what());
   } catch (const std::exception& error) {
     return failure("INVALID_PARAMS", error.what());
   }
@@ -9467,15 +9766,33 @@ IpcReply IpcRouter::mcp_command(const std::string& method, const nlohmann::json&
     return failure("STORAGE_UNAVAILABLE", "The local Yukinal database has not been initialized");
   }
 
-  const auto view_for = [](const nlohmann::json& config) {
+  // The settings UI reads `status` to decide whether a server is running, which
+  // process is serving it and when it started. A stored row says nothing about
+  // that, so the view asks the supervisor for the live session instead of
+  // reporting a canned "not running" that contradicts a started server.
+  const auto view_for = [this](const nlohmann::json& config) {
+    nlohmann::json status = {{"serverId", config.at("id")},
+                             {"running", false},
+                             {"pid", nullptr},
+                             {"program", nullptr},
+                             {"startedAt", nullptr},
+                             {"toolCount", 0},
+                             {"stderrTail", nlohmann::json::array()},
+                             {"diagnostics", nlohmann::json::array()}};
+    if (mcp_ != nullptr) {
+      try {
+        if (const auto live = mcp_->status(config.at("id").get<std::string>());
+            live.has_value()) {
+          status = *live;
+        }
+      } catch (const std::exception&) {
+        // A status probe must never fail the list; the stopped shape is the
+        // closed answer.
+      }
+    }
     nlohmann::json view = {
         {"config", config},
-        {"status",
-         {{"serverId", config.at("id")},
-          {"running", false},
-          {"toolCount", 0},
-          {"stderrTail", nlohmann::json::array()},
-          {"diagnostics", nlohmann::json::array()}}},
+        {"status", std::move(status)},
         {"tools", nlohmann::json::array()},
     };
     if (!config.value("enabled", false)) {
@@ -9582,18 +9899,14 @@ IpcReply IpcRouter::mcp_command(const std::string& method, const nlohmann::json&
       if (!input.contains("url") || !input.at("url").is_string()) {
         return failure("INVALID_PARAMS", "an http MCP server requires url");
       }
-      const auto url = input.at("url").get<std::string>();
-      const bool secure =
-          url.size() > 8 && url.rfind("https://", 0) == 0 && url.size() <= 2048 &&
-          !has_control_characters(url) && url.find('?') == std::string::npos &&
-          url.find('#') == std::string::npos;
-      const bool loopback =
-          url.size() > 7 && url.rfind("http://", 0) == 0 && url.size() <= 2048 &&
-          !has_control_characters(url) && url.find('?') == std::string::npos &&
-          url.find('#') == std::string::npos &&
-          (url.substr(7).rfind("127.0.0.1", 0) == 0 ||
-           url.substr(7).rfind("localhost", 0) == 0 || url.substr(7).rfind("[::1]", 0) == 0);
-      if (!secure && !loopback) {
+      const auto raw_url = input.at("url").get<std::string>();
+      // Same exact parser as OAuth endpoints: HTTPS anywhere, plain HTTP only
+      // when the parsed authority is loopback. It rejects embedded credentials,
+      // query/fragment suffixes and control characters, so a prefix such as
+      // `localhost.attacker.tld` or `127.0.0.1@evil.example` cannot smuggle the
+      // stored header secret off-loopback.
+      std::string url;
+      if (!validate_oauth_url(raw_url, url)) {
         return failure("INVALID_PARAMS", "an http MCP url must use HTTPS or loopback HTTP");
       }
       config["url"] = url;
@@ -9613,7 +9926,7 @@ IpcReply IpcRouter::mcp_command(const std::string& method, const nlohmann::json&
           return failure("INVALID_PARAMS", "mcp_server_save httpAuthHeaders are invalid");
         }
         const auto name = entry.at("name").get<std::string>();
-        if (name.size() > 128 || has_control_characters(name)) {
+        if (name.size() > 128 || has_header_control_characters(name)) {
           return failure("INVALID_PARAMS", "mcp_server_save header name is invalid");
         }
         std::string lower = name;
@@ -9629,6 +9942,13 @@ IpcReply IpcRouter::mcp_command(const std::string& method, const nlohmann::json&
           const auto secret = entry.at("secret").get<std::string>();
           if (secret.size() > 8192) {
             return failure("INVALID_PARAMS", "mcp_server_save header secret is too long");
+          }
+          // The value is written into `httplib::Headers` verbatim, so CR, LF,
+          // NUL and the other control characters would let a stored secret
+          // inject extra request headers. Refuse it at save time with the same
+          // predicate used for the header name.
+          if (has_header_control_characters(secret)) {
+            return failure("INVALID_PARAMS", "mcp_server_save header secret is invalid");
           }
           try {
             reference = credentials_
@@ -10203,7 +10523,7 @@ nlohmann::json IpcRouter::default_host_tool_run(
   if (tool_name == kToolPackageInspect) {
     if (!only_fields(input, {"manager", "package"}, {"manager", "package"}) ||
         !input.at("manager").is_string() || !input.at("package").is_string() ||
-        !is_one_of(input.at("manager").get<std::string>(), {"apt", "dnf"}) ||
+        !is_one_of(input.at("manager").get<std::string>(), {"apt", "dnf", "yum"}) ||
         !safe_package_ref(input.at("package").get<std::string>())) {
       throw std::runtime_error("package.inspect input is invalid");
     }

@@ -66,19 +66,20 @@ cmake --build native/build-cpp-host --target yukinal-desktop-host --config Debug
 
 ## 打包（C++ 宿主）
 
-`pnpm package`（`scripts/package.mjs`）不再走 `tauri build`，而是把仓库已经产出的三件套暂存成可分发布局：
+`pnpm package`（`scripts/package.mjs`）不再走 `tauri build`，而是把仓库已经产出的四件套暂存成可分发布局：
 
 - `pnpm build:python-agent` 产出冻结 Python Agent onedir（需要 `agent[package]` 与 PyInstaller）；
 - `pnpm build:ssh-service` 产出 C++ SSH 服务；
+- `pnpm --filter @yukinal/desktop build` 产出桌面 UI（`apps/desktop/dist`，其中必须有 `index.html`）；
 - 用 CMake 构建 C++ 桌面宿主（`native/build-nmake` 等 Release 目录）。
 
-三者就绪后 `pnpm package` 把它们（连同 `NOTICE`、`LICENSE`、`OPENSSL-LICENSE.txt`、`THIRD_PARTY_LICENSES.txt`）复制到 `target/release/bundle/yukinal-<version>-<platform>-<arch>/`，并写出 `SHA256SUMS.txt` 与 `release-manifest.json`。清单记录应用版本（`packages/shared/src/version.ts` 的 `APP_VERSION`）、Agent 版本（`agent/pyproject.toml`）、平台/架构、源码修订、工作区是否脏、每个文件的 SHA-256/字节数，以及启动约定。`target/` 已被忽略，不纳入版本控制。
+四者就绪后 `pnpm package` 把它们（连同 `NOTICE`、`LICENSE`、`OPENSSL-LICENSE.txt`、`THIRD_PARTY_LICENSES.txt`）复制到 `target/release/bundle/yukinal-<version>-<platform>-<arch>/`，UI 落在 `ui/`，并写出 `SHA256SUMS.txt` 与 `release-manifest.json`。清单记录应用版本（`packages/shared/src/version.ts` 的 `APP_VERSION`）、Agent 版本（`agent/pyproject.toml`）、平台/架构、源码修订、工作区是否脏、每个文件的 SHA-256/字节数，以及启动约定（含 `launch.uiDirectory`）。`target/` 已被忽略，不纳入版本控制。UI 目录可用 `--ui-dir <目录>` 或 `YUKINAL_DESKTOP_UI_DIR` 覆盖默认的 `apps/desktop/dist`。
 
 - `pnpm release:manifest` 在已暂存的载荷上重建清单与校验和；
-- `pnpm package -- --verify` 逐字节复核载荷、校验和与清单，任何不一致都非零退出；
-- 缺少宿主、Agent 或 SSH 服务产物时脚本 fail-closed，不会产出部分载荷。
+- `pnpm package -- --verify` 逐字节复核载荷、校验和与清单，并反向枚举磁盘：出现未声明文件、符号链接/NTFS 联接、或清单声明了不存在的 UI 入口时都非零退出；
+- 缺少宿主、UI、Agent 或 SSH 服务产物时脚本 fail-closed（UI 目录缺少 `index.html` 同样失败），不会产出部分载荷。
 
-启动器需要用 `YUKINAL_AGENT_ENTRY` 指向 `python-agent/yukinal-agent[.exe]`（冻结 onedir，目标机无需安装 Python），用 `YUKINAL_SSH_SERVICE_BINARY` 指向 `ssh-service/yukinal-ssh-service[.exe]`；这两个环境变量名是 C++ 宿主 `configure_sidecar()` 与终端/SFTP 后端已经在读取的名字。
+启动器需要用 `--ui-dir <载荷>/ui` 指向暂存的 UI（宿主要求 `--dev-url` 与 `--ui-dir` 恰好给一个，且该目录含可读 `index.html`，否则以退出码 2 静默退出），用 `YUKINAL_AGENT_ENTRY` 指向 `python-agent/yukinal-agent[.exe]`（冻结 onedir，目标机无需安装 Python），用 `YUKINAL_SSH_SERVICE_BINARY` 指向 `ssh-service/yukinal-ssh-service[.exe]`；这两个环境变量名是 C++ 宿主 `configure_sidecar()` 与终端/SFTP 后端已经在读取的名字。
 
 **未实现**：安装器（NSIS/MSI/DMG/deb）、升级与用户数据保留、代码签名与公证、三平台真实 UI 冒烟。清单的 `notes` 会如实记录“这是分发布局而非已安装发布”；完整性校验只证明载荷未被改动，不证明发布者身份。
 
@@ -96,7 +97,7 @@ cmake --build native/build-cpp-host --target yukinal-desktop-host --config Debug
 4. 迁移剩余任务、审计、计划、恢复与事件命令，并逐项对照 shared schema 和 UI 使用点。
 5. 在分发布局（`pnpm package`）之上补齐安装器与签名，完成 Windows、macOS、Linux 桌面构建和安装后验收。
 
-每一轮只纳入已完成且可复核的文件，更新相应文档，构建受影响的 C++ 目标，再按用户要求推送。不要把 `ssh_agent_development_brief.md` 加入提交；它是工作区中的任务输入。Git author 和 committer 必须设为 `Bad0RANG3 <badorangeovo@Outlook.com>`。
+每一轮只纳入已完成且可复核的文件，更新相应文档，构建受影响的 C++ 目标，再按用户要求推送。工作区里的 `ssh_agent_development_brief.md` 是外部的任务输入说明，**不在仓库内**，也不要加入提交；仓库的构建和门禁都不依赖它的存在。Git author 和 committer 必须设为 `Bad0RANG3 <badorangeovo@Outlook.com>`。
 
 ## 完成标准
 

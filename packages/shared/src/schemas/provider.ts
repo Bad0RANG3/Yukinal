@@ -1,6 +1,7 @@
 /**
- * AI provider config schemas: the API key is a *transient* input that Rust drops
- * into the keychain; only the reference is stored.
+ * AI provider config schemas: the API key is a *transient* input. The host stores the
+ * secret through its credential service (`host.credentials.set`) and hands the sidecar only
+ * a reference, so this contract never carries a key back out.
  */
 
 import { z } from "zod";
@@ -110,8 +111,9 @@ const API_VERSION_IS_ANTHROPIC_ONLY = {
  * 随运行下发的 `RuntimeProviderConfig`、从数据库读回的 `ProviderConfig`）用的是同一条规则：
  * kind 不是 `openai-compatible` 时 `wireApi` 必须**缺省**，带上它就是非法输入。
  *
- * Rust 侧对应地只对 `openai-compatible` 序列化这个字段（`commands/provider.rs` 的
- * `runtime_provider_config()` 与 `repositories/providers.rs` 的读路径）。
+ * 对应地，只有 `openai-compatible` 允许携带这个字段：契约在这里就拒绝，侧车在
+ * `agent/src/yukinal_agent/provider_store.py:64-70` 再拒绝一次，因为另外两种 kind 的协议
+ * 本身就是方言，带 `wireApi` 只能是错误输入。
  */
 export function wireApiAppliesTo(value: {
   kind: AiProviderKind;

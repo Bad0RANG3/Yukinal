@@ -31,8 +31,11 @@ const SERVER_PAGE_LABEL: Record<ServerPage, string> = {
   overview: "概览", terminal: "终端", files: "文件",
   logs: "日志", services: "服务", activity: "活动",
 };
+function isWorkpageToolPage(page: ServerPage): page is "terminal" | "files" | "logs" | "services" {
+  return page === "terminal" || page === "files" || page === "logs" || page === "services";
+}
 function PageLoadingFallback() { return <div className="compact-empty" role="status">正在加载页面…</div>; }
-const INSPECTOR_PAGES = SERVER_PAGES.filter((page) => page !== "terminal" && page !== "files");
+const INSPECTOR_PAGES = SERVER_PAGES.filter((page) => page === "overview" || page === "activity");
 
 export function AppShell() {
   const primary = useWorkspaceStore((state) => state.primary);
@@ -53,12 +56,13 @@ export function AppShell() {
   const inspectorRef = useRef<HTMLElement>(null);
   const aiWorkspaceRef = useRef<HTMLDivElement>(null);
   const previousPrimary = useRef(primary);
+  const choosingWorkpageTarget = useRef(false);
   const closeGuide = () => { useOnboardingStore.getState().dismiss(); setGuideOpen(false); };
   const detail = primary === "servers" && serverDetailOpen;
   const primaryActive = (item: (typeof VISIBLE_PRIMARY_NAV)[number]) => primary === item || (item === "activity" && primary === "servers" && !serverDetailOpen);
   // Existing navigation requests also open tools on the information surface.
   useEffect(() => {
-    if (!detail || guideOpen || (serverPage !== "terminal" && serverPage !== "files")) return;
+    if (!detail || guideOpen || !isWorkpageToolPage(serverPage)) return;
     useWorkpagesStore.getState().openTool(serverPage, { serverId: selectedServerId });
     setServerPage("overview");
     setContextOpen(false);
@@ -79,7 +83,7 @@ export function AppShell() {
     const frame = requestAnimationFrame(() => sidebar.querySelector<HTMLElement>("button")?.focus());
     const onKey = (event: globalThis.KeyboardEvent) => {
       if (event.target instanceof HTMLElement && event.target.closest("dialog[open]")) return;
-      if (event.key === "Escape") { event.preventDefault(); setSidebarOpen(false); return; }
+      if (event.key === "Escape") { event.preventDefault(); choosingWorkpageTarget.current = false; setSidebarOpen(false); return; }
       if (event.key !== "Tab") return;
       const items = Array.from(sidebar.querySelectorAll<HTMLElement>("button:not([disabled]), input:not([disabled]), [href]"))
         .filter((item) => item.getClientRects().length > 0);
@@ -106,7 +110,13 @@ export function AppShell() {
       else aiWorkspaceRef.current?.focus({ preventScroll: true });
     });
   };
+  const chooseWorkpageTarget = () => {
+    choosingWorkpageTarget.current = true;
+    if (window.matchMedia("(max-width: 720px)").matches) setSidebarOpen(true);
+    else requestAnimationFrame(() => sidebarRef.current?.querySelector<HTMLInputElement>(".server-search input")?.focus());
+  };
   const navigate = (item: PrimaryNav) => {
+    choosingWorkpageTarget.current = false;
     if (item === "board") { useWorkpagesStore.getState().openTeamBoard(null); setContextOpen(false); }
     else useWorkpagesStore.getState().setCollapsed(true);
     setPrimary(item); closeGuide(); setSidebarOpen(false);
@@ -121,14 +131,14 @@ export function AppShell() {
   return (
     <div onClickCapture={recordTeamAttention} onFocusCapture={recordTeamAttention} className={`app-shell ai-first ${sidebarOpen ? "navigation-open" : ""} ${compact && contextOpen ? "context-open" : ""} ${informationOpen && !(compact && contextOpen) ? "information-open" : ""} ${informationExpanded ? "information-expanded" : ""}`} data-primary={primary}>
       <aside className="workspace-sidebar" id="workspace-sidebar" ref={sidebarRef} aria-label="工作区导航">
-        <div className="workspace-brand"><span>Yukinal</span><button type="button" className="icon-button navigation-close" aria-label="关闭导航" onClick={() => setSidebarOpen(false)}><Icon name="close" /></button></div>
+        <div className="workspace-brand"><span>Yukinal</span><button type="button" className="icon-button navigation-close" aria-label="关闭导航" onClick={() => { choosingWorkpageTarget.current = false; setSidebarOpen(false); }}><Icon name="close" /></button></div>
         <nav className="workspace-navigation" aria-label="主导航">{VISIBLE_PRIMARY_NAV.map((item) => <button type="button" key={item} data-attention={`nav:${item}`} className={`workspace-nav-item team-operation-target ${primaryActive(item) ? "is-active" : ""}`} aria-current={primaryActive(item) ? "page" : undefined} onClick={() => navigate(item)}><Icon name={PRIMARY_NAV_META[item].icon} size="md" /><span>{PRIMARY_NAV_META[item].label}</span>{item === "board" ? <TeamBoardNavFeedback /> : null}</button>)}</nav>
-        <ServerList embedded onClose={() => setSidebarOpen(false)} onSelect={() => { useWorkpagesStore.getState().setCollapsed(true); setSidebarOpen(false); closeGuide(); if (window.matchMedia("(max-width: 1180px)").matches) openContext(); }} />
+        <ServerList embedded onClose={() => { choosingWorkpageTarget.current = false; setSidebarOpen(false); }} onSelect={() => { setSidebarOpen(false); closeGuide(); if (choosingWorkpageTarget.current) { choosingWorkpageTarget.current = false; returnToAI(); } else { useWorkpagesStore.getState().setCollapsed(true); if (window.matchMedia("(max-width: 1180px)").matches) openContext(); } }} onOpenWorkpage={() => { setContextOpen(false); setSidebarOpen(false); }} />
       </aside>
       {sidebarOpen ? <button type="button" className="navigation-scrim" aria-label="关闭导航" onClick={() => setSidebarOpen(false)} /> : null}
       <div className="ai-workspace-column" ref={aiWorkspaceRef} tabIndex={-1}>
         <AgentPanel workspace onAttentionRequested={returnToAI} onOpenTeam={() => navigate("agents")}
-          workspaceWorkpages={<WorkpagesDock onPopOut={async (page) => {
+          workspaceWorkpages={<WorkpagesDock onChooseTarget={chooseWorkpageTarget} onPopOut={async (page) => {
             if (!page.serverId || page.kind === "evidence" || page.kind === "artifact" || page.kind === "board") throw new Error("该内容可在工作页中展开");
             await openNativeWorkpage({ kind: page.kind, serverId: page.serverId });
           }} />} workspaceControls={<>

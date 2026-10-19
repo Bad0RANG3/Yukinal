@@ -776,6 +776,40 @@ class ModelDrivenAgent:
             if completed_command_result is not None:
                 failed_item["result"] = completed_command_result[0]
             results.append(failed_item)
+            unknown_tool_recoveries = sum(
+                1 for item in state["tool_results"]
+                if item.get("error_code") == "unknown_tool"
+            )
+            if error.code == "unknown_tool" and unknown_tool_recoveries == 0:
+                # Models can occasionally invent a tool name. Give the model one
+                # bounded chance to recover using the registered tool definitions
+                # instead of failing the entire task on the first unknown call.
+                content = (
+                    '{"error":"unknown_tool","message":"That tool is not registered. '
+                    'Continue only with tools from the current registered tool list."}'
+                )
+                output_size = len(content.encode("utf-8"))
+                if state["output_bytes"] + output_size <= self._budget.max_output_bytes:
+                    return {
+                        "messages": [
+                            *state["messages"],
+                            ToolMessage(
+                                content=content,
+                                tool_call_id=request["id"],
+                                name=request.get("provider_name", request["name"]),
+                            ),
+                        ],
+                        # Discard any sibling calls from the same model response;
+                        # the next model round must choose tools again explicitly.
+                        "calls": [],
+                        "call_index": 0,
+                        "tool_results": results,
+                        "counted_call_ids": next_counted_call_ids,
+                        "tool_call_count": next_tool_call_count,
+                        "output_bytes": state["output_bytes"] + output_size,
+                        "status": "running",
+                        "error_code": None,
+                    }
             if completed_command_result is not None:
                 _result, encoded, output_size = completed_command_result
                 return {

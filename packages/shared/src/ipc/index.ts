@@ -1,9 +1,10 @@
 /**
- * Tauri IPC contract shared by React and the Rust command layer.
+ * Desktop IPC contract shared by the React UI and the C++ host command layer.
  *
- * React may only call these commands and listen to these events. Rust mirrors the
- * names 1:1; the agent sidecar is reached through `@yukinal/agent-sdk`, never here.
- * Anything not in this map does not exist for the UI.
+ * React may only call these commands and listen to these events. The host mirrors the
+ * names 1:1 in `native/desktop_host/src/ipc_router.cpp`; the agent sidecar is reached
+ * through `@yukinal/agent-sdk`, never here. Anything not in this map does not exist for
+ * the UI.
  */
 
 import type {
@@ -150,12 +151,12 @@ export const IPC_COMMANDS = {
   terminalWrite: "terminal_write",
   terminalResize: "terminal_resize",
   terminalClose: "terminal_close",
-  /** Sidecar lifecycle is owned by Rust; the UI never spawns processes. */
+  /** Sidecar lifecycle is owned by the host; the UI never spawns processes. */
   agentSpawn: "agent_spawn",
   agentKill: "agent_kill",
   agentStatus: "agent_status",
   agentLogs: "agent_logs",
-  /** Agent runs: Rust resolves the provider + credential and hands the call to the sidecar. */
+  /** Agent runs: the host resolves the provider + credential and hands the call to the sidecar. */
   agentRunStart: "agent_run_start",
   agentTeamTasks: "agent_team_tasks",
   agentRunStop: "agent_run_stop",
@@ -347,7 +348,7 @@ export interface IpcCommandMap {
       /** Bounds what the run may accomplish; enforced by the permission engine. */
       mode?: AgentRunMode;
       /**
-       * Which policy must decide the run. Forwarded verbatim — Rust does not know what
+       * Which policy must decide the run. Forwarded verbatim — the host does not know what
        * a policy id means, and the sidecar's registry is what rejects an unknown one.
        * Omitted -> the sidecar derives the policy from the target environment.
        */
@@ -458,8 +459,8 @@ export interface IpcCommandMap {
 }
 
 /**
- * Sidecar runtime identity. `entry` is the JS bundle Rust launches — recorded so the
- * UI can show *what actually started* instead of what the build assumed.
+ * Sidecar runtime identity. `entry` is the sidecar binary the host launches — recorded so
+ * the UI can show *what actually started* instead of what the build assumed.
  */
 export interface AgentSpawnResponse {
   pid: number;
@@ -477,7 +478,7 @@ export interface AgentStatus {
   agentVersion: string | null;
   /** Registered tools reported by the sidecar at handshake time. */
   toolCount: number | null;
-  /** Which bundle Rust actually launched (ADR 0008) — "what started" must be visible. */
+  /** Which sidecar binary the host actually launched (ADR 0008) — "what started" must be visible. */
   entry: string | null;
   startedAt: string | null;
   /** Last abnormal exit, kept until the next successful spawn so a crash stays visible. */

@@ -283,7 +283,7 @@ class ClientTests(unittest.TestCase):
             lambda: self.client.docker_logs("staging-web-01", "api", tail=True),
             lambda: self.client.docker_inspect("staging-web-01", "api/other"),
             lambda: self.client.systemd_inspect("staging-web-01", "nginx"),
-            lambda: self.client.package_inspect("staging-web-01", "yum", "nginx"),
+            lambda: self.client.package_inspect("staging-web-01", "zypper", "nginx"),
             lambda: self.client.package_inspect("staging-web-01", "apt", "nginx;id"),
         )
         for invoke in invalid_calls:
@@ -366,7 +366,7 @@ class ClientTests(unittest.TestCase):
 
     def test_package_install_rejects_invalid_manager_package_version_and_timeout(self) -> None:
         invalid_calls = (
-            lambda: self.client.package_install("staging-web-01", "yum", "nginx"),
+            lambda: self.client.package_install("staging-web-01", "zypper", "nginx"),
             lambda: self.client.package_install("staging-web-01", "apt", "nginx;id"),
             lambda: self.client.package_install("staging-web-01", "apt", "nginx", "1;id"),
             lambda: self.client.package_install("staging-web-01", "apt", "nginx", timeout_seconds=True),

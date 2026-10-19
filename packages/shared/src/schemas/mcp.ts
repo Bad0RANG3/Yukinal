@@ -25,11 +25,11 @@ import { RestartRecordSchema } from "./lifecycle.js";
 /**
  * `mcp_server_*` payloads, parsed at the IPC gate (`lib/ipc.ts`).
  *
- * These mirror `apps/desktop/src-tauri/src/commands/mcp.rs`. They are strict on the fields the UI
- * branches on and permissive exactly where the value is remote, untrusted text: a tool
- * description or an input schema from a third-party process must never be able to fail the parse
- * of an otherwise valid settings screen (a server that sends a huge or exotic schema would
- * otherwise blank the whole panel).
+ * These mirror the host's MCP command surface (`native/desktop_host/src/ipc_router.cpp`).
+ * They are strict on the fields the UI branches on and permissive exactly where the value
+ * is remote, untrusted text: a tool description or an input schema from a third-party
+ * process must never be able to fail the parse of an otherwise valid settings screen (a
+ * server that sends a huge or exotic schema would otherwise blank the whole panel).
  */
 
 const IdSchema = z.string().trim().min(1).max(160);
@@ -46,8 +46,8 @@ const McpHttpAuthHeaderInputSchema = z.strictObject({
 }) satisfies z.ZodType<McpHttpAuthHeaderInput>;
 
 /**
- * Client authentication methods. The same closed set as Rust's `McpOAuthClientAuth`: an
- * unknown value would mean sending credentials a way the host cannot perform.
+ * Client authentication methods: a closed set, because an unknown value would mean sending
+ * credentials a way the host cannot perform.
  */
 const McpOAuthClientAuthSchema = z.enum(["none", "client_secret_post", "client_secret_basic"]);
 
@@ -59,7 +59,7 @@ const McpOAuthConfigSchema = z.strictObject({
   clientSecretRef: z.string().min(1).max(512).optional(),
   // Always present on the way out, like `flow`: the host defaults rows written before the
   // setting existed to `false`, so a missing field here would be a contract that has
-  // drifted from what Rust actually sends.
+  // drifted from what the host actually sends.
   dpop: z.boolean(),
   dpopKeyRef: z.string().min(1).max(512).optional(),
   scopes: z.array(z.string().min(1).max(128)).max(32),
@@ -83,8 +83,8 @@ const McpOAuthInputSchema = z.strictObject({
 
 /**
  * The **stored** row (`mcp_servers`), which is stricter than the save input on purpose:
- * `transport` is an enum here because a row can only hold what the Rust core accepted, while the
- * form sends a plain string and lets the core refuse `http` with a reason a user can read.
+ * `transport` is an enum here because a row can only hold what the host accepted, while the
+ * form sends a plain string and lets the host refuse `http` with a reason a user can read.
  */
 export const McpServerConfigSchema = z.strictObject({
   id: IdSchema,
@@ -163,9 +163,9 @@ export const McpServerListResponseSchema = z.strictObject({
 /**
  * The form's payload.
  *
- * `transport` is a plain string, not an enum: the refusal of `http` belongs to the Rust core
- * (`McpStdioConfig::from_server_config`), and turning it into a schema error here would give the
- * user a validation message instead of the reason. `id` and `label` are *not* trimmed here
+ * `transport` is a plain string, not an enum: the refusal of `http` belongs to the host's
+ * stdio-config validation, and turning it into a schema error here would give the user a
+ * validation message instead of the reason. `id` and `label` are *not* trimmed here
  * either — the backend trims and decides, and the UI shows what it decided.
  */
 export const McpServerSaveInputSchema = z.strictObject({

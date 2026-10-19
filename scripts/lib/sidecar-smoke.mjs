@@ -1,7 +1,7 @@
 /**
  * The sidecar protocol smoke, as a reusable routine (ADR 0001 / ADR 0006).
  *
- * Spawns a sidecar exactly the way Rust does -- `<runtime> <args...>` -- speaking NDJSON
+ * Spawns a sidecar the way the host does -- `<runtime> <args...>` -- speaking NDJSON
  * on stdin/stdout, and asserts the protocol behaves as contracted, including the real
  * agent admission path and survival of a malformed frame.
  *
@@ -93,7 +93,7 @@ export async function runSidecarSmoke(entry, options = {}) {
         const frame = JSON.parse(line);
         if (typeof frame.method === "string") {
           // Three frame kinds arrive here, and only one of them gets an answer:
-          //   - a request from the agent (method + id) → answer it like the Rust host would;
+          //   - a request from the agent (method + id) → answer it like the C++ host would;
           //   - an *upward notification* (method, no id) — `agent.stream` carries
           //     `AgentStreamEvent` (ADR 0006). Replying to one would put a frame on the wire
           //     that neither side expects, so it is recorded and dropped;
@@ -101,7 +101,7 @@ export async function runSidecarSmoke(entry, options = {}) {
           hostMethodsSeen.add(frame.method);
           if (typeof frame.id === "number") {
             const handler = HOST_HANDLERS[frame.method];
-            // An unknown host method gets the answer a real Rust host gives. Being silent
+            // An unknown host method gets the answer the C++ host gives. Being silent
             // would hang the agent, and inventing a result would hide a real gap.
             send(
               handler

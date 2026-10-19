@@ -1204,6 +1204,46 @@ button:disabled {
   line-height: 1.5;
 }
 
+.approval-facts {
+  margin: 10px 0;
+  padding-left: 18px;
+  color: var(--muted);
+  font-size: var(--text-caption);
+  line-height: 1.5;
+  overflow-wrap: anywhere;
+}
+
+.approval-input {
+  margin: 10px 0;
+  color: var(--muted);
+  font-size: var(--text-caption);
+}
+
+.approval-input > summary {
+  cursor: pointer;
+  color: var(--info);
+}
+
+.approval-input-json {
+  max-height: 240px;
+  margin: 8px 0 0;
+  padding: 8px;
+  overflow: auto;
+  border: 1px solid var(--line);
+  border-radius: var(--radius-control);
+  background: var(--surface-2);
+  font-size: var(--text-caption);
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+
+.approval-reference {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 10px;
+  overflow-wrap: anywhere;
+}
+
 .approval-actions {
   display: flex;
   flex-wrap: wrap;

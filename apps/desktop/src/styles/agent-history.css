@@ -572,7 +572,8 @@
 .agent-task-trigger { display: inline-flex; min-width: 0; max-width: 280px; align-items: center; gap: 6px; border: 0; border-radius: var(--radius-control); background: transparent; color: var(--text); padding: 5px 6px; font: inherit; font-size: var(--text-label); text-align: left; }
 .agent-task-trigger > span { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .agent-task-trigger > svg { flex-shrink: 0; color: var(--faint); }
-.agent-task-trigger:hover:not(:disabled), .agent-task-trigger.is-active { background: var(--material-hover); }
+.agent-task-trigger:hover:not(:disabled):not([aria-disabled="true"]), .agent-task-trigger.is-active { background: var(--material-hover); }
+.agent-task-trigger[aria-disabled="true"] { cursor: default; opacity: .6; }
 .agent-task-heading > .agent-context { flex: 0 1 auto; font-size: var(--text-caption); }
 .agent-context-usage { color: var(--faint); font-size: var(--text-caption); white-space: nowrap; font-variant-numeric: tabular-nums; }
 .ai-first .agent-panel.agent-workspace:has(.agent-task-popover) { position: relative; }
@@ -605,11 +606,12 @@
 }
 
 /* The title keeps its place while secondary launcher labels fold to icons.
-   Text stays in the accessibility tree and every control remains in Tab order. */
+   Text stays in the accessibility tree and every control remains in Tab order.
+   The workpage launcher moved out of this row into `WorkspaceTabStrip`; what
+   remains here are the workspace-level toggles (preview, guide, inspector). */
 .ai-first .agent-header .agent-task-heading { flex: 1 1 0; }
 .ai-first .agent-header .agent-header-actions { flex: 0 1 auto; }
 .agent-workspace-controls { display: inline-flex; min-width: 0; flex: 0 1 auto; align-items: center; gap: 5px; }
-.agent-workspace-controls > .workpages-launcher { flex-shrink: 0; }
 .agent-workspace-controls .workspace-guide-toggle { display: inline-flex; flex-shrink: 0; align-items: center; gap: 5px; min-height: 28px; padding: 4px 6px; white-space: nowrap; font-size: var(--text-caption); }
 .agent-workspace-controls > :is(button, .live-preview-control) { flex-shrink: 0; }
 @container agent-workspace (max-width: 1000px) {
@@ -617,8 +619,6 @@
   .ai-first .agent-header .agent-header-actions { gap: 6px; }
   .ai-first .agent-header .agent-status[data-idle="true"] { display: none; }
   .agent-workspace-controls { gap: 3px; }
-  .ai-first .agent-header .workpages-launcher-button { width: 28px; min-width: 28px; min-height: 28px; padding: 5px; }
-  .ai-first .agent-header .workpages-launcher-button > span,
   .ai-first .agent-header .live-preview-label { position: absolute; display: block; width: 1px; height: 1px; overflow: hidden; clip-path: inset(50%); white-space: nowrap; }
   .ai-first .agent-header .live-preview-control { min-height: 28px; gap: 4px; padding: 4px 6px; }
   .ai-first .agent-header .agent-token-usage { display: none; }
@@ -640,10 +640,10 @@
 .agent-recent-conversations { display: grid; gap: 2px; min-width: 0; margin: 18px 4px 0; color: var(--faint); font-size: var(--text-caption); }
 .agent-recent-heading { display: flex; align-items: center; justify-content: space-between; gap: 12px; margin-bottom: 4px; }
 .agent-recent-conversations button { border: 0; background: transparent; color: var(--muted); font: inherit; cursor: pointer; }
-.agent-recent-conversations button:disabled { opacity: .5; cursor: default; }
+.agent-recent-conversations button:disabled, .agent-recent-conversations button[aria-disabled="true"] { opacity: .5; cursor: default; }
 .agent-recent-heading button { display: inline-flex; align-items: center; gap: 3px; padding: 4px 0 4px 8px; }
 .agent-recent-row { display: flex; align-items: center; gap: 8px; min-width: 0; min-height: 29px; padding: 4px 6px; text-align: left; border-radius: var(--radius-control); }
 .agent-recent-row > .icon, .agent-recent-row time { flex: 0 0 auto; color: var(--faint); }
 .agent-recent-row > span { min-width: 0; flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-.agent-recent-row:not(:disabled):hover { color: var(--text); background: var(--material-hover); }
+.agent-recent-row:not(:disabled):not([aria-disabled="true"]):hover { color: var(--text); background: var(--material-hover); }
 .agent-recent-error { display: flex; align-items: center; gap: 8px; color: var(--warning); }

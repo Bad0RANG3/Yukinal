@@ -4,16 +4,22 @@
 #include "yukinal/desktop_host/desktop_mcp.hpp"
 #include "yukinal/desktop_host/desktop_oauth.hpp"
 #include "yukinal/desktop_host/desktop_target.hpp"
+#include "yukinal/desktop_host/desktop_terminal.hpp"
+#include "header_safety.hpp"
 #include "yukinal/desktop_host/host_trust.hpp"
 #include "yukinal/desktop_host/ipc_router.hpp"
+#include "yukinal/desktop_host/scoped_environment.hpp"
 #include "yukinal/desktop_host/transfer_history.hpp"
 #include "yukinal/desktop_host/transfer_types.hpp"
+#include "terminal_exit.hpp"
 #include "schema_migrations.hpp"
 
 #include <httplib.h>
 
+#include <algorithm>
 #include <atomic>
 #include <chrono>
+#include <condition_variable>
 #include <cstddef>
 #include <cstdint>
 #include <cstdlib>
@@ -21,9 +27,12 @@
 #include <iostream>
 #include <map>
 #include <memory>
+#include <mutex>
+#include <stdexcept>
 #include <string>
 #include <string_view>
 #include <thread>
+#include <vector>
 
 namespace {
 
@@ -31,6 +40,52 @@ void check(bool condition, const char* message) {
   if (condition) return;
   std::cerr << message << '\n';
   std::exit(1);
+}
+
+// CONCURRENCY REGRESSION TEST: host RPCs run on four sidecar worker threads and
+// transfers on detached threads, so two credential windows can overlap. The
+// shared ScopedEnvironment must serialize them for its whole lifetime; without
+// the process-wide mutex one thread observes another thread's secret.
+void run_scoped_environment_concurrency_check() {
+  using yukinal::desktop_host::ScopedEnvironment;
+  const std::string name = "YUKINAL_TEST_SCOPED_ENVIRONMENT_RACE";
+  const std::string baseline = "baseline-value";
+#ifdef _WIN32
+  (void)_putenv_s(name.c_str(), baseline.c_str());
+#else
+  (void)setenv(name.c_str(), baseline.c_str(), 1);
+#endif
+
+  std::atomic<bool> failed{false};
+  std::atomic<int> ready{0};
+  auto worker = [&](const std::string& value) {
+    ready.fetch_add(1);
+    while (ready.load() < 2) std::this_thread::yield();
+    for (int iteration = 0; iteration < 200; ++iteration) {
+      ScopedEnvironment scope({{name, value}});
+      const char* first = std::getenv(name.c_str());
+      if (first == nullptr || std::string(first) != value) failed.store(true);
+      // Give the other thread a chance to interleave if the scope does not
+      // serialize the whole credential window.
+      std::this_thread::yield();
+      const char* second = std::getenv(name.c_str());
+      if (second == nullptr || std::string(second) != value) failed.store(true);
+    }
+  };
+  std::thread first(worker, std::string("secret-one"));
+  std::thread second(worker, std::string("secret-two"));
+  first.join();
+  second.join();
+  check(!failed.load(),
+        "concurrent ScopedEnvironment scopes must always observe their own credential value");
+  const char* restored = std::getenv(name.c_str());
+  check(restored != nullptr && std::string(restored) == baseline,
+        "ScopedEnvironment must restore the previous process value after concurrent scopes");
+#ifdef _WIN32
+  (void)_putenv_s(name.c_str(), "");
+#else
+  (void)unsetenv(name.c_str());
+#endif
 }
 
 // Percent-decodes an OAuth query value. Only the characters the engine encodes
@@ -308,14 +363,54 @@ int run_mcp_slow_mock() {
   return 0;
 }
 
+// A stand-in for `yukinal-ssh-service --terminal`, used as the terminal
+// fixtures' child process. It speaks the same JSON-lines protocol. The `--cols`
+// value selects the behaviour:
+//   80  -> a `closed` frame carrying the remote exit code 7, then wait for the
+//          host to close stdin so it can reap the worker after remote exit
+//   100 -> no `closed` frame at all, then exit (the report must be null)
+//   else-> stay alive until the host sends `close`, so the session cap can be
+//          exercised with real live sessions.
+int run_terminal_mock(int argc, char** argv) {
+  int cols = 80;
+  for (int index = 1; index + 1 < argc; ++index) {
+    if (std::string(argv[index]) == "--cols") cols = std::atoi(argv[index + 1]);
+  }
+  std::cout << R"({"type":"ready"})" << '\n' << std::flush;
+  if (cols == 80) {
+    std::cout << R"({"type":"closed","exit_code":7})" << '\n' << std::flush;
+    // A real terminal worker has an input reader blocked on stdin while the
+    // remote shell exits. The desktop host must close this pipe after the
+    // `closed` frame so the worker can terminate and be reaped.
+    std::string line;
+    while (std::getline(std::cin, line)) {
+    }
+    return 0;
+  }
+  if (cols == 100) return 0;
+  std::string line;
+  while (std::getline(std::cin, line)) {
+    const auto frame = nlohmann::json::parse(line, nullptr, false);
+    if (frame.is_discarded() || !frame.is_object()) continue;
+    if (frame.value("type", std::string()) == "close") return 0;
+  }
+  return 0;
+}
+
 }  // namespace
 
 int main(int argc, char** argv) {
   using yukinal::desktop_host::DesktopDatabase;
+  const bool terminal_mock = std::any_of(argv, argv + argc, [](const char* argument) {
+    return std::string(argument) == "--terminal";
+  });
+  if (terminal_mock) return run_terminal_mock(argc, argv);
   if (argc >= 2 && std::string(argv[1]) == "--mcp-mock") return run_mcp_mock();
   if (argc >= 2 && std::string(argv[1]) == "--mcp-slow-mock") return run_mcp_slow_mock();
   const std::filesystem::path test_executable =
       argc > 0 ? std::filesystem::path(argv[0]) : std::filesystem::path();
+
+  run_scoped_environment_concurrency_check();
 
   TemporaryDatabaseDirectory temporary;
   seed_legacy_database(temporary.path);
@@ -958,6 +1053,133 @@ int main(int argc, char** argv) {
     }
     check(bad_revision_rejected, "a malformed edit revision must be refused");
 
+    // Terminal exit reporting: the SSH service's own `closed` frame is the only
+    // source of the remote exit code. The wrapper process status must never be
+    // substituted, and a missing frame is reported as null, never as 0.
+    //
+    // The tracker is the exact helper the real frame handler calls inside
+    // `TerminalManager::Impl::handle_frame`, so driving it with synthetic
+    // protocol lines covers the parse and the state transition without a PTY.
+    {
+      using yukinal::desktop_host::terminal_detail::TerminalExitTracker;
+      TerminalExitTracker no_frame;
+      std::string warning;
+      check(no_frame.payload("term_none").at("terminalSessionId") == "term_none" &&
+                no_frame.payload("term_none").at("exitCode").is_null(),
+            "a terminal without a closed frame must report a null exit code, not zero");
+
+      TerminalExitTracker remote;
+      check(remote.observe_line(R"({"type":"closed","exit_code":7})", warning) &&
+                remote.state().received && remote.state().value.has_value() &&
+                remote.payload("term_remote").at("exitCode") == 7,
+            "a closed frame must carry the remote shell exit code");
+      // A second, different frame is not how the wrapper's own status was
+      // reported, but the tracker must never synthesize a status on its own.
+      check(remote.payload("term_remote").at("exitCode") == 7,
+            "the stored remote exit code must stay authoritative");
+
+      TerminalExitTracker explicit_null;
+      check(explicit_null.observe_line(R"({"type":"closed","exit_code":null})", warning) &&
+                explicit_null.state().received &&
+                explicit_null.payload("term_null").at("exitCode").is_null(),
+            "an explicit null closed frame must report a null exit code");
+
+      TerminalExitTracker missing_code;
+      check(!missing_code.observe_line(R"({"type":"closed"})", warning) &&
+                !missing_code.state().received,
+            "a closed frame without an exit code must be ignored");
+
+      TerminalExitTracker malformed;
+      check(!malformed.observe_line(R"({"type":"closed","exit_code":"7"})", warning) &&
+                !malformed.state().received,
+            "a closed frame with a non-integer exit code must be ignored");
+
+      TerminalExitTracker out_of_range;
+      check(out_of_range.observe_line(R"({"type":"closed","exit_code":-1})", warning) &&
+                out_of_range.state().received &&
+                out_of_range.payload("term_range").at("exitCode").is_null() &&
+                !warning.empty(),
+            "an unrepresentable exit code must report unknown with a diagnostic");
+    }
+
+    // Header safety: CR/LF/NUL in a static auth header value would be copied
+    // verbatim into `httplib::Headers` and could inject request headers.
+    {
+      using yukinal::desktop_host::has_header_control_characters;
+      check(has_header_control_characters(std::string("a\nB: c")),
+            "a header value containing LF must be detected");
+      check(has_header_control_characters(std::string("a\rB: c")),
+            "a header value containing CR must be detected");
+      check(has_header_control_characters(std::string("a\0b", 3)),
+            "a header value containing NUL must be detected");
+      check(has_header_control_characters(std::string("\xC2\x85")),
+            "a header value containing a C1 control must be detected");
+      check(!has_header_control_characters(std::string("Bearer super-secret")),
+            "a normal header value must be accepted");
+    }
+
+    // Terminal session cap and end-to-end exit reporting, using the test binary
+    // as a protocol-compatible terminal worker (see `run_terminal_mock`).
+    if (!test_executable.empty()) {
+      yukinal::desktop_host::ScopedEnvironment environment(
+          {{"YUKINAL_SSH_SERVICE_BINARY", std::filesystem::absolute(test_executable).string()}});
+      yukinal::desktop_host::TerminalManager terminals(&database, &target_credentials);
+      std::mutex events_mutex;
+      std::condition_variable events_cv;
+      std::map<std::string, nlohmann::json> closed_events;
+      terminals.set_event_sink([&](const std::string& event, const nlohmann::json& payload) {
+        if (event != "terminal.closed") return;
+        {
+          std::lock_guard lock(events_mutex);
+          closed_events[payload.value("terminalSessionId", std::string())] = payload;
+        }
+        events_cv.notify_all();
+      });
+      auto wait_closed = [&](const std::string& session_id) {
+        std::unique_lock lock(events_mutex);
+        const bool arrived = events_cv.wait_for(lock, std::chrono::seconds(10), [&] {
+          return closed_events.count(session_id) != 0;
+        });
+        check(arrived, "an exited terminal must emit terminal.closed");
+        return closed_events.at(session_id);
+      };
+
+      const auto remote_exit = terminals.open("srv_target", 80, 24);
+      check(wait_closed(remote_exit).at("exitCode") == 7,
+            "terminal.closed must carry the remote exit code from the closed frame");
+      check(terminals.close(remote_exit), "the exited remote terminal should close");
+
+      const auto unknown_exit = terminals.open("srv_target", 100, 24);
+      check(wait_closed(unknown_exit).at("exitCode").is_null(),
+            "terminal.closed must report null when the worker sent no closed frame");
+      check(terminals.close(unknown_exit), "the unknown-exit terminal should close");
+
+      // Eight long-lived sessions are allowed; the ninth is refused. The count
+      // includes sessions still being reaped, so opening again only succeeds
+      // after the closes below have returned.
+      std::vector<std::string> live;
+      for (int index = 0; index < 8; ++index) {
+        live.push_back(terminals.open("srv_target", 200, 24));
+      }
+      bool cap_refused = false;
+      std::string cap_message;
+      try {
+        (void)terminals.open("srv_target", 200, 24);
+      } catch (const std::runtime_error& error) {
+        cap_refused = true;
+        cap_message = error.what();
+      }
+      check(cap_refused &&
+                cap_message.find("maximum number of terminal sessions") != std::string::npos,
+            "opening more than the terminal session cap must be refused");
+      for (const auto& session_id : live) {
+        check(terminals.close(session_id), "a capped terminal session should close");
+      }
+      const auto reopened = terminals.open("srv_target", 200, 24);
+      check(!reopened.empty() && terminals.close(reopened),
+            "closing sessions must release their slots for later opens");
+    }
+
     // MCP server settings: list/save/delete with write-only static header secrets.
     MemoryCredentialStore mcp_credentials;
     yukinal::desktop_host::IpcRouter mcp_router(&database, &mcp_credentials);
@@ -1005,6 +1227,24 @@ int main(int argc, char** argv) {
     check(mcp_credentials.size() == 1,
           "a save without a new secret must preserve the stored header credential");
 
+    // SECURITY REGRESSION TEST: the header value is written into
+    // `httplib::Headers` verbatim, so CR/LF/NUL in it could inject headers.
+    // `mcp_server_save` must refuse such a secret instead of storing it.
+    for (const std::string& injected : {std::string("a\nB: c"), std::string("a\rB: c"),
+                                        std::string("a\0b", 3)}) {
+      nlohmann::json injected_input = stdio_input;
+      injected_input["id"] = "ops-tools-injected";
+      injected_input["httpAuthHeaders"] =
+          nlohmann::json::array({nlohmann::json{{"name", "Authorization"}, {"secret", injected}}});
+      const auto rejected_secret =
+          mcp_router.invoke("mcp_server_save", {{"input", injected_input}});
+      check(!rejected_secret.ok &&
+                rejected_secret.value.value("code", std::string()) == "INVALID_PARAMS",
+            "an MCP header secret with control characters must be refused");
+    }
+    check(mcp_credentials.size() == 1,
+          "a refused header secret must not reach the credential store");
+
     nlohmann::json bad_input = {{"id", "bad"},
                                 {"label", "Bad"},
                                 {"transport", "carrier-pigeon"},
@@ -1023,6 +1263,34 @@ int main(int argc, char** argv) {
                                     {"scopes", nlohmann::json::array({"read", "write"})}}}};
     const auto saved_oauth = mcp_router.invoke("mcp_server_save", {{"input", oauth_input}});
     check(saved_oauth.ok, "mcp_server_save should accept an HTTP OAuth server");
+
+    // SECURITY REGRESSION TEST: plain HTTP is allowed only for an exact loopback
+    // host. A prefix match used to accept these two bypass URLs, which would
+    // send stored Authorization header secrets to an attacker-controlled host.
+    nlohmann::json loopback_input = {{"id", "http-loopback"},
+                                     {"label", "Loopback HTTP"},
+                                     {"transport", "http"},
+                                     {"url", "http://127.0.0.1:9417/"},
+                                     {"enabled", true}};
+    const auto accepted_loopback =
+        mcp_router.invoke("mcp_server_save", {{"input", loopback_input}});
+    check(accepted_loopback.ok &&
+              accepted_loopback.value.at("config").at("url") == "http://127.0.0.1:9417/",
+          "mcp_server_save should accept a loopback HTTP MCP url");
+    loopback_input["url"] = "http://localhost/";
+    const auto accepted_localhost =
+        mcp_router.invoke("mcp_server_save", {{"input", loopback_input}});
+    check(accepted_localhost.ok &&
+              accepted_localhost.value.at("config").at("url") == "http://localhost/",
+          "mcp_server_save should accept localhost HTTP");
+    loopback_input["url"] = "http://localhost.attacker.tld/";
+    check(!mcp_router.invoke("mcp_server_save", {{"input", loopback_input}}).ok,
+          "mcp_server_save must reject a hostname that only starts with localhost");
+    loopback_input["url"] = "http://127.0.0.1@evil.example/";
+    check(!mcp_router.invoke("mcp_server_save", {{"input", loopback_input}}).ok,
+          "mcp_server_save must reject a loopback prefix with embedded credentials");
+    check(mcp_router.invoke("mcp_server_delete", {{"serverId", "http-loopback"}}).ok,
+          "the loopback HTTP MCP test row should be removable");
     const auto& oauth_config = saved_oauth.value.at("config").at("oauth");
     check(oauth_config.at("issuer") == "https://auth.example.test" &&
               oauth_config.at("flow") == "authorization_code" &&
@@ -1148,17 +1416,21 @@ int main(int argc, char** argv) {
     check(bad_snapshot_rejected, "insert_snapshot should reject an unknown health value");
 
     // Connection lifecycle: disconnect is idempotent, and the keyboard-interactive
-    // commands answer an idle desktop with accepted:false.
+    // refused. A challenge id the terminal host never issued is an explicit error,
+    // not `accepted:false`: a silent success for a challenge nobody is waiting on
+    // is the same misleading receipt the approval entry had (FIX-9).
     const auto disconnected = router.invoke("server_disconnect", {{"serverId", "srv_01abc"}});
     check(disconnected.ok, "server_disconnect should succeed");
     const auto idle_respond = router.invoke(
         "server_auth_respond",
         {{"authId", "auth_probe"}, {"responses", nlohmann::json::array({"otp"})}});
-    check(idle_respond.ok && idle_respond.value.at("accepted") == false,
-          "server_auth_respond should answer an idle desktop with accepted:false");
+    check(!idle_respond.ok && idle_respond.value.at("code") == "AUTH_CHALLENGE_UNKNOWN",
+          "server_auth_respond must refuse a challenge id the terminal host never issued");
+    check(!idle_respond.value.contains("accepted"),
+          "a refused keyboard-interactive answer must not carry an accepted field");
     const auto idle_cancel = router.invoke("server_auth_cancel", {{"authId", "auth_probe"}});
-    check(idle_cancel.ok && idle_cancel.value.at("accepted") == false,
-          "server_auth_cancel should answer an idle desktop with accepted:false");
+    check(!idle_cancel.ok && idle_cancel.value.at("code") == "AUTH_CHALLENGE_UNKNOWN",
+          "server_auth_cancel must refuse a challenge id the terminal host never issued");
     check(!router.invoke("server_auth_respond", {{"authId", "auth_probe"}}).ok,
           "server_auth_respond should require responses");
     check(!router.invoke("server_auth_cancel", {{"authId", ""}}).ok,
@@ -1179,10 +1451,39 @@ int main(int argc, char** argv) {
                                   {"trustLevel", "reviewed"},
                                   {"annotationTrust", "trusted"}});
       yukinal::desktop_host::McpSupervisor supervisor(&database, &mcp_credentials);
+      // A server that was never started has no live session, so the read-only
+      // status must say so instead of inventing a process.
+      check(!supervisor.status("mcp_mock").has_value(),
+            "a server that was never started has no live status");
       const auto catalog = supervisor.catalog();
       check(catalog.at("servers").size() == 1 &&
                 catalog.at("servers").at(0).at("tools").size() == 1,
             "the MCP catalog should expose the one reviewed tool");
+      // The same view the settings UI reads: after the catalog started the
+      // server, the status must describe the real process, not a canned one.
+      {
+        const auto live = supervisor.status("mcp_mock");
+        check(live.has_value(), "a started server should have a live status");
+        const auto& status = *live;
+        check(status.at("running") == true, "a started server should report running");
+        check(status.at("pid").is_number_integer() && status.at("pid").get<long long>() > 0,
+              "a running stdio server should report its real process id");
+        check(status.at("program") == test_executable.string(),
+              "a running stdio server should report the program it launched");
+        const auto started_at = status.at("startedAt").get<std::string>();
+        // The settings UI renders this stamp directly, so it has to be the real
+        // ISO-8601 UTC instant the session began, not an epoch or local string.
+        check(started_at.size() == 20 && started_at.at(10) == 'T' &&
+                  started_at.back() == 'Z' && started_at.at(4) == '-' &&
+                  started_at.at(7) == '-' &&
+                  started_at.find_first_not_of("0123456789-T:Z") == std::string::npos,
+              "a running server should report an ISO-8601 UTC start time");
+        check(status.at("protocolVersion") == "2024-11-05" &&
+                  status.at("serverName") == "mock" && status.at("serverVersion") == "1.0",
+              "a running server should report the handshaken identity");
+        check(status.at("toolCount") == 2,
+              "a running server should report the tools the server actually listed");
+      }
       const auto& tool = catalog.at("servers").at(0).at("tools").at(0);
       check(tool.at("name") == "mcp.mcp_mock.echo" && tool.at("risk") == "low",
             "a reviewed read-only MCP tool should be low risk");
@@ -1206,6 +1507,11 @@ int main(int argc, char** argv) {
       check(unreviewed_rejected,
             "a tool that was not reviewed must not be callable even if the server lists it");
       supervisor.stop("mcp_mock");
+      // A genuinely stopped server must stop advertising a live process: the
+      // supervisor is the single source of truth for both halves, so the same
+      // read-only probe that reported the process above now reports nothing.
+      check(!supervisor.status("mcp_mock").has_value(),
+            "a stopped server must not report a live status");
       // The stdio server row stays in the database; disable it so the HTTP
       // catalog below only starts the server it is testing.
       auto stdio_row = database.get_mcp_server("mcp_mock").value();
@@ -1374,6 +1680,103 @@ int main(int argc, char** argv) {
       check(saw_delete.load(), "stopping an HTTP MCP server should terminate its session");
       http_mcp.stop();
       http_mock_thread.join();
+    }
+
+    // SECURITY REGRESSION TEST, load half: a stored header secret is validated
+    // again when a server starts, because a row can predate the save-time check
+    // or have been written by another host version. The poisoned header must be
+    // dropped (and reported as a diagnostic) while the healthy one still
+    // reaches the wire, and the server must still start.
+    {
+      httplib::Server poisoned_mcp;
+      std::atomic<bool> saw_bad_header{false};
+      std::atomic<bool> saw_good_header{false};
+      poisoned_mcp.Post("/mcp", [&](const httplib::Request& request,
+                                    httplib::Response& response) {
+        if (request.has_header("X-Injected")) saw_bad_header = true;
+        if (request.get_header_value("X-Good") == "Bearer good") saw_good_header = true;
+        auto frame = nlohmann::json::parse(request.body, nullptr, false);
+        if (frame.is_discarded() || !frame.is_object()) {
+          response.status = 400;
+          return;
+        }
+        const auto method = frame.value("method", std::string());
+        if (method == "initialize") {
+          response.set_content(
+              nlohmann::json{{"jsonrpc", "2.0"},
+                             {"id", frame.at("id")},
+                             {"result",
+                              {{"protocolVersion", "2024-11-05"},
+                               {"capabilities", nlohmann::json::object()},
+                               {"serverInfo", {{"name", "poison-mock"}, {"version", "1.0"}}}}}}
+                  .dump(),
+              "application/json");
+          return;
+        }
+        if (method == "notifications/initialized") {
+          response.status = 202;
+          return;
+        }
+        if (method == "tools/list") {
+          response.set_content(
+              nlohmann::json{{"jsonrpc", "2.0"},
+                             {"id", frame.at("id")},
+                             {"result", {{"tools", nlohmann::json::array({nlohmann::json{
+                                             {"name", "echo"},
+                                             {"description", "Echo"},
+                                             {"inputSchema", {{"type", "object"}}},
+                                             {"annotations", {{"readOnlyHint", true}}}}})}}}}
+                  .dump(),
+              "application/json");
+          return;
+        }
+        response.status = 400;
+      });
+      const int poisoned_port = poisoned_mcp.bind_to_any_port("127.0.0.1");
+      check(poisoned_port > 0, "the poisoned-header MCP mock could not bind");
+      std::thread poisoned_thread([&poisoned_mcp] { poisoned_mcp.listen_after_bind(); });
+      poisoned_mcp.wait_until_ready();
+      // The bad secret is injected straight into the credential store, which is
+      // what a legacy row or a pre-fix host version would have left behind.
+      const auto poisoned_reference =
+          mcp_credentials
+              .set("mcp", "mcp-header-poisoned",
+                   yukinal::desktop_host::Secret{
+                       std::string_view("Bearer bad\r\nX-Injected: yes")})
+              .to_string();
+      const auto good_reference =
+          mcp_credentials
+              .set("mcp", "mcp-header-good", yukinal::desktop_host::Secret{"Bearer good"})
+              .to_string();
+      database.upsert_mcp_server(
+          {{"id", "mcp_http_poisoned"},
+           {"label", "Poisoned HTTP Mock"},
+           {"transport", "http"},
+           {"url", "http://127.0.0.1:" + std::to_string(poisoned_port) + "/mcp"},
+           {"enabled", true},
+           {"allowedTools", nlohmann::json::array({"echo"})},
+           {"trustLevel", "reviewed"},
+           {"annotationTrust", "trusted"},
+           {"httpAuthHeaders",
+            nlohmann::json::array(
+                {nlohmann::json{{"name", "X-Injected"}, {"credentialRef", poisoned_reference}},
+                 nlohmann::json{{"name", "X-Good"}, {"credentialRef", good_reference}}})}});
+      yukinal::desktop_host::McpSupervisor poisoned_supervisor(&database, &mcp_credentials);
+      const auto poisoned_catalog = poisoned_supervisor.catalog();
+      check(poisoned_catalog.at("servers").size() == 1 &&
+                poisoned_catalog.at("servers").at(0).at("tools").size() == 1,
+            "a poisoned static header must not abort the whole MCP server");
+      check(saw_good_header.load(), "the healthy static header must still be sent");
+      check(!saw_bad_header.load(),
+            "a stored header secret with CR/LF must never reach the wire");
+      const auto poisoned_status = poisoned_supervisor.status("mcp_http_poisoned");
+      check(poisoned_status.has_value() &&
+                !poisoned_status->at("diagnostics").empty(),
+            "dropping a poisoned header must be reported as a diagnostic");
+      poisoned_supervisor.stop("mcp_http_poisoned");
+      poisoned_mcp.stop();
+      poisoned_thread.join();
+      database.delete_mcp_server("mcp_http_poisoned");
     }
 
 #ifdef CPPHTTPLIB_OPENSSL_SUPPORT
@@ -4109,6 +4512,15 @@ int main(int argc, char** argv) {
               {"expiresAt", "2027-01-15T08:02:00Z"}}},
             {"at", "2027-01-15T08:00:00Z"}};
       };
+      // An approval the host does not ticket but does see: any
+      // `requires_approval` tool announces itself on the same notification
+      // stream, and the sidecar owns its admission.
+      const auto foreign_event = [&waiting_event]() {
+        auto event = waiting_event();
+        event["approval"]["approvalId"] = "apr_foreign";
+        event["approval"]["toolName"] = "mcp.ops.write_thing";
+        return event;
+      };
       const auto execution_binding = [&input_fingerprint]() {
         return ApprovalLedger::ExecutionBinding{
             "apr_1",
@@ -4340,6 +4752,93 @@ int main(int argc, char** argv) {
         worker.join();
         check(!result.has_value(),
               "the waiting consumer should resume once the response is accepted");
+      }
+
+      // A sidecar-owned approval the host observed keeps forwarding; an id the
+      // host never saw is refused instead of answered with a success it never
+      // obtained. Only the four effectful SSH actions are host-ticketed, yet any
+      // `requires_approval` tool announces itself on the same stream.
+      {
+        ApprovalLedger foreign;
+        check(foreign.record_sidecar_approval(foreign_event(), kApprovalNow),
+              "an observed sidecar-owned approval should be remembered");
+        check(!foreign.begin_response("apr_foreign", "run_1", "approve_once", kApprovalNow)
+                   .has_value(),
+              "an observed sidecar-owned approval must keep forwarding to the sidecar");
+        check(!foreign.record_sidecar_approval(waiting_event(), kApprovalNow),
+              "a host action approval must not be recorded as a foreign observation");
+        check(!foreign.record_sidecar_approval(nlohmann::json::object(), kApprovalNow),
+              "a malformed event must record no observation");
+        bool unknown_refused = false;
+        try {
+          (void)foreign.begin_response("apr_never_seen", "run_1", "approve_once", kApprovalNow);
+        } catch (const ApprovalLedger::UnknownApprovalError&) {
+          unknown_refused = true;
+        }
+        check(unknown_refused,
+              "an approval id the host never observed must be refused, not forwarded");
+        bool expired_refused = false;
+        try {
+          (void)foreign.begin_response("apr_foreign", "run_1", "approve_once", kApprovalNow + 121);
+        } catch (const ApprovalLedger::UnknownApprovalError&) {
+          expired_refused = true;
+        }
+        check(expired_refused, "an expired observation must stop forwarding");
+      }
+
+      // A ticket nobody answers must not pin a host worker forever: the wait is
+      // bounded by the 180 s approval TTL, and the bound is real wall-clock time,
+      // not a wake-up count.
+      {
+        check(ApprovalLedger::kConsumeWaitBudget == std::chrono::seconds(180),
+              "the consumption wait bound must stay aligned with the approval TTL");
+        ApprovalLedger stalled;
+        stalled.record_waiting_event(waiting_event(), kApprovalNow);
+        const auto stalled_token =
+            stalled.begin_response("apr_1", "run_1", "approve_once", kApprovalNow);
+        const auto started_at = std::chrono::steady_clock::now();
+        const auto bounded =
+            stalled.consume(execution_binding(), now_fn, std::chrono::milliseconds(150));
+        const auto elapsed = std::chrono::steady_clock::now() - started_at;
+        check(bounded == TicketError::Expired,
+              "a ticket stuck mid-response must report expiry when its wait bound elapses");
+        check(elapsed < std::chrono::seconds(5),
+              "the bounded wait must return promptly instead of spinning");
+        check(stalled.consume(execution_binding(), now_fn) == TicketError::Missing,
+              "an abandoned ticket must not stay consumable");
+        stalled.finish_response(*stalled_token, true, kApprovalNow);
+        check(stalled.consume(execution_binding(), now_fn) == TicketError::Missing,
+              "a late acknowledgement must not resurrect an abandoned ticket");
+      }
+
+      // The user-visible receipt: the router must never answer an approval it
+      // never tracked with a success, and must reject a decision the host has no
+      // way to grant. Both checks return before any sidecar is contacted.
+      {
+        yukinal::desktop_host::IpcRouter approval_router(&database);
+        const auto unknown = approval_router.invoke(
+            "agent_approval_respond",
+            {{"approvalId", "apr_never_requested"},
+             {"runId", "run_unknown"},
+             {"decision", "approve_once"},
+             {"respondedAt", "2027-01-15T08:00:00Z"}});
+        check(!unknown.ok &&
+                  unknown.value.value("code", std::string()) == "AGENT_APPROVAL_UNKNOWN",
+              "an unknown approval id must be refused with an explicit error code");
+        check(!unknown.value.contains("accepted"),
+              "a refused approval must never report an acceptance to the UI");
+        check(unknown.value.value("code", std::string()) != "AGENT_UNAVAILABLE",
+              "an unknown approval id must not be reported as a transport failure");
+        for (const char* decision : {"approve_session", "maybe"}) {
+          const auto refused = approval_router.invoke(
+              "agent_approval_respond",
+              {{"approvalId", "apr_never_requested"},
+               {"runId", "run_unknown"},
+               {"decision", decision},
+               {"respondedAt", "2027-01-15T08:00:00Z"}});
+          check(!refused.ok && refused.value.value("code", std::string()) == "INVALID_PARAMS",
+                "a decision outside the approval whitelist must be rejected up front");
+        }
       }
     } catch (const std::exception& error) {
       std::cerr << "host action approval block failed: " << error.what() << '\n';
@@ -5053,6 +5552,29 @@ int main(int argc, char** argv) {
                                     {"annotationTrust", "trusted"}});
         check(tool_router.invoke("mcp_server_start", {{"serverId", "mcp_mock"}}).ok,
               "the mock MCP server should start through the router");
+        // `mcp_server_list` is what the settings UI polls: it must describe the
+        // live process rather than a hardcoded "not running". The router lists
+        // every configured server, so pick ours out of the list.
+        const auto status_of = [](const yukinal::desktop_host::IpcReply& listed,
+                                  const std::string& server_id) {
+          for (const auto& server : listed.value.at("servers")) {
+            if (server.at("config").at("id") == server_id) return server.at("status");
+          }
+          check(false, "mcp_server_list did not include the server it was asked about");
+          return nlohmann::json();
+        };
+        {
+          const auto listed = tool_router.invoke("mcp_server_list", nlohmann::json::object());
+          check(listed.ok, "mcp_server_list should succeed while a server runs");
+          const auto& live_status = status_of(listed, "mcp_mock");
+          check(live_status.at("running") == true &&
+                    live_status.at("pid").is_number_integer() &&
+                    live_status.at("pid").get<long long>() > 0 &&
+                    live_status.at("program") == test_executable.string() &&
+                    live_status.at("startedAt").is_string() &&
+                    live_status.at("toolCount") == 2,
+                "mcp_server_list must report the real status of a running server");
+        }
         const auto payload = run_tool(nlohmann::json{{"toolName", "mcp.mcp_mock.echo"},
                                                      {"input", nlohmann::json::object()},
                                                      {"target", nlohmann::json::object()}});
@@ -5062,6 +5584,18 @@ int main(int argc, char** argv) {
               "a resolved low-risk MCP tool should dispatch through host.tool.execute");
         check(tool_router.invoke("mcp_server_stop", {{"serverId", "mcp_mock"}}).ok,
               "the mock MCP server should stop through the router");
+        // A genuinely stopped server must not keep claiming to run.
+        {
+          const auto listed = tool_router.invoke("mcp_server_list", nlohmann::json::object());
+          check(listed.ok, "mcp_server_list should still succeed after the server stopped");
+          const auto& stopped_status = status_of(listed, "mcp_mock");
+          check(stopped_status.at("running") == false &&
+                    stopped_status.at("pid").is_null() &&
+                    stopped_status.at("program").is_null() &&
+                    stopped_status.at("startedAt").is_null() &&
+                    stopped_status.at("toolCount") == 0,
+                "a stopped MCP server must report the stopped status shape");
+        }
         auto mock_row = database.get_mcp_server("mcp_mock").value();
         mock_row["enabled"] = false;
         database.upsert_mcp_server(mock_row);
@@ -5073,6 +5607,67 @@ int main(int argc, char** argv) {
       std::cerr << "host.tool.execute block failed: " << error.what() << '\n';
       std::exit(9);
     }
+  }
+
+  // ── Keyboard-interactive challenges (server.auth_challenge) ────────────────
+  // The challenge registry is what turns the SSH worker's `auth_prompt` frame into
+  // an answerable UI challenge, so its rules are asserted without spawning a PTY:
+  // one answer per challenge, the answer count the challenge asked for, and a
+  // challenge that stops being answerable when it expires or its session ends.
+  {
+    using yukinal::desktop_host::AuthChallenges;
+    using clock = std::chrono::steady_clock;
+    AuthChallenges challenges;
+    const auto start = clock::time_point{} + std::chrono::seconds(1);
+
+    const auto first = challenges.begin("term-a", 2, start);
+    const auto second = challenges.begin("term-b", 1, start);
+    check(!first.empty() && !second.empty() && first != second,
+          "each keyboard-interactive challenge needs its own id");
+    check(challenges.size() == 2, "both pending challenges should be registered");
+
+    // A count the challenge did not ask for is refused and does not consume it:
+    // the SSH service marks the session invalid on a mismatch, so nothing may be
+    // forwarded, but the user must be able to type the code again.
+    std::string error;
+    auto wrong = challenges.take(first, 1, start, error);
+    check(!wrong.has_value() && error.find("expects 2") != std::string::npos,
+          "a response count the challenge did not ask for must be refused with the expected count");
+    check(challenges.size() == 2, "a refused response count must not consume the challenge");
+
+    auto answered = challenges.take(first, 2, start, error);
+    check(answered.has_value() && answered->session_id == "term-a",
+          "the challenge must report the terminal session that raised it");
+    check(!challenges.take(first, 2, start, error).has_value() &&
+              error.find("no authentication challenge") != std::string::npos,
+          "a challenge must be answerable exactly once");
+
+    // Expiry is a clock read, not a timer: past the lifetime the challenge is gone
+    // and says why, and it is dropped rather than left to accumulate.
+    auto expired = challenges.take(second, 1, start + AuthChallenges::kLifetime, error);
+    check(!expired.has_value() && error.find("expired") != std::string::npos,
+          "an expired challenge must be refused as expired");
+    check(challenges.size() == 0, "an expired challenge must be dropped");
+
+    // Cancelling reports the session so the caller can end the PTY instead of
+    // leaving the terminal hanging in the authentication phase.
+    const auto third = challenges.begin("term-c", 1, start);
+    const auto fourth = challenges.begin("term-c", 1, start);
+    const auto fifth = challenges.begin("term-d", 1, start);
+    std::string cancelled_session;
+    check(challenges.cancel(third, cancelled_session) && cancelled_session == "term-c",
+          "cancelling a challenge must name the session that raised it");
+    std::string missing_session;
+    check(!challenges.cancel(third, missing_session),
+          "cancelling the same challenge twice must be refused");
+
+    // A closed session takes its challenges with it.
+    challenges.forget_session("term-c");
+    check(challenges.size() == 1, "closing a session must drop only that session's challenges");
+    check(challenges.cancel(fifth, missing_session) && missing_session == "term-d",
+          "another session's challenge must survive");
+    check(challenges.size() == 0 && fourth != third,
+          "the registry should be empty once every challenge was answered or dropped");
   }
 
   sqlite3* readback = nullptr;

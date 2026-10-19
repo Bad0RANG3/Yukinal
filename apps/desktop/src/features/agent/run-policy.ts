@@ -72,14 +72,27 @@ export function runPolicySpec(policy: RunPolicyChoice): RunPolicySpec {
 }
 
 /**
- * 请求里要带的 `policyId`：`null`（按环境自动）必须变成「没有这个字段」，而不是某个
- * 默认策略 id —— 折算成 id 就等于替用户选了一套策略，而界面写的是「按环境自动」。
+ * 请求里要带的 `policyId`：**永远没有这个字段** —— 无论用户选了哪一项。
  *
- * 单独成一个函数是因为这是界面上唯一一处「用户的选择 → 请求字段」的换算，而它决定了
- * 这次运行受哪套策略约束；抽到这里，这条规则就能被断言，而不是只存在于 JSX 里。
+ * 这个 Python Agent Node 里没有策略引擎：`system.describe` 返回的 `permissionPolicyIds`
+ * 是空数组，`ToolRegistry` 从不接 `authorization`，所以没有任何一套策略会被应用到这次
+ * 运行上。而请求里只要出现 `policyId`，sidecar 就一律以 `-32602` 拒掉整次
+ * `agent_run_start`（`policy selection is not supported by this Python Agent Node yet`）——
+ * 把它发出去并不会「多一条约束」，而是让 run 直接启动失败。
+ *
+ * 所以这里恒返回 `undefined`。这不是「忽略用户的选择」，而是承认界面上的选择目前
+ * **只是界面状态**：`AgentComposer` 里那排按钮因此被禁用并附上说明，而不是留一个
+ * 「能点、但一点就让运行失败」的控件。将来若这个节点真的接上了策略注册表，
+ * 要改的是这一处换算与它上面的说明，而不是把选择直接透传出去。
+ *
+ * 单独成一个函数是因为这是界面上唯一一处「用户的选择 → 请求字段」的换算点，
+ * 这条规则必须能被断言，而不是只存在于 JSX 里。
  */
 export function requestPolicyId(policy: RunPolicyChoice): string | undefined {
-  return policy ?? undefined;
+  // 参数保留在签名里：换算点拿到的仍然是界面上的那个选择，而这个函数对它一律无视 ——
+  // 这正是要被钉住的规则本身。
+  void policy;
+  return undefined;
 }
 
 const ENVIRONMENT_LABELS: Record<Environment, string> = {

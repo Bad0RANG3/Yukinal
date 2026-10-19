@@ -11,6 +11,19 @@
 #include <string>
 #include <vector>
 
+namespace yukinal::desktop_host::denylist_detail {
+
+// Forward-declared here — and deliberately NOT in any public header — only so this
+// test can drive the operator `server.exec` blacklist loader that lives in
+// `native/desktop_host/src/ipc_router.cpp`. The symbol is otherwise internal to
+// that translation unit; see the seam comment there.
+nlohmann::json load_server_exec_denylist_for_test(const std::string& config_path);
+nlohmann::json load_configured_server_exec_denylist_for_test();
+nlohmann::json server_exec_denylist_decision_for_test(const std::string& config_path,
+                                                     const std::string& command);
+
+}  // namespace yukinal::desktop_host::denylist_detail
+
 namespace {
 
 void check(bool condition, const char* message) {
@@ -48,6 +61,161 @@ void expect_runtime_error(F&& call, const char* message) {
   }
   std::cerr << message << '\n';
   std::exit(1);
+}
+
+// Points `YUKINAL_SSH_SERVICE_CONFIG` at `value`; an empty `value` clears it.
+void set_service_config_environment(const std::string& value) {
+#ifdef _WIN32
+  _putenv_s("YUKINAL_SSH_SERVICE_CONFIG", value.c_str());
+#else
+  if (value.empty()) {
+    unsetenv("YUKINAL_SSH_SERVICE_CONFIG");
+  } else {
+    setenv("YUKINAL_SSH_SERVICE_CONFIG", value.c_str(), 1);
+  }
+#endif
+}
+
+void write_text(const std::filesystem::path& path, const std::string& text) {
+  std::ofstream stream(path, std::ios::binary | std::ios::trunc);
+  stream << text;
+}
+
+// The host loader reads the operator file itself, so these cases drive the real
+// file/JSON handling rather than a stand-in.
+void check_server_exec_denylist_loader() {
+  using yukinal::desktop_host::denylist_detail::load_configured_server_exec_denylist_for_test;
+  using yukinal::desktop_host::denylist_detail::load_server_exec_denylist_for_test;
+  using yukinal::desktop_host::denylist_detail::server_exec_denylist_decision_for_test;
+
+  TemporaryDirectory scratch;
+  const auto missing_path = scratch.path / "absent.json";
+
+  set_service_config_environment("");
+  const auto unset = load_configured_server_exec_denylist_for_test();
+  check(unset.at("loaded") == true && unset.at("entries").empty(),
+        "no configured service config should allow everything");
+
+  set_service_config_environment("   ");
+  const auto blank = load_configured_server_exec_denylist_for_test();
+  check(blank.at("loaded") == true && blank.at("entries").empty(),
+        "a blank service config path should allow everything");
+
+  set_service_config_environment(missing_path.string());
+  const auto missing = load_configured_server_exec_denylist_for_test();
+  check(missing.at("loaded") == false,
+        "a configured but missing service config must fail closed");
+  set_service_config_environment("");
+
+  const auto configured_path = scratch.path / "ssh-service.json";
+  write_text(configured_path,
+             R"({"listen_port":8765,"api_token_env":"YUKINAL_SSH_API_TOKEN",)"
+             R"("server_exec_denylist":["rm -rf /",{"pattern":"^shutdown","regex":true,)"
+             R"("case_insensitive":true}]})");
+  const auto configured = load_server_exec_denylist_for_test(configured_path.string());
+  check(configured.at("loaded") == true, "a valid configured denylist must load");
+  const auto& entries = configured.at("entries");
+  check(entries.is_array() && entries.size() == 2,
+        "a valid configured denylist should expose both entries");
+  if (entries.is_array() && entries.size() == 2) {
+    check(entries.at(0).at("pattern") == "rm -rf /" &&
+              entries.at(0).at("regex") == false,
+          "a literal entry should round-trip as a literal");
+    check(entries.at(1).at("pattern") == "^shutdown" && entries.at(1).at("regex") == true &&
+              entries.at(1).at("case_insensitive") == true,
+          "a regex entry should round-trip with its flags");
+  }
+
+  // A whitespace-padded env value is trimmed before the path is used.
+  set_service_config_environment("  " + configured_path.string() + "  ");
+  const auto padded = load_configured_server_exec_denylist_for_test();
+  check(padded.at("loaded") == true && padded.at("entries").size() == 2,
+        "a whitespace-padded service config path should still load");
+  set_service_config_environment("");
+
+  // Absent key: valid file, no policy configured.
+  const auto no_key_path = scratch.path / "no-key.json";
+  write_text(no_key_path, R"({"listen_port":8765})");
+  const auto no_key = load_server_exec_denylist_for_test(no_key_path.string());
+  check(no_key.at("loaded") == true && no_key.at("entries").empty(),
+        "an absent server_exec_denylist key should configure no entries");
+
+  // Null key: same as absent.
+  const auto null_key_path = scratch.path / "null-key.json";
+  write_text(null_key_path, R"({"server_exec_denylist":null})");
+  const auto null_key = load_server_exec_denylist_for_test(null_key_path.string());
+  check(null_key.at("loaded") == true && null_key.at("entries").empty(),
+        "a null server_exec_denylist should configure no entries");
+
+  // Every remaining case must fail closed.
+  struct FailingCase {
+    const char* message;
+    std::string config_path;
+  };
+  const auto bad_json_path = scratch.path / "bad-json.json";
+  write_text(bad_json_path, R"({"server_exec_denylist":[)");
+  const auto array_root_path = scratch.path / "array-root.json";
+  write_text(array_root_path, R"(["not","an","object"])");
+  const auto bad_entry_path = scratch.path / "bad-entry.json";
+  write_text(bad_entry_path, R"({"server_exec_denylist":[{"pattern":7}]})");
+  const auto bad_regex_path = scratch.path / "bad-regex.json";
+  write_text(bad_regex_path, R"({"server_exec_denylist":[{"pattern":"(","regex":true}]})");
+  const auto scalar_path = scratch.path / "scalar.json";
+  write_text(scalar_path, R"({"server_exec_denylist":"rm -rf /"})");
+  const auto unreadable_path = scratch.path / "a-directory";
+  std::filesystem::create_directory(unreadable_path);
+
+  const FailingCase failing[] = {
+      {"unparseable JSON must fail closed", bad_json_path.string()},
+      {"a non-object config root must fail closed", array_root_path.string()},
+      {"a malformed denylist entry must fail closed", bad_entry_path.string()},
+      {"an invalid denylist regex must fail closed", bad_regex_path.string()},
+      {"a non-array denylist value must fail closed", scalar_path.string()},
+      {"a non-regular-file config path must fail closed", unreadable_path.string()},
+  };
+  for (const auto& failing_case : failing) {
+    const auto result = load_server_exec_denylist_for_test(failing_case.config_path);
+    check(result.at("loaded") == false, failing_case.message);
+  }
+
+  // A file past the 1 MiB read cap must not be trusted.
+  const auto oversized_path = scratch.path / "oversized.json";
+  write_text(oversized_path,
+             std::string("{\"server_exec_denylist\":[],\"padding\":\"") +
+                 std::string(1024 * 1024, 'x') + "\"}");
+  const auto oversized = load_server_exec_denylist_for_test(oversized_path.string());
+  check(oversized.at("loaded") == false,
+        "a service config larger than the read cap must fail closed");
+
+  // The load-then-match decision the host makes before it consumes the one-shot
+  // approval ticket: a loaded list must deny its literal, case-insensitive, and
+  // regex entries, and must let everything else through.
+  const auto matcher_path = scratch.path / "matcher.json";
+  write_text(matcher_path,
+             R"({"server_exec_denylist":["rm -rf /",)"
+             R"({"pattern":"DROP TABLE","case_insensitive":true},)"
+             R"({"pattern":"^shutdown\\s","regex":true}]})");
+  const auto decision = [&](const std::string& command) {
+    return server_exec_denylist_decision_for_test(matcher_path.string(), command);
+  };
+  check(decision("rm -rf / --no-preserve-root").at("denied") == true,
+        "a literal blacklist entry should deny a matching command");
+  check(decision("drop table users;").at("denied") == true,
+        "a case-insensitive blacklist entry should deny a differently-cased command");
+  check(decision("shutdown -h now").at("denied") == true,
+        "a regex blacklist entry should deny a matching command");
+  check(decision("systemctl restart nginx").at("denied") == false,
+        "an unlisted command must not be denied");
+  check(decision("drop table users;").at("loaded") == true,
+        "the deny decision should report a successfully loaded list");
+
+  // Fail-closed loader means fail-closed decision: no policy is ever inferred
+  // from a config the host could not read.
+  const auto unreadable_decision = server_exec_denylist_decision_for_test(
+      missing_path.string(), "rm -rf /");
+  check(unreadable_decision.at("loaded") == false &&
+            unreadable_decision.at("denied") == false,
+        "an unloadable config must report loaded=false, which the host denies on");
 }
 
 }  // namespace
@@ -377,6 +545,10 @@ int main() {
       "a file handle must not be a download destination");
   expect_runtime_error([&] { (void)destinations.take_download_directory("local_path_missing"); },
                        "an unknown download destination must be rejected");
+
+  // Operator policy: the `server.exec` command blacklist loader must never let an
+  // unreadable configured policy look like an empty one.
+  check_server_exec_denylist_loader();
 
   return 0;
 }

@@ -3,6 +3,7 @@
 #include "yukinal/desktop_host/credential_store.hpp"
 #include "yukinal/desktop_host/database.hpp"
 #include "yukinal/desktop_host/desktop_target.hpp"
+#include "yukinal/desktop_host/scoped_environment.hpp"
 
 #include <algorithm>
 #include <cctype>

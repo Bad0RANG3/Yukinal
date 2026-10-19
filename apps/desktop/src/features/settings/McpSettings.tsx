@@ -5,12 +5,12 @@
  *
  * 与 `HostKeySection` 同一个理由：容器（`McpSettings`）负责查询与动作，纯展示组件
  * （`McpSettingsPanel`）只吃数据与回调，于是「一个崩掉的服务器在界面上说了什么」可以用
- * `renderToStaticMarkup` 钉住，而不需要造一个 Tauri 壳和一台真的 MCP 服务器。
+ * `renderToStaticMarkup` 钉住，而不需要造一个桌面宿主和一台真的 MCP 服务器。
  *
  * ## 四条不会让步的规则
  *
  * 1. **传输方式明确选择，字段跟着传输切换。** stdio 只展示 command/args；Streamable HTTP
- *    只展示 endpoint。界面不自行判定 URL 是否安全，Rust 边界会拒绝远程明文 HTTP。
+ *    只展示 endpoint。界面不自行判定 URL 是否安全，宿主边界会拒绝远程明文 HTTP。
  * 2. **端点不可用时说完整理由。** 无效 URL、缺 command 或网络失败都由后端给出同一句可读
  *    理由；界面没有「忽略并继续」路径。
  * 3. **崩了不自愈，界面也不假装会。** 「已退出」这一行会把退出原因与时间摆出来；「启动」是
@@ -52,7 +52,7 @@ export function McpSettings({ active = true }: { active?: boolean } = {}) {
   const [editing, setEditing] = useState<string | null>(null);
   const [draft, setDraft] = useState<McpServerDraft>(emptyDraft());
   const [notice, setNotice] = useState<string | null>(null);
-  // 设备码流程：Rust 在**等待期间**把 user_code 作为事件发出来，因为那个请求还没有返回。
+  // 设备码流程：宿主在**等待期间**把 user_code 作为事件发出来，因为那个请求还没有返回。
   // 这里只保存「屏幕该显示什么」与用户自己的两个动作（复制、取消），没有令牌。
   const [devicePrompt, setDevicePrompt] = useState<McpOAuthDeviceCodeEvent | null>(null);
   const [cancelled, setCancelled] = useState(false);

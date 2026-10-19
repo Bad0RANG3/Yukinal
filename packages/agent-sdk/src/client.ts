@@ -201,6 +201,10 @@ export class AgentClient {
   }
 
   #failAll(error: Error): void {
+    // A dead transport is not coming back: without this, `request()` after
+    // `transport.onClose` would enqueue into a pending map nothing can ever answer,
+    // and the caller would only learn about it after the request timeout.
+    this.#closed = true;
     for (const entry of this.#pending.values()) {
       clearTimeout(entry.timer);
       entry.reject(error);

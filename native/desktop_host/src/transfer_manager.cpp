@@ -1622,6 +1622,47 @@ void download_batch(const TransferExecutionContext& context,
 using JobWork = std::function<void(TransferBackend&, const std::shared_ptr<SnapshotCell>&,
                                    const std::shared_ptr<std::atomic<bool>>&, Job&)>;
 
+// Releases the parallel-transfer permit on every path out of run_job, including
+// exceptions thrown by the work function. A leaked permit would permanently
+// reduce the parallel-transfer capacity of the whole host.
+class PermitGuard {
+ public:
+  explicit PermitGuard(Semaphore& permits) : permits_(permits) {}
+  ~PermitGuard() { release(); }
+  PermitGuard(const PermitGuard&) = delete;
+  PermitGuard& operator=(const PermitGuard&) = delete;
+  void release() {
+    if (!released_) {
+      permits_.release();
+      released_ = true;
+    }
+  }
+
+ private:
+  Semaphore& permits_;
+  bool released_ = false;
+};
+
+// Runs on a detached worker. Any exception that escaped run_job is a bug or a
+// resource failure (bad_alloc, json, filesystem_error), not a per-item transfer
+// error. It must still leave a terminal row and release the permit, so the
+// thread entry points call this instead of silently swallowing it.
+void fail_job_after_unhandled_exception(const std::shared_ptr<TransferManagerImpl>& inner,
+                                        const std::string& transfer_id,
+                                        const std::shared_ptr<Job>& job,
+                                        const std::string& message) {
+  try {
+    push_failure(job->snapshot,
+                 TransferItemFailure{std::nullopt, "transfer", TransferFailureKind::LocalIo,
+                                     message, std::nullopt});
+    job->snapshot->finalize_status(TransferStatus::Failed);
+    remove_terminal_job(*inner, transfer_id);
+  } catch (...) {
+    // A terminal write must never be able to escape the worker; the permit is
+    // released by run_job's guard before this helper runs.
+  }
+}
+
 void run_job(const std::shared_ptr<TransferManagerImpl>& inner, const std::string& transfer_id,
              const std::shared_ptr<Job>& job, const JobWork& work) {
   if (!inner->permits.acquire(job->cancel)) {
@@ -1629,11 +1670,7 @@ void run_job(const std::shared_ptr<TransferManagerImpl>& inner, const std::strin
     remove_terminal_job(*inner, transfer_id);
     return;
   }
-  struct PermitGuard {
-    Semaphore* semaphore;
-    ~PermitGuard() { if (semaphore) semaphore->release(); }
-    void release() { semaphore->release(); semaphore = nullptr; }
-  } permit{&inner->permits};
+  PermitGuard permit_guard(inner->permits);
   bool cancelled_early = false;
   {
     auto guard = job->snapshot->write();
@@ -1649,7 +1686,7 @@ void run_job(const std::shared_ptr<TransferManagerImpl>& inner, const std::strin
   if (!cancelled_early) {
     work(*inner->backend, job->snapshot, job->cancel, *job);
   }
-  permit.release();
+  permit_guard.release();
   if (cancelled_early) {
     remove_terminal_job(*inner, transfer_id);
     return;
@@ -1672,7 +1709,7 @@ void run_job(const std::shared_ptr<TransferManagerImpl>& inner, const std::strin
 }
 
 void launch_reserved_job(const std::shared_ptr<TransferManagerImpl>& inner, const std::string& id,
-                         const std::shared_ptr<Job>& job,
+                         const std::shared_ptr<Job>& job, const char* worker_kind,
                          std::shared_ptr<WorkerAdmission> admission, JobWork work) {
   bool persisted = false;
   bool registered = false;
@@ -1691,17 +1728,17 @@ void launch_reserved_job(const std::shared_ptr<TransferManagerImpl>& inner, cons
     persisted = true;
     insert_job(*inner, id, job);
     registered = true;
-    inner->worker_launcher([inner, id, job, admission, work = std::move(work)] {
+    inner->worker_launcher([inner, id, job, worker_kind, admission, work = std::move(work)] {
       try {
         run_job(inner, id, job, work);
-      } catch (...) {
+      } catch (const std::exception&) {
         // A provider/allocator exception must release both the I/O permit and
-        // the admitted slot and must not leave a permanently running snapshot.
-        try {
-          job->snapshot->finalize_status(TransferStatus::Failed);
-          remove_terminal_job(*inner, id);
-        } catch (...) {
-        }
+        // the admitted slot and must not leak internal exception details.
+        fail_job_after_unhandled_exception(inner, id, job,
+            std::string("the ") + worker_kind + " worker failed unexpectedly");
+      } catch (...) {
+        fail_job_after_unhandled_exception(inner, id, job,
+            std::string("the ") + worker_kind + " worker failed unexpectedly");
       }
     });
   } catch (const TransferError&) {
@@ -1844,7 +1881,7 @@ std::string TransferManager::start_upload(const std::string& server_id,
       impl_->history);
   auto job = std::make_shared<Job>();
   job->snapshot = snapshot;
-  launch_reserved_job(impl_, id, job, std::move(admission),
+  launch_reserved_job(impl_, id, job, "upload", std::move(admission),
       [id, server_id, remote_dir, local_paths = std::move(local_paths), policy](
           TransferBackend& backend, const std::shared_ptr<SnapshotCell>& cell,
           const std::shared_ptr<std::atomic<bool>>& cancel, Job& worker_job) {
@@ -1866,7 +1903,7 @@ std::string TransferManager::start_download(const std::string& server_id,
       impl_->history);
   auto job = std::make_shared<Job>();
   job->snapshot = snapshot;
-  launch_reserved_job(impl_, id, job, std::move(admission),
+  launch_reserved_job(impl_, id, job, "download", std::move(admission),
       [id, server_id, remote_paths = std::move(remote_paths), local_dir = std::move(local_dir), policy](
           TransferBackend& backend, const std::shared_ptr<SnapshotCell>& cell,
           const std::shared_ptr<std::atomic<bool>>& cancel, Job& worker_job) {

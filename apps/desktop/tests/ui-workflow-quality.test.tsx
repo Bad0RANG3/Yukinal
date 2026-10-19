@@ -341,7 +341,7 @@ test("long conversation clipping keeps the newest content without fabricated loa
 });
 test("running conversations disable history switching and workspace target guards preserve drafts and model overrides", () => {
   const markup = render(<AgentHeader running runState="waiting_approval" tokenUsage={null} agentReady agentOpen shell historyOpen={false} historyButtonRef={createRef()} onToggleHistory={() => {}} onToggle={() => {}} closeButtonRef={createRef()} />);
-  assert.match(markup, /aria-label="切换任务：[^"]*"[^>]*disabled=""/); assert.match(markup, /等待审批/);
+  assert.match(markup, /aria-label="切换任务：[^"]*"[^>]*aria-disabled="true"/); assert.match(markup, /等待审批/);
   workspace({ selectedServerId: serverId, serverPage: "files", agentBusy: true, agentDraft: "unsubmitted user draft", selectedProviderId: "fixture_provider", selectedModel: "user-model-override" });
   useWorkspaceStore.getState().selectServer("srv_foreign");
   useWorkspaceStore.getState().syncServerSelection(["srv_foreign"]);

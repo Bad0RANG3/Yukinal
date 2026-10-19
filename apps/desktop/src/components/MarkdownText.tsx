@@ -20,6 +20,7 @@
 
 import { memo, useState, type ReactNode } from "react";
 
+import { errorMessage } from "../lib/format.js";
 import { openExternalUrl } from "../lib/external.js";
 import { parseMarkdown, type Block, type ColumnAlign, type Inline } from "../lib/markdown.js";
 import { KeywordText } from "./KeywordText.js";
@@ -28,17 +29,95 @@ import { MarkdownWidgetBlock } from "./MarkdownWidgetBlock.js";
 import { CONVERSATION_WIDGET_LANGUAGE } from "../lib/conversation-widgets.js";
 
 const HEADING_TAG = { 1: "h1", 2: "h2", 3: "h3", 4: "h4", 5: "h5", 6: "h6" } as const;
+type HeadingIds = Map<Block, string>;
 
 export const MarkdownText = memo(function MarkdownText({ text, className, streaming = false }: { text: string; className?: string; streaming?: boolean }) {
   const blocks = parseMarkdown(text, { preserveCodeSource: true });
+  const headingIds = assignHeadingIds(blocks);
   return (
-    <div className={className}>
+    <div className={className} data-markdown-root="">
       {blocks.map((block, index) => (
-        <BlockView block={block} key={index} streaming={streaming && index === blocks.length - 1} />
+        <BlockView block={block} headingIds={headingIds} key={index} streaming={streaming && index === blocks.length - 1} />
       ))}
     </div>
   );
 });
+
+/** Give headings stable, deduplicated IDs so Markdown fragment links can stay in-page. */
+export function headingSlug(text: string, taken: ReadonlySet<string> = new Set()): string {
+  const base = text.trim().toLowerCase()
+    .replace(/[^\p{L}\p{N}\s_-]/gu, "")
+    .replace(/\s+/gu, "-")
+    .replace(/-+/gu, "-")
+    .replace(/^-|-$/gu, "") || "section";
+  let slug = base;
+  let suffix = 2;
+  while (taken.has(slug)) slug = base + "-" + suffix++;
+  return slug;
+}
+
+function assignHeadingIds(blocks: Block[]): HeadingIds {
+  const ids: HeadingIds = new Map();
+  const taken = new Set<string>();
+  const visit = (children: Block[]) => {
+    for (const block of children) {
+      if (block.kind === "heading") {
+        const slug = headingSlug(inlineText(block.content), taken);
+        taken.add(slug);
+        ids.set(block, slug);
+      } else if (block.kind === "quote") {
+        visit(block.blocks);
+      } else if (block.kind === "list") {
+        for (const item of block.items) visit(item.blocks);
+      }
+    }
+  };
+  visit(blocks);
+  return ids;
+}
+
+function inlineText(nodes: Inline[]): string {
+  return nodes.map((node) => {
+    switch (node.kind) {
+      case "text":
+      case "code": return node.text;
+      case "strong":
+      case "emphasis":
+      case "strike":
+      case "link": return inlineText(node.children);
+      case "image": return node.alt;
+      case "footnote": return "[" + node.label + "]";
+      case "break": return " ";
+    }
+  }).join("");
+}
+
+export function markdownLinkTarget(href: string): { kind: "anchor"; id: string } | { kind: "external"; url: string } {
+  return href.startsWith("#")
+    ? { kind: "anchor", id: decodeAnchorId(href) }
+    : { kind: "external", url: href };
+}
+
+export function decodeAnchorId(href: string): string {
+  try {
+    return decodeURIComponent(href.slice(1));
+  } catch {
+    return href.slice(1);
+  }
+}
+
+/** Convert an opener failure into a visible, testable notice instead of an unhandled rejection. */
+export async function openMarkdownExternalLink(
+  href: string,
+  open: (url: string) => Promise<unknown> = openExternalUrl,
+): Promise<string | null> {
+  try {
+    await open(href);
+    return null;
+  } catch (cause) {
+    return "无法打开链接：" + errorMessage(cause);
+  }
+}
 
 /** Copy feedback lives in its own child; it never reparses or redraws the message body. */
 const MarkdownCodeBlock = memo(function MarkdownCodeBlock({ text, copyText, language }: {
@@ -55,20 +134,20 @@ const MarkdownCodeBlock = memo(function MarkdownCodeBlock({ text, copyText, lang
   );
 });
 
-function BlockView({ block, streaming = false }: { block: Block; streaming?: boolean }) {
+function BlockView({ block, headingIds, streaming = false }: { block: Block; headingIds: HeadingIds; streaming?: boolean }) {
   switch (block.kind) {
     case "heading": {
       const Tag = HEADING_TAG[clampLevel(block.level)];
       return (
-        <Tag className="md-heading">
-          <InlineView nodes={block.content} />
+        <Tag className="md-heading" id={headingIds.get(block)}>
+          <InlineView nodes={block.content} headingIds={headingIds} />
         </Tag>
       );
     }
     case "paragraph":
       return (
         <p className="md-paragraph">
-          <InlineView nodes={block.content} />
+          <InlineView nodes={block.content} headingIds={headingIds} />
         </p>
       );
     case "code":
@@ -83,7 +162,7 @@ function BlockView({ block, streaming = false }: { block: Block; streaming?: boo
               {item.checked ? "☑" : "☐"}
             </span>
           )}
-          <ListItemBlocks blocks={item.blocks} tight={block.tight} streaming={streaming && index === block.items.length - 1} />
+          <ListItemBlocks blocks={item.blocks} headingIds={headingIds} tight={block.tight} streaming={streaming && index === block.items.length - 1} />
         </li>
       ));
       return block.ordered ? (
@@ -97,7 +176,7 @@ function BlockView({ block, streaming = false }: { block: Block; streaming?: boo
     case "quote":
       return (
         <blockquote className="md-quote">
-          <BlockList blocks={block.blocks} streaming={streaming} />
+          <BlockList blocks={block.blocks} headingIds={headingIds} streaming={streaming} />
         </blockquote>
       );
     case "table":
@@ -108,7 +187,7 @@ function BlockView({ block, streaming = false }: { block: Block; streaming?: boo
               <tr>
                 {block.head.map((cell, index) => (
                   <th className={alignClass(block.align[index] ?? null)} key={index}>
-                    <InlineView nodes={cell} />
+                  <InlineView nodes={cell} headingIds={headingIds} />
                   </th>
                 ))}
               </tr>
@@ -118,7 +197,7 @@ function BlockView({ block, streaming = false }: { block: Block; streaming?: boo
                 <tr key={rowIndex}>
                   {row.map((cell, cellIndex) => (
                     <td className={alignClass(block.align[cellIndex] ?? null)} key={cellIndex}>
-                      <InlineView nodes={cell} />
+                      <InlineView nodes={cell} headingIds={headingIds} />
                     </td>
                   ))}
                 </tr>
@@ -135,7 +214,7 @@ function BlockView({ block, streaming = false }: { block: Block; streaming?: boo
           <ol>
             {block.items.map((item) => (
               <li key={item.label}>
-                <InlineView nodes={item.content} />
+                <InlineView nodes={item.content} headingIds={headingIds} />
               </li>
             ))}
           </ol>
@@ -148,31 +227,31 @@ function BlockView({ block, streaming = false }: { block: Block; streaming?: boo
  * CommonMark 的 tight 只省略列表项**直接子段落**的 `<p>`；引用、嵌套列表等容器里
  * 的段落仍走普通块渲染，并由那些容器自己的 tight 状态决定。
  */
-function ListItemBlocks({ blocks, tight, streaming = false }: { blocks: Block[]; tight: boolean; streaming?: boolean }) {
+function ListItemBlocks({ blocks, headingIds, tight, streaming = false }: { blocks: Block[]; headingIds: HeadingIds; tight: boolean; streaming?: boolean }) {
   return (
     <>
       {blocks.map((block, index) =>
         tight && block.kind === "paragraph" ? (
-          <InlineView nodes={block.content} key={index} />
+          <InlineView nodes={block.content} headingIds={headingIds} key={index} />
         ) : (
-          <BlockView block={block} key={index} streaming={streaming && index === blocks.length - 1} />
+          <BlockView block={block} headingIds={headingIds} key={index} streaming={streaming && index === blocks.length - 1} />
         ),
       )}
     </>
   );
 }
 
-function BlockList({ blocks, streaming = false }: { blocks: Block[]; streaming?: boolean }) {
+function BlockList({ blocks, headingIds, streaming = false }: { blocks: Block[]; headingIds: HeadingIds; streaming?: boolean }) {
   return (
     <>
       {blocks.map((block, index) => (
-        <BlockView block={block} key={index} streaming={streaming && index === blocks.length - 1} />
+        <BlockView block={block} headingIds={headingIds} key={index} streaming={streaming && index === blocks.length - 1} />
       ))}
     </>
   );
 }
 
-function InlineView({ nodes }: { nodes: Inline[] }): ReactNode {
+function InlineView({ nodes, headingIds }: { nodes: Inline[]; headingIds: HeadingIds }): ReactNode {
   return (
     <>
       {nodes.map((node, index) => {
@@ -188,32 +267,26 @@ function InlineView({ nodes }: { nodes: Inline[] }): ReactNode {
           case "strong":
             return (
               <strong key={index}>
-                <InlineView nodes={node.children} />
+                <InlineView nodes={node.children} headingIds={headingIds} />
               </strong>
             );
           case "emphasis":
             return (
               <em key={index}>
-                <InlineView nodes={node.children} />
+                <InlineView nodes={node.children} headingIds={headingIds} />
               </em>
             );
           case "strike":
             return (
               <del key={index}>
-                <InlineView nodes={node.children} />
+                <InlineView nodes={node.children} headingIds={headingIds} />
               </del>
             );
           case "link":
             return (
-              <button
-                type="button"
-                className="md-link"
-                key={index}
-                title={node.href}
-                onClick={() => void openExternalUrl(node.href)}
-              >
-                <InlineView nodes={node.children} />
-              </button>
+              <MarkdownLink href={node.href} key={index}>
+                <InlineView nodes={node.children} headingIds={headingIds} />
+              </MarkdownLink>
             );
           case "image":
             return <RemoteMarkdownImage key={index} href={node.href} alt={node.alt} />;
@@ -227,6 +300,36 @@ function InlineView({ nodes }: { nodes: Inline[] }): ReactNode {
             return <br key={index} />;
         }
       })}
+    </>
+  );
+}
+
+function MarkdownLink({ href, children }: { href: string; children: ReactNode }) {
+  const [notice, setNotice] = useState<string | null>(null);
+  const target = markdownLinkTarget(href);
+  if (target.kind === "anchor") {
+    return (
+      <button
+        type="button"
+        className="md-link"
+        data-anchor={target.id}
+        title={href}
+        onClick={(event) => {
+          const root = event.currentTarget.closest<HTMLElement>("[data-markdown-root]");
+          const heading = root && Array.from(root.querySelectorAll<HTMLElement>("[id]")).find((item) => item.id === target.id);
+          heading?.scrollIntoView({ behavior: "smooth", block: "start" });
+        }}
+      >
+        {children}
+      </button>
+    );
+  }
+  return (
+    <>
+      <button type="button" className="md-link" title={href} onClick={() => void openMarkdownExternalLink(href).then(setNotice)}>
+        {children}
+      </button>
+      {notice ? <span className="md-link-error" role="status">{notice}</span> : null}
     </>
   );
 }

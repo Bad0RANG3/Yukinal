@@ -1,0 +1,184 @@
+/* Workspace tabs use the same graphite surfaces as the rest of the app. */
+.workspace-tabstrip {
+  position: relative;
+  z-index: 4;
+  display: flex;
+  flex: 0 0 auto;
+  align-items: center;
+  gap: 8px;
+  min-width: 0;
+  min-height: 44px;
+  padding: 5px var(--ai-content-inset);
+  border-bottom: 1px solid var(--line);
+  color: var(--text);
+}
+
+.workspace-tabstrip-create-wrap { position: relative; flex: 0 0 auto; }
+.workspace-tabstrip-create {
+  display: grid;
+  place-items: center;
+  width: 30px;
+  height: 30px;
+  padding: 0;
+  border: 1px solid transparent;
+  border-radius: var(--radius-control);
+  background: transparent;
+  color: var(--muted);
+}
+.workspace-tabstrip-create:hover,
+.workspace-tabstrip-create.is-open { border-color: var(--edge-subtle); background: var(--material-hover); color: var(--text); }
+
+.workspace-tabstrip-menu {
+  position: absolute;
+  top: calc(100% + 8px);
+  left: 0;
+  z-index: 30;
+  width: min(310px, calc(100vw - 24px));
+  max-height: min(440px, 65vh);
+  padding: 6px;
+  overflow-y: auto;
+  border: 1px solid var(--edge-emphasis);
+  border-radius: var(--radius-card);
+  background: var(--panel-raised);
+  box-shadow: var(--shadow-floating);
+}
+.workspace-tabstrip-menu-heading {
+  display: block;
+  padding: 8px 10px 6px;
+  color: var(--faint);
+  font-size: var(--text-caption);
+}
+.workspace-tabstrip-menu-divider { margin-top: 5px; border-top: 1px solid var(--line); }
+.workspace-tabstrip-menu button {
+  display: flex;
+  align-items: center;
+  gap: 9px;
+  width: 100%;
+  min-height: 34px;
+  padding: 7px 10px;
+  border: 0;
+  border-radius: var(--radius-control);
+  background: transparent;
+  color: var(--text);
+  font-size: var(--text-label);
+  text-align: left;
+}
+.workspace-tabstrip-menu button:hover,
+.workspace-tabstrip-menu button:focus-visible { background: var(--material-hover); }
+.workspace-tabstrip-menu button > svg { flex: 0 0 auto; color: var(--muted); }
+.workspace-tabstrip-menu button > span { flex: 1 1 auto; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.workspace-tabstrip-menu button > small { flex: 0 1 auto; max-width: 110px; overflow: hidden; color: var(--faint); font-size: var(--text-caption); text-overflow: ellipsis; white-space: nowrap; }
+
+.workspace-tabstrip-tabs {
+  display: flex;
+  flex: 1 1 auto;
+  align-items: center;
+  gap: 4px;
+  min-width: 0;
+  overflow-x: auto;
+  scrollbar-width: thin;
+}
+.workspace-tabstrip-empty {
+  flex: 1 1 auto;
+  min-width: 0;
+  color: var(--faint);
+  font-size: var(--text-caption);
+}
+.workspace-tabstrip-cell {
+  display: inline-flex;
+  flex: 0 0 auto;
+  align-items: center;
+  min-width: 0;
+  max-width: 220px;
+  border: 1px solid transparent;
+  border-radius: var(--radius-control);
+  color: var(--muted);
+}
+.workspace-tabstrip-cell[data-active="true"] {
+  border-color: var(--edge-normal);
+  background: var(--surface-3);
+  color: var(--text);
+}
+.workspace-tabstrip-cell:not([data-active="true"]):hover { background: var(--material-hover); color: var(--text); }
+.workspace-tabstrip-tab {
+  display: inline-flex;
+  align-items: center;
+  gap: 7px;
+  min-width: 0;
+  min-height: 30px;
+  padding: 5px 3px 5px 10px;
+  border: 0;
+  border-radius: var(--radius-control);
+  background: transparent;
+  color: inherit;
+  font-size: var(--text-label);
+  text-align: left;
+}
+.workspace-tabstrip-tab > svg { flex: 0 0 auto; }
+.workspace-tabstrip-tab > span { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.workspace-tabstrip-tab small {
+  overflow: hidden;
+  max-width: 85px;
+  color: var(--faint);
+  font-size: var(--text-caption);
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.workspace-tabstrip-close {
+  display: grid;
+  flex: 0 0 auto;
+  place-items: center;
+  width: 22px;
+  height: 22px;
+  margin-right: 4px;
+  padding: 0;
+  border: 0;
+  border-radius: var(--radius-badge);
+  background: transparent;
+  color: var(--faint);
+  opacity: 0;
+}
+.workspace-tabstrip-cell[data-active="true"] .workspace-tabstrip-close,
+.workspace-tabstrip-cell:hover .workspace-tabstrip-close { opacity: 1; }
+.workspace-tabstrip-close:hover { background: var(--material-active); color: var(--text); }
+
+.workspace-tabstrip-target {
+  display: inline-flex;
+  flex: 0 1 auto;
+  align-items: center;
+  gap: 6px;
+  min-width: 0;
+  max-width: 180px;
+  min-height: 28px;
+  margin-left: auto;
+  padding: 4px 8px;
+  border: 1px solid var(--edge-subtle);
+  border-radius: var(--radius-control);
+  background: var(--material-rest);
+  color: var(--muted);
+  font-size: var(--text-caption);
+  white-space: nowrap;
+}
+.workspace-tabstrip-target:hover { background: var(--material-hover); color: var(--text); }
+.workspace-tabstrip-target > span { overflow: hidden; text-overflow: ellipsis; }
+.workspace-tabstrip-target > svg { flex: 0 0 auto; }
+.workspace-tabstrip-choose { color: var(--text); }
+
+.workspace-tabstrip[data-orientation="vertical"] { flex-direction: column; align-items: stretch; }
+.workspace-tabstrip[data-orientation="vertical"] .workspace-tabstrip-tabs { flex-direction: column; align-items: stretch; max-height: min(240px, 32vh); overflow-x: hidden; overflow-y: auto; }
+.workspace-tabstrip[data-orientation="vertical"] .workspace-tabstrip-cell { width: 100%; max-width: none; }
+.workspace-tabstrip[data-orientation="vertical"] .workspace-tabstrip-tab { flex: 1 1 auto; }
+.workspace-tabstrip[data-orientation="vertical"] .workspace-tabstrip-target { align-self: flex-start; margin-left: 0; }
+
+@container agent-workspace (max-width: 780px) {
+  .workspace-tabstrip { padding-inline: 16px; }
+  .workspace-tabstrip-tab small { display: none; }
+}
+@container agent-workspace (max-width: 560px) {
+  .workspace-tabstrip { gap: 5px; padding-inline: 12px; }
+  .workspace-tabstrip-cell { max-width: 150px; }
+  .workspace-tabstrip-target { max-width: 110px; }
+  .workspace-tabstrip-target > svg:last-child { display: none; }
+}
+@media (hover: none) { .workspace-tabstrip-close { opacity: 1; } }
+@media (max-height: 620px) { .workspace-tabstrip { min-height: 38px; padding-block: 3px; } }

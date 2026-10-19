@@ -1,18 +1,22 @@
 # 交付与发布
 
-> **状态更新（2026-10-15）：Rust/Tauri 宿主与 legacy Node agent 已删除，安装包/打包尚未实现。** 本页下方关于 Tauri、cargo、NSIS/MSI/DMG/deb、release manifest 与随包 Node runtime 的记录都是**历史证据**，不再描述当前源码，也不能作为当前交付的证据。当前代码验证只剩 `pnpm check`（CTest + JS 契约/类型/单测/打包前端 + Python sidecar smoke）；下一步实现与打包指导见 [C++ 接管与 Rust 移除计划](./rust-removal-plan.md)。**2026-10-17 补充：C++ 宿主的分发布局与完整性清单已实现（`pnpm package` / `pnpm package -- --verify`），但安装器、签名与三平台真机验收仍未做，见下文“当前状态：C++ 宿主打包”。**
+**重写后首个发行目标（2026-10-20）：`2.0.0`。** 版本源为 `packages/shared/src/version.ts`；JavaScript workspace 清单、IPC fixture、原生 sidecar 版本和 README 由版本测试对齐。[release-candidate workflow](../.github/workflows/release-candidate.yml) 会在 Windows、Ubuntu 24.04、macOS 15 Intel 运行完整门禁，生成冻结 Agent 与 C++ 载荷，构建 NSIS/DEB/DMG，安装并 smoke 启动/卸载后校验并发布安装包。此前 RC.6 的 [Run 39309839659 attempt 2](https://github.com/Bad0RANG3/Yukinal/actions/runs/39309839659) 和 RC.7 的 [Run 39319681035](https://github.com/Bad0RANG3/Yukinal/actions/runs/39319681035) 在三平台构建与安装 smoke 全绿；这些证据只适用于相应 RC 源码。当前 2.0.0 提交的三平台门禁和安装包 smoke 尚待完成。安装包未签名、macOS 未公证；真实 Provider/MCP 目标任务、用户指定 SSH 主机和安装版 GUI 文件传输仍需实际环境验收。
+
+> **历史记录（截至 2026-10-17）：** Rust/Tauri 宿主移除和 C++ 分发布局的早期状态。下方旧 Tauri/MSI/Node runtime 的 run、哈希与验收只适用于当时源码；本页当前状态以 2026-10-20 更新为准。
 
 本页的表格和“远端 CI 快照”记录已经取得的实现与安装包证据；后续 Windows 构建记录按日期保存旧产物与环境证据。新的产品目标与尚需完成的业务验收以[目标架构与施工交接](./architecture-and-build-plan.md)为准。历史段落中“待首次远端验收”或旧“三条路径”描述的是当时状态，不能作为新目标已完成的证明。
 
-当前 C++/Python 重写第一阶段已在 Windows 11 / Visual Studio 2022 上完成本机 CMake 配置和编译，最近一次 CTest 的十个目标全部通过，包含 Python caller、C++ HTTP 服务集成、Paramiko SSH mock、Agent 到 C++ SSH 集成，以及 C++ 桌面宿主。mock 覆盖成功只读调用、认证失败、超时、输出上限及未知/变更 host key。OpenSSH 容器测试因没有 Docker CLI 尚未运行，因此 OpenSSH 服务端兼容性仍需验证。详细记录见[重写方案](./rewrite-cpp-python.md)。
+当前 C++/Python 重写第一阶段已在 Windows 11 / Visual Studio 2022 上完成本机 CMake 配置和编译，最近一次 CTest 的 **13 个目标**全部通过，包含 Python caller、C++ HTTP 服务集成、Paramiko SSH mock、Agent 到 C++ SSH 集成，以及 C++ 桌面宿主。mock 覆盖成功只读调用、认证失败、超时、输出上限及未知/变更 host key。OpenSSH 容器测试因没有 Docker CLI 尚未运行，因此 OpenSSH 服务端兼容性仍需验证。详细记录见[重写方案](./rewrite-cpp-python.md)。
 
 2026-10-15 源码迁移移除了旧 Rust SSH crate、桌面测试专用 Rust SSH 连接器以及 Rust `server.exec` 测试回退。下方旧交付记录中的 `yukinal-ssh` 测试命令仅作历史证据，不再适用于当前源码；现在通过 CTest 验证 C++ SSH 与 Python caller。
 
-## 当前状态：C++ 宿主打包（2026-10-17）
+## 当前状态：C++ 宿主与平台安装器候选（2026-10-20）
 
-C++ 宿主已接替旧的 Tauri 打包路径：`scripts/package.mjs` 把 C++ 桌面宿主、冻结 Python Agent（PyInstaller onedir）和 C++ SSH 服务暂存到 `target/release/bundle/yukinal-<version>-<platform>-<arch>/`，并写出 `SHA256SUMS.txt` 与 `release-manifest.json`（应用版本、Agent 版本、平台/架构、源码修订、工作区是否脏、每个文件的 SHA-256 与字节数、启动所需的 `YUKINAL_AGENT_ENTRY`/`YUKINAL_SSH_SERVICE_BINARY` 约定）。`pnpm release:manifest` 重建清单，`pnpm package -- --verify` 逐字节复核，任何不一致都非零退出；缺少宿主/Agent/SSH 服务产物时 fail-closed，不会产出部分载荷。
+C++ 宿主已接替旧的 Tauri 打包路径：`scripts/package.mjs` 把 C++ 桌面宿主、已构建的桌面 UI（默认 `apps/desktop/dist`，可用 `--ui-dir` 或 `YUKINAL_DESKTOP_UI_DIR` 覆盖）、冻结 Python Agent（PyInstaller onedir）和 C++ SSH 服务暂存到 `target/release/bundle/yukinal-<version>-<platform>-<arch>/`，并写出 `SHA256SUMS.txt` 与 `release-manifest.json`（应用版本、Agent 版本、平台/架构、源码修订、工作区是否脏、每个文件的 SHA-256 与字节数、每件可执行产物的来源与构建时间（`inputs` 段）、启动所需的 `--ui-dir <payload>/ui` 与 `YUKINAL_AGENT_ENTRY`/`YUKINAL_SSH_SERVICE_BINARY` 约定）。`pnpm release:manifest` 重建清单，`pnpm package -- --verify` 逐字节复核，任何不一致都非零退出；缺少宿主/UI/Agent/SSH 服务产物时一律 fail-closed，不会产出部分载荷。**打包输入要够新**：三件可执行产物中任何一件的修改时间早于「最后一次改动其源码目录的提交」时，`pnpm package` 默认拒绝暂存（旧清单只会把整份载荷归因于 `HEAD`，`dirty: true` 并不能说明二进制陈旧）；确需暂存旧产物时用 `--allow-stale-inputs`，该豁免会连同每件输入的 sha256/构建时间写进 `manifest.notes`。**UI 目录必须存在 `index.html`**，否则打包失败——C++ 宿主在不含可读入口文档时以退出码 2 静默拒绝启动，所以“清单全绿却起不来”的载荷不再是可能状态。
 
-**仍未实现**：NSIS/MSI/DMG/deb 安装器、升级与用户数据保留、代码签名与公证、三平台真实 UI 冒烟，以及 `package.yml` workflow（仓库目前只有 `check.yml`）。因此本页下方的 Tauri/cargo/Node-runtime 记录依旧只是**历史证据**，新的 C++ 分发布局尚未做安装后验收。完整性校验只证明载荷未被改动，不证明发布者身份。
+**候选 CI 新增**：Windows NSIS、macOS DMG、Ubuntu 24.04 DEB 生成；每个平台 smoke 检查安装文件、host `--self-check`、冻结 Agent 的 JSON-RPC 握手、卸载/移除和独立数据目录保留。NSIS 安装为当前用户；所有卸载器只清理安装文件，不删除应用数据。RC.6 的 Windows、Ubuntu 和 macOS 自动安装 smoke 已在 [Run 39309839659 attempt 2](https://github.com/Bad0RANG3/Yukinal/actions/runs/39309839659) 通过。
+
+**仍未验收**：代码签名/公证、稳定版本远端 CI 成功记录、真实 Provider/MCP/SSH 任务、三平台 GUI 和系统文件拖放、安装后重启/升级/恢复。完整性清单验证字节未变，不证明发布者身份。只有签名配置与目标架构的 A/O/F/R 条件完成后，才应推送稳定 `vX.Y.Z` 标签；release workflow 会在所有平台安装作业通过后公开对应资产。
 
 ## 当前状态
 
@@ -20,7 +24,7 @@ C++ 宿主已接替旧的 Tauri 打包路径：`scripts/package.mjs` 把 C++ 桌
 
 2026-10-15 起的当前源码配置已把安装包资源切换为冻结 Python Agent、C++ SSH 服务和 `NOTICE`，移除了 Node Agent 与 Node runtime 的发行资源及下载步骤。安装版 smoke 会从 Tauri 资源映射暂存文件，在受限 PATH 下启动 Python Agent 并完成协议检查。当前工作树尚未生成或安装这一新布局的 Tauri 安装器；下表、历史快照和旧产物哈希记录的是先前携带 Node runtime 的版本，不能当作新布局的验收证据。
 
-仓库版本为 `1.0.0`，用于标记当前跨层接口基线。三平台安装包已在 CI runner 完成限定范围的安装/复制冒烟；这不代表用户干净环境、完整桌面 GUI 或真实 Provider、MCP 和远端维护场景都已验收。版本号以 `packages/shared/src/version.ts` 为源，并由测试检查各清单与 IPC fixture。
+当前源码版本为 `2.0.0`。旧版 Tauri 的包运行记录不覆盖当前 C++ 宿主载荷。版本号以 `packages/shared/src/version.ts` 为源，测试检查 JavaScript 清单、IPC fixture 与 README；原生 Python Agent 客户端版本也必须同步。
 
 | 项目 | 已有证据 | 发布前仍需完成 |
 | --- | --- | --- |
@@ -32,7 +36,7 @@ C++ 宿主已接替旧的 Tauri 打包路径：`scripts/package.mjs` 把 C++ 桌
 | macOS / Linux 包 | PR #3 手动三平台发布包 run [36674149301](https://github.com/Bad0RANG3/Yukinal/actions/runs/36674149301) 成功：Ubuntu 22.04 对 `.deb` 实际安装、检查 dpkg 安装状态、验证包内资源并用 bundled Node 完成 Agent 握手，随后 purge；macOS runner 对 DMG 实际挂载、将 `Yukinal.app` 复制到临时 Applications、检查资源并完成 bundled Agent 握手。两平台 release manifest 校验通过，安装包及 manifest 均上传为 [Linux artifact](https://github.com/Bad0RANG3/Yukinal/actions/runs/36674149301/artifacts/11080610014) 和 [macOS artifact](https://github.com/Bad0RANG3/Yukinal/actions/runs/36674149301/artifacts/11079725899) | 这些是隔离的 CI runner 安装/复制 smoke，不覆盖完整桌面 GUI 实际操作、签名/公证、升级/重启或干净用户主机复验 |
 | 旧版 Node.js 随包运行时（历史记录） | 2026-09-30 的 MSI、NSIS、Linux `.deb` 和 macOS DMG 验收使用固定版 Node 24.21.0，记录见下方远端 CI 快照与旧产物记录。当前源码配置已不再把该 runtime 或旧 Node Agent 放进安装包 | 新 Python-only 资源映射尚待 Tauri 安装包构建、实际安装和三平台验收；旧版验收不覆盖新布局 |
 | 真实环境与协议回归 | 本机 acceptance fixture 通过真实 AgentLoop 与 Host RPC client 覆盖只读诊断、审批变更、验证失败，以及文件恢复被拒绝或批准后的 revision/原内容核验；新增 native Host RPC + 真实临时 SQLite 测试，记录 evidence 后关闭并重建 `AppState`，再经 fetch RPC 读回内容与宿主绑定的 run ID；自动回归还覆盖 Agent 停止/运行时限、工具超时、Host RPC 断连时拒绝所有挂起请求并取消在途工具、持续巡检任务重启恢复及数据库迁移失败恢复。2026-09-30 的 `desktop_host_rpc_executes_server_command_once_and_persists_unknown_outcome` 通过桌面 Host RPC 分发和真实 `AppState` SSH 客户端连到临时 russh SSH 服务，验证未授权不发命令、获授权执行并记预算、重复请求不二次执行、丢失退出状态后标记未知且阻止逻辑重放。`crates/ssh/tests/sftp.rs` 新增服务层上传用例：`TransferManager` 经测试适配器调用生产 `RusshBackend` 的流式 SFTP/硬链接发布，核验发布字节、目标竞争不覆盖及 staging 清理。既有 SSH/SFTP 回环还覆盖固定主机密钥认证、exec stdout/stderr/非零退出码/输出上限/超时/取消、目录列表、限长与完整读取、独占写入/备份/删除，以及 `RemoteFileService` 的 revision 守卫与故障注入。SFTP 不提供 CAS，最后一次内容复核后仍有竞争窗口。可分别运行 `cargo test -p yukinal-ssh --test command` 和 `cargo test -p yukinal-ssh --test sftp`。2026-09-30 本机前置条件只读核验：当前进程未配置 live-test opt-in、OpenAI key/base/model、Anthropic/Gemini key；Windows OpenSSH client 存在，但未找到 sshd.exe 或 sshd 服务；本轮未发起任何外部 Provider/SSH 调用 | 用可重置服务器、真实 Provider 和 MCP 端点跑新目标 A/O/F 路径及错误矩阵；回环测试走真实 SSH/SFTP wire protocol，但不证明 OpenSSH/其他真实服务器兼容性、真实 Provider/AgentLoop/sidecar stdio 往返、真实目标机行为、Tauri transfer adapter、完整 UI 工作流或实际目标机故障恢复 |
-| 发布可信度 | 产物当前未签名 | 确定证书、渠道、升级与回退方案后再公开分发 |
+| 发布可信度 | 当前候选产物未签名/公证 | 配置证书并验证升级/回退；在此之前保持候选状态 |
 
 远端 CI 快照（2026-09-30 06:06 UTC）：PR #3 当前提交 `af4ab99` 的三平台 `pnpm check`、依赖 advisory audit 和 Windows installer lifecycle 均通过；完整三平台发布包 run [36674149301](https://github.com/Bad0RANG3/Yukinal/actions/runs/36674149301) 以 success 完成。该 run 在 Ubuntu 22.04 实际安装 `.deb`、完成 bundled Agent 握手并 purge；在 macOS runner 挂载 DMG、复制应用并完成 bundled Agent 握手；在 Windows runner 完成 NSIS uninstall policy、MSI 安装/启动/退出/卸载、NSIS 安装/更新/启动/卸载及数据保留验证。三个 runner 均成功校验 release manifest 并上传产物：[Linux](https://github.com/Bad0RANG3/Yukinal/actions/runs/36674149301/artifacts/11080610014)、[macOS](https://github.com/Bad0RANG3/Yukinal/actions/runs/36674149301/artifacts/11079725899)、[Windows](https://github.com/Bad0RANG3/Yukinal/actions/runs/36674149301/artifacts/11080177012)。PR #3 的三平台 `pnpm check` 与依赖审计见 [36674148457](https://github.com/Bad0RANG3/Yukinal/actions/runs/36674148457)，Windows 安装器门禁见 [36674148471](https://github.com/Bad0RANG3/Yukinal/actions/runs/36674148471)。Linux/macOS 的 Agent 冒烟使用安装包内 Node runtime，但 GitHub runner 自身预装 Node，不能替代完全无系统 Node 的干净环境验收。之前 package run `36661983739` 暴露 `pnpm release:manifest -- --verify` 多传裸 `--` 的问题，已修复并由后续成功 run 覆盖。工作流使用 Node 24 兼容的固定版 Actions，并以只读权限运行固定版 `cargo-audit` CLI；最近一次 main 历史检查 [36443924584](https://github.com/Bad0RANG3/Yukinal/actions/runs/36443924584) 曾被旧 RustSec Action 的 check-run 权限拒绝。涉及的官方 Action 版本为 [checkout v7.0.1](https://github.com/actions/checkout/releases/tag/v7.0.1)、[setup-node v7.0.0](https://github.com/actions/setup-node/releases/tag/v7.0.0)、[pnpm/action-setup v6.0.9](https://github.com/pnpm/action-setup/releases/tag/v6.0.9)、[upload-artifact v7.0.0](https://github.com/actions/upload-artifact/releases/tag/v7.0.0)。
 
@@ -101,11 +105,15 @@ pnpm desktop:dev:cpp
 macOS/Linux 上将安装命令中的 `agent/.venv/Scripts/python.exe` 换成
 `agent/.venv/bin/python`，控制平面同理换成 `services/control-plane/.venv/bin/python`。
 
-只开发界面时可运行 `pnpm desktop:dev`；浏览器预览没有 SQLite、SSH、PTY、系统凭据库或原生 Agent 能力。`pnpm package` 现在只暂存 C++ 宿主分发布局并写出完整性清单（先运行 `pnpm build:python-agent`、`pnpm build:ssh-service` 并构建 C++ 宿主），产物位于 `target/release/bundle/`；它不再下载 Node runtime，也不生成安装器。本地构建成功只证明该平台分发布局生成，不代替安装后的验收。
+只开发界面时可运行 `pnpm desktop:dev`；浏览器预览没有 SQLite、SSH、PTY、系统凭据库或原生 Agent 能力。`pnpm package` 暂存 C++ 宿主、UI、冻结 Agent、SSH 服务、平台启动器和图标，并写出完整性清单（先构建 Python Agent、SSH 服务、desktop UI 和 C++ 宿主），产物位于 `target/release/bundle/`。release-candidate workflow 再按平台生成安装器并执行安装 smoke。本地或托管 runner 的安装成功都不代替真实 Provider/SSH、文件管理器拖放和完整 GUI 验收。
 
-成功运行 `pnpm package` 会在 `target/release/bundle/` 生成 `SHA256SUMS.txt` 与 `release-manifest.json`，记录可分发布载荷的 SHA-256、字节数、应用版本与随包 Python Agent 版本、平台/架构、源码修订和工作区是否有未提交改动（含未忽略的新文件）。冻结 Python Agent 的第三方许可证文本随包写入 `python-agent/THIRD_PARTY_LICENSES.txt`。单独重建或替换载荷后可运行 `pnpm release:manifest` 更新清单；交付或上传前用 `pnpm package -- --verify` 复核哈希、文件大小、清单覆盖范围和路径安全。清单未签名，不能证明发布者身份，也不替代安装验收或代码签名；安装器与 CI 发布作业尚未实现。
+成功运行 `pnpm package` 会在 `target/release/bundle/` 生成 `SHA256SUMS.txt` 与 `release-manifest.json`，记录可分发布载荷的 SHA-256、字节数、应用版本与随包 Python Agent 版本、平台/架构、源码修订和工作区是否有未提交改动（含未忽略的新文件），以及 `inputs` 段：三件可执行产物加桌面 UI 入口文档各自的 sha256、构建时间、其源码目录的最后一个提交，以及该源码目录是否还有未提交改动（`dirty`）——新鲜度是拿产物与目录的**最后一次提交**比较的，所以工作区里的未提交编辑对这道检查不可见，manifest 必须把这一点写出来而不是暗示「产物等于该修订」。暂存前会逐件比较产物 mtime 与该目录的 `git log -1 --format=%cI`，产物更旧则默认失败并给出 `--allow-stale-inputs` 豁免开关（豁免写进 `notes`）；若 git 不可用或该目录没有任何提交，比较根本无法进行，此时会打印明确的「新鲜度未验证」警告，而不是静默当成新鲜。冻结 Python Agent 的第三方许可证文本随包写入 `python-agent/THIRD_PARTY_LICENSES.txt`——它是按**冻结载荷**里的 `.dist-info` 枚举生成的，不再读构建 venv，因此声明集合与实际随包的 21 个发行版一致；文本按 `License-File` 元数据与文件名双轨收录（旧的后缀白名单会丢掉 `cryptography` 已声明的 `LICENSE.APACHE`/`LICENSE.BSD`），且路径相对载荷根，绝对 `--payload` 不再把构建机目录烧进随包文件。这份通知**是硬性要求**：缺失即 fail-closed，并且暂存前会把它声明的 `## 发行版 版本` 列表与将要暂存的 onedir 里的 `.dist-info` 逐条对账，用 `--agent-runtime` 指向另一棵树时不会再出现「通知描述别的载荷」；载荷内删掉该文件也会被 `--verify` 拒绝（它挂在 `launch.agentEntry` 同目录这一不变式上）。构建好的桌面 UI 写入 `ui/`。单独重建或替换载荷后可运行 `pnpm release:manifest` 更新清单；交付或上传前用 `pnpm package -- --verify` 复核哈希、文件大小、清单覆盖范围和路径安全。复核同时覆盖两个方向：清单里的每个文件必须逐字节一致，磁盘上出现的**任何**未声明文件都会让校验失败并列出路径；载荷内出现符号链接/NTFS 联接、或清单路径含 Windows 保留设备名、尾点/尾空格或冒号（ADS）时也一律拒绝，不会跟随这些条目去验证载荷之外的字节。校验会同时输出清单条目数与磁盘实际枚举数（`files` 与 `scanned`），两者不等即视为异常。`inputs` 段不是装饰性的审计注记：`--verify` 会拿它与清单里同路径的载荷条目逐条比对 sha256，重复 role、指向清单外路径、sha256 与载荷不一致都会失败；`pnpm release:manifest` 重建清单时也做同一检查，所以伪造的 provenance 不能被「刷新」洗白，`inputs` 字段类型不对时会拒绝刷新而不是静默清空。**注意输出根要一次只保留一个版本**：升级 `APP_VERSION` 后，输出根下遗留的旧 `yukinal-<旧版本>-<平台>-<架构>/` 目录会被判为未声明文件而使校验失败——这正是期望行为（旧载荷不应与新清单混放），清理旧目录或改用新的 `--out` 即可。清单未签名，不能证明发布者身份，也不替代安装验收或代码签名；安装器与 CI 发布作业在该历史记录更新时尚未实现，当前候选流程见本页顶部状态。
 
-`pnpm check` 现在还包含控制平面测试（`services/control-plane/tests/`，129 项，跑在 SQLite 上，覆盖 API、租户隔离、节点 Ed25519 签名与重放拒绝、节点通道与断连 `unknown`、任务状态机、偏唯一索引并发控制、审批指纹绑定与派发前复议、审批有效期/撤销/使用预算、按租户策略（风险表、档位模式、环境默认、`deny` 的绝对性、声明边界）、条件 UPDATE 原子领取、凭据边界与 Alembic 迁移一致性）。该步骤只在 `services/control-plane/.venv` 存在时执行，缺失时会打印明确的 skip 原因而不是静默通过。控制平面自身的 PostgreSQL 部署、TLS/`wss://` 终结、真正第二个 worker 进程的分配竞态与按 MCP 目录解析风险仍未验证，见 [`services/control-plane/README.md`](../services/control-plane/README.md)。
+`pnpm check` 现在还包含控制平面测试（`services/control-plane/tests/`，跑在 SQLite 上，覆盖 API、租户隔离、节点 Ed25519 签名与重放拒绝、节点通道与断连 `unknown`、任务状态机、偏唯一索引并发控制、审批指纹绑定与派发前复议、审批有效期/撤销/使用预算、按租户策略（风险表、档位模式、环境默认、`deny` 的绝对性、声明边界）、条件 UPDATE 原子领取、凭据边界与 Alembic 迁移一致性）与 **Python Agent 全量 unittest**（`agent/tests/test_*.py`）。这两个 Python 步骤只在「解释器与依赖在本机确实一处都不存在」时才允许跳过并打印明确原因；**「装了但不可用」一律是硬失败**（退出码 2 并给出修复命令）——依赖装好却没有可用解释器、显式指定的 `YUKINAL_CONTROL_PLANE_PYTHON` 不可用、或 CI 上设置了 `YUKINAL_CONTROL_PLANE_REQUIRED=1` 这三种情况都会让门禁变红，而不是打印一行被忽略的 skip。
+
+原生 CTest 步骤同理：**自动发现**不到任何已配置的测试构建时会打印跳过原因，但显式设置了 `YUKINAL_SSH_CMAKE_BUILD_DIR` 而该目录不是可运行的测试构建时，门禁以退出码 2 停下并给出 `cmake -S native -B ... -DYUKINAL_BUILD_TESTS=ON` 修复命令——曾经一个拼错的路径会让 13 个原生目标全部消失，而门禁仍打印 `check: green`。这条不变式由 `scripts/lib/gate.test.mjs` 钉住（它也断言门禁仍声明那些拦截过真实缺陷的步骤）。
+
+控制平面自身的 PostgreSQL 部署、TLS/`wss://` 终结、真正第二个 worker 进程的分配竞态与按 MCP 目录解析风险仍未验证，见 [`services/control-plane/README.md`](../services/control-plane/README.md)。
 
 ## 发布验收
 
@@ -119,8 +127,10 @@ macOS/Linux 上将安装命令中的 `agent/.venv/Scripts/python.exe` 换成
 
 每个平台至少保留一条从干净安装环境执行的记录，包含提交、版本、操作系统、产物名称与 SHA-256、安装方式、随包 Python Agent 版本、启动/退出/重开/卸载结果和脱敏失败日志位置。确认主机未安装 Python 时 sidecar 仍能启动，并检查应用退出后 sidecar、MCP 子进程和 PTY 是否正确收尾。读取安装器清单或本地构建成功不算完成安装验收。Windows 可用 `pwsh -NoProfile -File scripts/smoke-installed-windows.ps1` 对 NSIS 安装版做进程级复验，也可用 `-InstallDir <目录>` 检查 MSI 提取载荷；真实 MSI 生命周期应在一次性管理员测试机运行 `pwsh -NoProfile -File scripts/smoke-msi-install-windows.ps1`。这些脚本仍需配合干净系统、重启/升级及手动 GUI 验收。
 
-已有 Agent fixture `pnpm --filter @yukinal/agent exec tsx --test src/runtime/investigation-acceptance.test.ts` 使用真实 AgentLoop、权限审批和 Host RPC client，但服务端和远端文件是状态化内存 fixture。native Host RPC + SQLite 测试 `cargo test --manifest-path apps/desktop/src-tauri/Cargo.toml --lib evidence_record_host_rpc_survives_host_restart_and_remains_fetchable` 覆盖 evidence 跨 `AppState` 重启。回环 SSH/SFTP 测试验证协议操作；这些都不证明真实 Provider、OpenSSH、安装版 UI 或大文件传输。新接口需分别补契约、宿主、sidecar、真实远端及 GUI 层的可观察验收。
+当前 `pnpm check` 包含 Python Agent 全量 unittest、C++ CTest、桌面/共享包类型和测试、控制平面测试及 sidecar smoke。回环 Provider 与 SSH/SFTP 测试验证组件协议，不证明真实 Provider、用户指定 OpenSSH 主机、安装版 UI 或大文件传输。`docs/acceptance-handoff.md` 第 6 节跟踪尚缺的外部验收，新的能力需要分别补齐宿主、sidecar、真实远端及 GUI 层可观察证据。
 
-真实 Provider 的可选门禁为 `pnpm --filter @yukinal/agent test:live`，用 `YUKINAL_LIVE_PROVIDER_TESTS=1` 显式启用，并以 `YUKINAL_LIVE_PROVIDERS` 选定实际要测的 Provider。真实 Provider 和 MCP 测试需记录实现、版本、认证方式和通过的输入组合；没有跑到的组合继续标为未验证。
+真实 Provider 的可选探针为 `scripts/accept_live_python_provider.py`，用 `YUKINAL_LIVE_PROVIDER_TESTS=1` 显式启用，并以 `YUKINAL_LIVE_PROVIDER`、`YUKINAL_LIVE_MODEL`、`YUKINAL_LIVE_API_KEY` 和可选 endpoint 参数选择当前 Python Agent adapter。探针真实请求一次模型并验证实际工具调用，但只使用本地只读 token 工具，不覆盖安装版桌面、MCP、SSH 目标或完整 A/O/F/R 路径。真实 Provider、MCP 和 SSH 任务需单独记录实现、版本、认证方式、测试目标和通过的输入组合；没有跑到的组合继续标为未验证。
+
+托管真实 Provider 探针位于 [provider-live-acceptance workflow](../.github/workflows/provider-live-acceptance.yml)，仅支持手动触发且默认跳过；操作者必须显式勾选一次计费请求，并预先配置 repository Variables 与 `YUKINAL_LIVE_API_KEY` Secret。workflow 不把密钥写入日志或仓库。
 
 发布记录不得包含真实凭据、私钥、完整远端正文或未脱敏的模型上下文。签名、公证和自动更新尚未配置；向外提供安装包时必须明确说明。

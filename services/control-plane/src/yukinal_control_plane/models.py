@@ -56,7 +56,16 @@ class Tenant(Base):
 
 class Node(Base):
     __tablename__ = "nodes"
-    __table_args__ = (UniqueConstraint("tenant_id", "name", name="uq_nodes_tenant_name"),)
+    __table_args__ = (
+        UniqueConstraint("tenant_id", "name", name="uq_nodes_tenant_name"),
+        # One public key backs at most one node, globally — not one per tenant.
+        # The node id is inside the signature, and the signature is checked
+        # against this row's key; allowing the same key two rows would let a
+        # signature made for one node id satisfy the check for the other. A
+        # per-tenant constraint would not close that: the header is unsigned
+        # routing input, so the two rows only have to differ in tenant.
+        UniqueConstraint("public_key", name="uq_nodes_public_key"),
+    )
 
     id: Mapped[str] = mapped_column(String(64), primary_key=True)
     tenant_id: Mapped[str] = mapped_column(

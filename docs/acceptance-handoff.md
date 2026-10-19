@@ -1,22 +1,38 @@
 # SSH + Agent 验收交接手册
 
-本文档面向**接手验收的人**，目标是在一台干净机器上复现构建与测试，并完成本机（开发机）无法完成的真实环境验收。任务输入是工作区的 `ssh_agent_development_brief.md`（**不要提交它**，它是任务输入，不是仓库文件）。
+本文档面向**接手验收的人**，目标是在一台干净机器上复现构建与测试，并完成本机（开发机）无法完成的真实环境验收。任务输入是工作区里的 `ssh_agent_development_brief.md`；**它不在仓库内**，也**不要提交它**（仓库的构建和门禁都不依赖它的存在）。
 
-> **变更提示（Rust/Tauri 已删除）**：`crates/`、`apps/desktop/src-tauri/`、`Cargo.*`、`rust-toolchain.toml`、`.cargo/` 和 legacy Node agent（`apps/agent/`）已从仓库移除；`pnpm check` 不再跑 cargo，桌面宿主只有 C++。本文中失效的命令（`cargo test`/`pnpm --filter @yukinal/agent test:live`/`yukinal-desktop --lib`）已在下文标注；后续实现指导见 [`rust-removal-plan.md`](./rust-removal-plan.md)。
+> **变更提示（Rust/Tauri 已删除）**：`crates/`、`apps/desktop/src-tauri/`、`Cargo.*`、`rust-toolchain.toml`、`.cargo/` 和 legacy Node agent（`apps/agent/`）已从仓库移除；`pnpm check` 不再跑 cargo，桌面宿主只有 C++。本文中失效的 Rust 命令是历史信息；旧 Node `test:live` 入口已由第 6.2 节的 Python live Provider 探针替代。后续实现指导见 [`rust-removal-plan.md`](./rust-removal-plan.md)。
 
 本文只写可复核的事实：命令、预期结果、真实结果，以及还没闭环的部分。不要因为本文说“通过”就跳过重新运行。
 
 ---
 
-## 1. 当前检查点
+## 1. 已验证检查点（RC.7，2026-10-20）
 
 | 项 | 值 |
 | --- | --- |
-| 分支 | `main` |
-| HEAD | `e8a6363`（`Map Python tool names at the provider boundary`） |
-| 本地领先 `origin/main` | 2 个提交：`47f6071`、`e8a6363`（**未推送**） |
+| 分支 / RC 源提交 | `feat/workspace-tab-strip` / `170a30b` |
+| RC 标签 | `v2.0.0-rc.7` 指向 `170a30b` |
+| 跨平台安装 CI | [Run 39319681035](https://github.com/Bad0RANG3/Yukinal/actions/runs/39319681035)：Windows、Ubuntu、macOS jobs 全部成功 |
+| OpenSSH 容器集成 | Ubuntu 24.04 CTest **9/9** 通过；`openssh_container_integration` 11.86 秒通过，覆盖认证、只读调用、超时、输出上限、未知/变更 host key、SFTP hardlink no-replace |
+| 安装包 smoke | Windows NSIS、Ubuntu DEB、macOS DMG 均构建并安装/启动/移除 smoke 成功；用户数据保留检查通过 |
+| 本地 Provider 探针回归 | loopback stub 与配置安全测试 **6/6** 通过；未发起云端计费请求 |
+| Live Provider 凭据 | 未配置；Actions repository secrets 列表检查未发现可用 secret 名称（未读取任何秘密值） |
+| 稳定版状态 | 未发布；真实 Provider/MCP/目标机任务、三平台安装版 GUI 与签名/公证仍未验收 |
+| 工作树 | 验收记录提交后干净 |
+
+RC.7 三平台作业均在 [Run 39319681035](https://github.com/Bad0RANG3/Yukinal/actions/runs/39319681035) 首次完成并成功。artifact 名称为 `yukinal-release-windows-latest-X64`（94,948,723 bytes）、`yukinal-release-ubuntu-24.04-X64`（210,264,275 bytes）和 `yukinal-release-macos-15-intel-X64`（125,290,431 bytes），可从 run 页面下载（保留 30 天）。RC.6 第一次 macOS job 在 DMG 创建步骤失败，同一提交的 attempt 2 重新构建并通过 DMG 安装 smoke；该历史重试不影响 RC.7 结果。
+
+## 2. 历史任务书检查点（2026-10-18）
+
+| 项 | 值 |
+| --- | --- |
+| 分支 | `codex/ui-layout-direction` |
+| HEAD | `736f06a`（`chore(ci): drop the temporary native crash diagnostics`） |
+| 本地领先 `origin/main` | 30 个提交（**未推送**） |
 | 基线检查点 | `d2594ff`（`Move schema migrations to C++ desktop host`） |
-| 未跟踪文件 | `ssh_agent_development_brief.md`（任务输入，禁止提交） |
+| 未跟踪文件 | `ssh_agent_development_brief.md`（工作区任务输入，不在仓库内，禁止提交） |
 
 这轮的验收对象是任务书 `ssh_agent_development_brief.md` 的四阶段。仓库同时并行进行 **C++ 桌面宿主迁移**（见 `docs/cpp-desktop-handoff.md`、`docs/native-desktop-host.md`），它是另一条工作线，不属本任务书的验收范围，但改动会影响仓库整体门禁，本文一并说明。
 
@@ -33,9 +49,12 @@
 | 真实云 Provider live | **未跑**（本机无 API key；Python 侧也没有 live harness） |
 | `yukinal-desktop --lib` 单元测试 | **无法启动**（`STATUS_ENTRYPOINT_NOT_FOUND`，环境问题，见 第 7 节） |
 
+> 2026-10-18 复核：上表是那一轮的记录。当前实测 CTest 为 **13/13**（`ctest --test-dir native/build-nmake -C Release --output-on-failure`），Python Agent 为 **153 passed / 4 skipped**；Rust 相关行随宿主删除已无对应目标。
+> 2026-10-18 二次复核：CTest 由 15 降为 **13**，原因是删除了 `test_client.py` / `test_service_integration.py` 的**重复注册**（详见 第 4.1 节的修正说明），覆盖不降反升 —— 原 15 个目标里有 2 个是重复计数，同时有 4 个测试模块不在任何目标里。
+
 ---
 
-## 2. 仓库结构与职责
+## 3. 仓库结构与职责
 
 ```text
 native/                    C++：独立 SSH service + C++ 桌面宿主（WebView）
@@ -98,20 +117,33 @@ cmake --build native/build-nmake --config Release --parallel
 ctest --test-dir native/build-nmake -C Release --output-on-failure
 ```
 
-预期 10 个测试全过：
+预期 13 个测试全过（下面这份清单与 `ctest -N` 的实际顺序一致，即 `native/CMakeLists.txt` 的注册顺序）：
 
 1. `yukinal_ssh_tests`（C++ 配置/策略/host key/网络）
-2. `python_client_tests`（`yukinal_ssh` 客户端）
-3. `service_http_integration`（Python→C++ HTTP 真实路径）
-4. `ssh_container_harness_tests`（容器 harness 自身的解析测试）
-5. `python_agent_tests`（Python Agent Runtime，`test_agent_*.py`）
-6. `ssh_mock_integration`（Paramiko mock：成功/鉴权失败/超时/输出上限/host key）
-7. `agent_ssh_mock_integration`（Agent→C++ mock：选中目标绑定、越权拒绝）
+2. `ssh_container_harness_tests`（容器 harness 自身的解析测试）
+3. `python_agent_tests`（**Python Agent 全量**：`agent/tests/test_*.py`，153 tests）
+4. `ssh_mock_integration`（Paramiko mock：成功/鉴权失败/超时/输出上限/host key）
+5. `agent_ssh_mock_integration`（Agent→C++ mock：选中目标绑定、越权拒绝）
+6. `window_context_tests`
+7. `caption_hit_test_tests`
 8. `desktop_host_tests`
-9. `desktop_host_database_tests`
-10. `desktop_host_self_check`
+9. `transfer_tests`
+10. `transfer_manager_tests`
+11. `desktop_host_database_tests`
+12. `desktop_host_self_check`
+13. `desktop_host_sidecar_tests`
 
-> 若第 5–7 个没出现，说明 Python extra 没装全，不要当作通过。
+> 修正（2026-10-18）：此清单原先写「10 个测试」，并把 `python_client_tests` /
+> `service_http_integration` 列为独立目标。这两个目标是 `test_client.py` /
+> `test_service_integration.py` 的重复注册 —— 它们与 `test_agent_*.py` glob 一起造成了
+> 「同一批测试被计两次、而 `test_network_snapshot.py` / `test_provider_store.py` /
+> `test_reasoning_effort.py` / `test_system_snapshot.py` 四个模块不被任何门禁执行」。
+> 现在 `native/CMakeLists.txt` 只保留一个 glob 为 `test_*.py` 的 `python_agent_tests`
+> 目标来覆盖全部 Agent 测试（`test_client.py` 与 `test_service_integration.py` 在内），
+> 并给该目标注入了 `YUKINAL_SSH_SERVICE_BINARY`，使 `test_service_integration` 的 4 个
+> 用例真正执行而不再静默 skip。
+
+> 若第 3–5 个没出现，说明 Python extra 没装全，不要当作通过。
 
 ### 4.2 Python Agent 全量测试
 
@@ -121,7 +153,9 @@ export YUKINAL_SSH_SERVICE_BINARY="D:/yukinal/native/build-nmake/yukinal-ssh-ser
 agent/.venv/Scripts/python.exe -m unittest discover -s agent/tests -p "test_*.py"
 ```
 
-预期：`Ran 132 tests ... OK`。
+预期：`Ran 153 tests ... OK (skipped=4)`（2026-10-18 实测；此前的 132 是旧快照）。
+`skipped=4` 是本机缺少 Docker/真实云 Provider 时才出现的用例；`test_service_integration`
+的 4 个用例在设好 `YUKINAL_SSH_SERVICE_BINARY` 后会真正执行，不再是 skip。
 
 ### 4.3 Rust 工作区
 
@@ -154,7 +188,7 @@ cargo test -p yukinal-core --test sidecar_agent -- --test-threads=1
 | 任务书要求 | 实现位置 | 验收证据 | 状态 |
 | --- | --- | --- | --- |
 | C++ SSH service，仅监听 127.0.0.1，host key 必须验证 | `native/src` | `yukinal_ssh_tests`、`ssh_mock_integration` | 通过 |
-| Python 通过本机 HTTP/JSON 调用 C++ | `agent/src/yukinal_ssh` | `python_client_tests`、`service_http_integration` | 通过 |
+| Python 通过本机 HTTP/JSON 调用 C++ | `agent/src/yukinal_ssh` | `python_agent_tests` 内的 `test_client`、`test_service_integration` | 通过 |
 | 结构化只读操作（`service_status`/`disk_usage` 等）、白名单目标 | `native/src/policy.cpp`、`agent/src/yukinal_ssh` | `test_client`、`test_policy` | 通过 |
 | 参数校验 / 超时 / 输出上限 / 错误分类 / 脱敏 | 同上 | `test_config`、`test_policy`、mock | 通过 |
 | Tool Registry：全局唯一、schema 校验、目标授权、审批绑定、审计脱敏 | `agent/src/yukinal_agent/tools.py`、`audit.py` | `test_agent_tools` | 通过 |
@@ -170,11 +204,15 @@ cargo test -p yukinal-core --test sidecar_agent -- --test-threads=1
 
 ---
 
-## 6. 本机无法完成、需要接手者执行的验收
+## 6. 尚需完成、需要真实凭据或交互环境的验收
 
 ### 6.1 真实 OpenSSH 容器（任务书 第 11 节/第 12 节 要求）
 
-前置：Docker Desktop 正在运行，`ssh-keygen`、`ssh-keyscan` 可用。
+**远端自动验收已通过一部分**：RC.6 的 [Ubuntu 24.04 job](https://github.com/Bad0RANG3/Yukinal/actions/runs/39309839659) 配置 `YUKINAL_ENABLE_SSH_CONTAINER_TEST=ON`，CTest 的 `openssh_container_integration` 通过（13.59 秒，Ubuntu job 共 9/9 CTest 通过）。`scripts/test_ssh_container.py` 构建临时 OpenSSH 容器并实际验证服务状态、磁盘只读查询、错误凭据分类、超时、输出上限、未知/变更 host key，以及 `hardlink@openssh.com` no-replace 发布与目标冲突不覆盖。
+
+这证明了当前 C++ SSH/SFTP 服务与隔离 OpenSSH 实现的协议兼容子集；它不替代用户指定发行版/配置的真实主机验收，也不覆盖安装版 GUI 和三平台文件拖放。
+
+本次 RC.6 已在 Ubuntu CI 的隔离容器通过上述协议子集验收；若要在开发机复现，前置是 Docker 可用，且 `ssh-keygen`、`ssh-keyscan` 在 PATH 中。
 
 方式 A（推荐，隔离临时容器；测试结束后自动清理镜像/容器）：
 
@@ -194,35 +232,31 @@ cmake --build native/build-check --config Release --parallel
 ctest --test-dir native/build-check -C Release -R openssh_container_integration --output-on-failure
 ```
 
-要覆盖的用例：只读操作成功、错误凭据、命令超时、输出上限、未知 host key、变更 host key。请把容器镜像、OpenSSH 版本、通过/失败的输入组合记进 `docs/rewrite-cpp-python.md`。
+要覆盖的用例：只读操作成功、错误凭据、命令超时、输出上限、未知 host key、变更 host key。RC.6 的容器结果已记入 `docs/rewrite-cpp-python.md`；开发机复现后再补充本机镜像与 OpenSSH 版本。
 
 ### 6.2 真实云 Provider
 
-现状：
-- Python Agent 的 provider 路径已在**回环** OpenAI 兼容服务上端到端验证（第 4.3 节）。这验证了 wire、工具调用、LangGraph、持久计划，但不证明某家真实云厂商。
-- 仓库里现成的 live 门禁是**旧 Node provider SDK** 的：
-  `apps/agent/live/provider-live.test.ts`。它测的不是 Python LangChain 路径。
+当前 Python Agent 已有显式 opt-in 的 live 工具调用验收脚本 `scripts/accept_live_python_provider.py`。它经实际 LangChain provider adapter 和 `ModelDrivenAgent` 发起一次模型请求，只暴露一个本地只读探针工具，验证模型确实调用工具并准确返回工具生成的随机 token；不写远端，也不打印 API key、完整回答或原始异常。
 
-方式 A：验证旧 Node provider 适配器（可与真实 OpenAI/Anthropic/Gemini 通话）：
+可在 GitHub Actions 手动运行 `.github/workflows/provider-live-acceptance.yml`：先用 repository Variables 配置 `YUKINAL_LIVE_PROVIDER`、`YUKINAL_LIVE_MODEL` 和需要的 endpoint 参数，用 repository Secret 配置 `YUKINAL_LIVE_API_KEY`，然后显式勾选 `enable_billable_provider_request`。未勾选时 Provider job 跳过；勾选后只发出一条真实工具调用请求。探针本身也要求 `YUKINAL_LIVE_PROVIDER_TESTS=1`，两道 opt-in 都保留。该 workflow 只验 Provider/tool loop，不代替真实 MCP/SSH 和安装版 GUI 任务。
 
-```bash
-YUKINAL_LIVE_PROVIDER_TESTS=1 \
-YUKINAL_LIVE_PROVIDERS=openai-chat \
-YUKINAL_OPENAI_MODEL=gpt-4o-mini \
-YUKINAL_OPENAI_API_KEY=sk-... \
-pnpm --filter @yukinal/agent test:live
+PowerShell（先安装 `agent[agent,models,test]`）：
+
+```powershell
+$env:YUKINAL_LIVE_PROVIDER_TESTS = "1"
+$env:YUKINAL_LIVE_PROVIDER = "openai"
+$env:YUKINAL_LIVE_MODEL = "<tool-calling-model>"
+$env:YUKINAL_LIVE_API_KEY = "<key>"
+& agent/.venv/Scripts/python.exe scripts/accept_live_python_provider.py
 ```
 
-可选 provider 名：`openai-chat`、`openai-responses`、`anthropic`、`gemini`；对应变量：
-`YUKINAL_OPENAI_MODEL` + `YUKINAL_OPENAI_API_KEY`（`YUKINAL_OPENAI_BASE_URL` 可选）、
-`ANTHROPIC_API_KEY` + `YUKINAL_ANTHROPIC_MODEL`、
-`GEMINI_API_KEY` + `YUKINAL_GEMINI_MODEL`。
+支持 provider：`openai`、`openai-compatible`、`anthropic`、`gemini`。可选变量：
+`YUKINAL_LIVE_BASE_URL`（OpenAI-compatible 必填，远程端点必须 HTTPS）、
+`YUKINAL_LIVE_API_VERSION`（Anthropic）、`YUKINAL_LIVE_WIRE_API`（OpenAI-compatible 的 `chat` 或 `responses`）。远程 provider 必须配置 `YUKINAL_LIVE_API_KEY`；只有 loopback 的 OpenAI-compatible endpoint 可以不带 key。该命令会产生一次真实、可能计费的模型请求，只有显式设置 `YUKINAL_LIVE_PROVIDER_TESTS=1` 才会运行。
 
-方式 B：验证 Python Agent 到真实云。目前**没有现成 live 脚本**，需要二选一：
-- 起桌面应用并在设置里配置真实 provider（`pnpm desktop:dev:python`），手动发一条只读任务；
-- 或照 `crates/core/tests/sidecar_agent.rs` 的回环测试，新增一个用真实 `baseUrl`/key 的 gated 测试。
+这条探针证明真实 provider 连通与单工具调用，不证明真实目标任务。A1–A4 仍需在安装版中配合实际 MCP endpoint 和可重置 SSH 主机完成；需记录厂商/模型/版本、认证方式、时间、测试目标与脱敏证据。鉴权失败、超时、429 和 5xx 的分类已有模拟回归，但尚无真实厂商负向验收记录。
 
-要覆盖：鉴权失败（401/403）、超时、限流（429）、模型不可用（5xx）、工具调用能力不足时的清晰报错。把厂商、模型、时间、输入组合记入文档。
+`agent/tests/test_live_provider_acceptance.py` 会启动 loopback OpenAI-compatible stub，离线验证显式 opt-in、远端 HTTPS 限制、密钥配置边界及完整工具循环；这些测试不会访问云端。远程 endpoint 使用 API key 时必须是 HTTPS，唯一允许 HTTP 的是 loopback 测试服务。
 
 ### 6.3 明确未实现/不属任务书
 
@@ -237,8 +271,8 @@ pnpm --filter @yukinal/agent test:live
 2. **`cargo` 不在 PATH**：`.cargo/bin` 缺失；用 `~/.rustup/toolchains/stable-x86_64-pc-windows-msvc/bin`。
 3. **NMake 需要 MSVC 环境**：不先 `vcvars64.bat` 会报找不到 `nmake`/`cl`。
 4. **CMake 依赖下载**：首次 configure 会拉取 libssh2 / nlohmann_json / cpp-httplib / webview / sqlite / bundled OpenSSL，需要网络；Windows 上 bundled OpenSSL 还需要完整 Perl（Strawberry Perl）。
-5. **测试静默跳过**：缺 Python extra 或 Paramiko 时 CMake 会不注册测试。核对 `ctest -N` 数量与预期一致（当前 14 个）。
-6. **`ssh_agent_development_brief.md`** 保持未跟踪、不提交。
+5. **测试静默跳过**：缺 Python extra 或 Paramiko 时 CMake 会不注册测试。核对 `ctest -N` 数量与预期一致（2026-10-18 实测 **13 个**；见 第 4.1 节的修正说明）。
+6. **`ssh_agent_development_brief.md`** 是工作区里的任务输入，不在仓库内；保持未跟踪、不提交。
 7. **Git 身份**：提交 author/committer 必须是 `Bad0RANG3 <badorangeovo@Outlook.com>`。
 
 ---
@@ -255,53 +289,46 @@ pnpm --filter @yukinal/agent test:live
 
 ---
 
-## 9. 一键复现清单（Windows Developer PowerShell）
+## 9. 当前门禁与复现清单
 
 ```powershell
-# 1. Python venv（首次）
+# 首次安装 workspace 与 Python 测试依赖
+pnpm install --frozen-lockfile
 python -m venv agent/.venv
 agent/.venv/Scripts/python.exe -m pip install -e "agent[agent,models,test]"
+python -m venv services/control-plane/.venv
+services/control-plane/.venv/Scripts/python.exe -m pip install -e "services/control-plane[test]"
 
-# 2. C++ + CTest
-cmake -S native -B native/build-nmake -G "NMake Makefiles" `
-  -DCMAKE_BUILD_TYPE=Release -DYUKINAL_FETCH_DEPS=ON -DYUKINAL_BUILD_TESTS=ON `
-  -DYUKINAL_BUILD_SSH_SERVICE=ON -DYUKINAL_BUILD_DESKTOP_HOST=ON `
-  -DYUKINAL_BUNDLE_WINDOWS_OPENSSL=ON -DYUKINAL_ENABLE_SSH_MOCK_TEST=ON `
-  -DPython3_EXECUTABLE="$PWD/agent/.venv/Scripts/python.exe"
-cmake --build native/build-nmake --config Release --parallel
-ctest --test-dir native/build-nmake -C Release --output-on-failure      # 期望 10/10
+# 完整当前仓库门禁；需先按 native/README.md 配置 C++ 测试构建
+$env:YUKINAL_SSH_CMAKE_BUILD_DIR = "native/build-check"
+$env:YUKINAL_CONTROL_PLANE_REQUIRED = "1"
+pnpm check
 
-# 3. Python Agent 全量
-$env:PYTHONPATH = "$PWD/agent/src"
-$env:YUKINAL_SSH_SERVICE_BINARY = "$PWD/native/build-nmake/yukinal-ssh-service.exe"
-& "$PWD/agent/.venv/Scripts/python.exe" -m unittest discover -s agent/tests -p "test_*.py"   # 期望 132 OK
+# 离线验证 live Provider 探针（只访问本机 loopback stub）
+agent/.venv/Scripts/python.exe -m unittest agent.tests.test_live_provider_acceptance -v
 
-# 4. Rust（cargo 不在 PATH 时）
-$env:PATH = "$env:USERPROFILE\.rustup\toolchains\stable-x86_64-pc-windows-msvc\bin;$env:PATH"
-$env:YUKINAL_TEST_PYTHON = "$PWD/agent/.venv/Scripts/python.exe"
-$env:YUKINAL_TEST_AGENT_SOURCE = "$PWD/agent/src"
-$env:YUKINAL_TEST_NODE = "C:/Program Files/nodejs/node.exe"
-$env:YUKINAL_TEST_REQUIRED = "1"
-cargo fmt --all --check
-cargo clippy --workspace --all-targets -- -D warnings
-cargo test --workspace -- --test-threads=1
+# 真实 OpenSSH 隔离容器（需 Docker；RC.6 Ubuntu CI 已通过）
+python scripts/test_ssh_container.py --service-binary native/build-check/yukinal-ssh-service.exe
+```
 
-# 5. 真实 OpenSSH（需 Docker）
-python scripts/test_ssh_container.py --service-binary native/build-nmake/yukinal-ssh-service.exe
+macOS/Linux 使用 `agent/.venv/bin/python` 和 `services/control-plane/.venv/bin/python`；容器测试的 service 路径按构建结果填写。release-candidate workflow 在 Windows、Ubuntu 24.04 与 macOS 15 Intel 上运行完整 gate 并构建、安装 smoke NSIS/DEB/DMG。
 
-# 6. 真实 Provider（旧 Node 门禁；Python 路径见 第 6.2 节）
+真实 Provider 验收会发出一次可能计费的请求，只在明确配置并启用时运行：
+
+```powershell
 $env:YUKINAL_LIVE_PROVIDER_TESTS = "1"
-$env:YUKINAL_LIVE_PROVIDERS = "openai-chat"
-$env:YUKINAL_OPENAI_MODEL = "<model>"
-$env:YUKINAL_OPENAI_API_KEY = "<key>"
-pnpm --filter @yukinal/agent test:live
+$env:YUKINAL_LIVE_PROVIDER = "openai" # openai-compatible / anthropic / gemini
+$env:YUKINAL_LIVE_MODEL = "<tool-calling-model>"
+$env:YUKINAL_LIVE_API_KEY = "<key>"
+$env:YUKINAL_LIVE_BASE_URL = "<optional-https-endpoint>"
+& agent/.venv/Scripts/python.exe scripts/accept_live_python_provider.py
 ```
 
 ---
 
 ## 10. 并行工作线：C++ 桌面宿主（不属本任务书）
 
-状态：C++ 宿主已能打开 React UI、提供本机 IPC、初始化并迁移 SQLite（1→36）、服务器 CRUD、OS 凭据、活动/聊天记录、网络代理设置（`network_proxy_get`/`network_proxy_save`，凭据只进 OS 库，PAC/内嵌凭据失败关闭），以及终端、文件传输与拖拽、MCP（含 OAuth 与进程监督）和 Agent↔host 的 `host.*` RPC（含 `host.tool.execute` 两条路由）。`ctest` 当前有 14 个目标。
+状态：C++ 宿主已能打开 React UI、提供本机 IPC、初始化并迁移 SQLite（1→36）、服务器 CRUD、OS 凭据、活动/聊天记录、网络代理设置（`network_proxy_get`/`network_proxy_save`，凭据只进 OS 库，PAC/内嵌凭据失败关闭），以及终端、文件传输与拖拽、MCP（含 OAuth 与进程监督）和 Agent↔host 的 `host.*` RPC（含 `host.tool.execute` 两条路由）。CTest 目标依平台与配置而异：Windows 当前注册 13 个；Ubuntu RC.6 job 注册 9 个，其中包含真实 OpenSSH 容器集成。
 
 未迁入 C++ 的命令返回 `NOT_IMPLEMENTED`，不会回退 Tauri（Tauri 宿主已删除）。剩余迁移顺序见 `docs/cpp-desktop-handoff.md`。
 
@@ -311,9 +338,9 @@ pnpm --filter @yukinal/agent test:live
 
 ## 11. 接手后的建议顺序
 
-1. 按 第 9 节 复现本机结果，确认 CTest 全部通过（当前 14 个目标）、Python Agent 测试全绿；Rust 目标已随宿主删除而移除。
+1. 按第 9 节复现当前 `pnpm check`、Python Agent 与 CTest 结果；Rust/Tauri 目标已删除，不属于当前门禁。
 2. 跑 第 6.1 节 真实 OpenSSH，补齐真实协议兼容性证据。
-3. 跑 第 6.2 节 真实 Provider（明确区分 Node SDK 与 Python LangChain 两条路径）。
+3. 跑第 6.2 节真实 Python Agent Provider 探针，并记录实际厂商、模型和脱敏结果。
 4. 把结果写回 `docs/rewrite-cpp-python.md`（带日期、版本、通过/失败组合），再更新 `docs/changelog.md`。
-5. 第 7.1 节的 `yukinal-desktop --lib` launch 问题已随 Rust 宿主删除而消失，无需处理。
-6. 若要推送：确认只提交已完成且可复核的文件，Git 身份用 `Bad0RANG3 <badorangeovo@Outlook.com>`，且**不要**提交 `ssh_agent_development_brief.md`。
+5. 按 A1–A4、O1–O2、F1–F4、R1 完成真实目标任务与 Windows/macOS/Linux 安装版 GUI 验收，再决定稳定版发布。
+6. Git 身份使用 `Bad0RANG3 <badorangeovo@Outlook.com>`，且**不要**提交 `ssh_agent_development_brief.md`。
