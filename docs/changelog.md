@@ -2,9 +2,9 @@
 
 本文件记录对用户有意义的版本变化和交付状态。详细实现与历史讨论可通过 Git 记录追溯。
 
-## 2.0.0-perview — 2026-10-20
+## 2.0.0-rc.1 — 2026-10-20
 
-这是拟发布的 Yukinal 2.0 预览候选。包含桌面工作区标签导航、Agent 会话与运行状态恢复、SSH 认证挑战处理、流式传输和主机执行策略、控制平面租户策略及审批生命周期改进，并同步强化 IPC 契约、打包清单校验与跨平台代码门禁。详细范围、验证结果与仍需外部环境完成的验收见下方记录及[交付与发布](./release.md)。
+这是重写后首个跨平台安装包候选，尚不是稳定版。除桌面工作区标签导航、Agent 会话恢复、SSH 认证挑战、流式传输和控制平面改进外，本候选增加 Windows NSIS、macOS DMG、Debian Linux 安装包构建与安装/启动/卸载 smoke。自动 smoke 不替代真实 Provider、SSH、GUI 文件拖放、签名和公证验收；发布状态见[交付与发布](./release.md)。
 
 - 2026-10-19 **桌面端工作页改为顶部浏览器式标签行**：文件／终端／日志／服务的打开入口从 `AgentHeader` 右侧控制区移到 `AgentHeader` 之下的独立一行（`apps/desktop/src/features/workpages/WorkspaceTabStrip.tsx`），四个启动按钮与已打开的工作页标签并排；标签从 `WorkpagesDock` 内部搬到了这一行，内容舞台不再被标签顶动，对话区始终留在下方。标签横向滚动时启动按钮不跟着滚走，窄容器下只折叠按钮文字（1000px）、提示文案（780px）与服务器名（560px），入口本身始终可见。启动按钮并入标签行后不再单独保留 `WorkpagesLauncher`，`agent-history.css` 中针对它的折叠规则随之迁到 `apps/desktop/src/styles/workpages-strip.css`。
 

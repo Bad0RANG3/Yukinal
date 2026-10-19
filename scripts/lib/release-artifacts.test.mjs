@@ -22,6 +22,8 @@ import {
   staleInputProblem,
   verifyReleaseManifest,
 } from "./release-artifacts.mjs";
+import { renderUnixLauncher, renderWindowsLauncher } from "./launchers.mjs";
+import { wrapPngAsIco } from "./png-ico.mjs";
 
 function digestOf(text) {
   return createHash("sha256").update(text).digest("hex");
@@ -92,6 +94,32 @@ test("isSafeRelativePath accepts nested relative paths and rejects escapes", () 
   for (const unsafe of ["", "/abs", "C:\\abs", "C:/abs", "a/../b", "../b", "a//b", "a/./b", "a\\b", "a\0b"]) {
     assert.equal(isSafeRelativePath(unsafe), false, `expected ${JSON.stringify(unsafe)} to be unsafe`);
   }
+});
+
+test("platform launchers wire the frozen sidecars and packaged UI by relative paths", () => {
+  const windows = renderWindowsLauncher();
+  assert.match(windows, /YUKINAL_AGENT_ENTRY=%~dp0python-agent\\yukinal-agent\.exe/);
+  assert.match(windows, /YUKINAL_SSH_SERVICE_BINARY=%~dp0ssh-service\\yukinal-ssh-service\.exe/);
+  assert.match(windows, /yukinal-desktop-host\.exe.*--ui-dir.*%\*\r\n$/);
+
+  const unix = renderUnixLauncher();
+  assert.match(unix, /YUKINAL_AGENT_ENTRY=\"\$APP_DIR\/python-agent\/yukinal-agent\"/);
+  assert.match(unix, /YUKINAL_SSH_SERVICE_BINARY=\"\$APP_DIR\/ssh-service\/yukinal-ssh-service\"/);
+  assert.match(unix, /exec \"\$APP_DIR\/yukinal-desktop-host\" --ui-dir \"\$APP_DIR\/ui\" \"\$@\"/);
+});
+
+test("Windows installer icon embeds the product PNG in a portable ICO container", async () => {
+  const png = await readFile(join(process.cwd(), "apps/desktop/src/assets/brand-mark.png"));
+  const ico = wrapPngAsIco(png);
+  assert.equal(ico.readUInt16LE(0), 0);
+  assert.equal(ico.readUInt16LE(2), 1);
+  assert.equal(ico.readUInt16LE(4), 1);
+  assert.equal(ico.readUInt8(6), 128);
+  assert.equal(ico.readUInt8(7), 128);
+  assert.equal(ico.readUInt32LE(14), png.length);
+  assert.equal(ico.readUInt32LE(18), 22);
+  assert.deepEqual(ico.subarray(22), png);
+  assert.throws(() => wrapPngAsIco(Buffer.from("not a PNG")), /complete PNG image/);
 });
 
 test("sha256File hashes file bytes", async (t) => {

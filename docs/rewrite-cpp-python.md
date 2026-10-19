@@ -1588,12 +1588,13 @@ the `native/build-nmake` Release host and SSH service plus the existing frozen A
 rejected with both a size and a digest mismatch. `pnpm check` was green and
 publication hygiene was green.
 
-Honest gaps, recorded in the manifest's `notes` and in `docs/release.md`: no installer
-is produced (NSIS/MSI/DMG/deb, upgrade and data retention are not implemented),
-artifacts are unsigned, `.github/workflows/package.yml` does not exist, and the
-three-platform install and UI acceptance still needs real machines. `target/` is now
-ignored so the payload is never committed; the checksums prove the payload was not
-modified, not who produced it.
+**Historical status for this packaging milestone:** the manifest then recorded that
+no installer was produced. The 2026-10-20 candidate adds Windows NSIS, macOS DMG,
+Debian Linux packages, install/start/remove smoke scripts, and the release workflow;
+the current matrix and remaining acceptance gaps are in [release status](./release.md).
+Artifacts remain unsigned, and hosted smoke does not replace real provider/SSH or GUI
+file-transfer acceptance. `target/` stays ignored; checksums prove payload bytes, not
+publisher identity.
 
 ## MCP gate alignment in `host.tool.execute`
 

@@ -10,17 +10,17 @@ permissions:
 
 jobs:
   package:
-    name: ${{ matrix.os }} portable payload
+    name: ${{ matrix.os }} installer
     runs-on: ${{ matrix.os }}
     strategy:
       fail-fast: false
       matrix:
         include:
-          - os: ubuntu-latest
+          - os: ubuntu-24.04
             openssh_container_test: ON
           - os: windows-latest
             openssh_container_test: OFF
-          - os: macos-latest
+          - os: macos-15-intel
             openssh_container_test: OFF
     env:
       YUKINAL_SSH_CMAKE_BUILD_DIR: native/build-release
@@ -28,6 +28,22 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
+
+      - name: Install NSIS 3.12.0
+        if: matrix.os == 'windows-latest'
+        shell: pwsh
+        run: choco install nsis --version=3.12.0 --yes --no-progress
+
+      - name: Add NSIS to PATH
+        if: matrix.os == 'windows-latest'
+        shell: pwsh
+        run: |
+          $nsis = Join-Path ${env:ProgramFiles(x86)} 'NSIS'
+          $makensis = Join-Path $nsis 'makensis.exe'
+          if (-not (Test-Path -LiteralPath $makensis -PathType Leaf)) {
+            throw "NSIS 3.12.0 did not install makensis.exe at $makensis"
+          }
+          Add-Content -LiteralPath $env:GITHUB_PATH -Value $nsis
 
       - uses: pnpm/action-setup@008330803749db0355799c700092d9a85fd074e9 # v6.0.9
         with:
@@ -47,7 +63,7 @@ jobs:
             services/control-plane/pyproject.toml
 
       - name: Install Linux desktop dependencies
-        if: matrix.os == 'ubuntu-latest'
+        if: matrix.os == 'ubuntu-24.04'
         run: |
           sudo apt-get update
           sudo apt-get install -y libwebkit2gtk-4.1-dev librsvg2-dev libsecret-1-dev build-essential curl wget file libssl-dev
@@ -122,12 +138,123 @@ jobs:
           --host-exe "${{ steps.resolve.outputs.host_exe }}"
           --ssh-service-exe "${{ steps.resolve.outputs.ssh_service }}"
 
+      - name: Resolve staged payload
+        id: payload
+        shell: pwsh
+        run: |
+          $payload = Get-ChildItem -LiteralPath 'target/release/bundle' -Directory |
+            Where-Object { $_.Name -like 'yukinal-*' } |
+            Select-Object -First 1
+          if (-not $payload) { throw 'The staged release payload directory is missing.' }
+          "payload_dir=$($payload.FullName.Replace('\', '/'))" >> $env:GITHUB_OUTPUT
+
       - name: Verify release payload
         run: node scripts/package.mjs --verify --out target/release/bundle
 
+      - name: Build Windows NSIS installer
+        if: matrix.os == 'windows-latest'
+        shell: pwsh
+        run: ./scripts/build-windows-installer.ps1
+
+      - name: Smoke Windows install, launch, uninstall, and data retention
+        if: matrix.os == 'windows-latest'
+        shell: pwsh
+        run: |
+          $installer = Get-ChildItem -LiteralPath 'target/release/installers' -Filter '*-setup.exe' |
+            Select-Object -First 1
+          if (-not $installer) { throw 'The NSIS installer was not created.' }
+          ./scripts/smoke-windows-installer.ps1 -Installer $installer.FullName
+
+      - name: Build Debian package
+        if: matrix.os == 'ubuntu-24.04'
+        run: bash scripts/build-deb-linux.sh "${{ steps.payload.outputs.payload_dir }}" target/release/installers
+
+      - name: Smoke Debian install, launch, removal, and data retention
+        if: matrix.os == 'ubuntu-24.04'
+        run: |
+          installer=$(find target/release/installers -maxdepth 1 -type f -name '*.deb' -print -quit)
+          test -n "$installer"
+          bash scripts/smoke-deb-linux.sh "$installer"
+
+      - name: Build macOS disk image
+        if: matrix.os == 'macos-15-intel'
+        run: bash scripts/build-dmg-macos.sh "${{ steps.payload.outputs.payload_dir }}" target/release/installers
+
+      - name: Smoke DMG copy, launch, removal, and data retention
+        if: matrix.os == 'macos-15-intel'
+        run: |
+          installer=$(find target/release/installers -maxdepth 1 -type f -name '*.dmg' -print -quit)
+          test -n "$installer"
+          bash scripts/smoke-dmg-macos.sh "$installer"
+
       - uses: actions/upload-artifact@bbbca2ddaa5d8feaa63e36b76fdaad77386f024f # v7.0.0
         with:
-          name: yukinal-${{ matrix.os }}-${{ runner.arch }}-${{ github.run_id }}
-          path: target/release/bundle/
+          name: yukinal-release-${{ matrix.os }}-${{ runner.arch }}
+          path: |
+            target/release/bundle/
+            target/release/installers/
           if-no-files-found: error
           retention-days: 30
+
+  publish:
+    name: publish stable GitHub release
+    if: github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v') && !contains(github.ref_name, '-')
+    needs: package
+    runs-on: ubuntu-latest
+    permissions:
+      actions: read
+      contents: write
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ github.ref }}
+          persist-credentials: false
+
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef833 # v8.0.2
+        with:
+          pattern: yukinal-release-*
+          path: target/release/downloads
+          merge-multiple: false
+
+      - name: Verify tag version and assemble release assets
+        shell: bash
+        run: |
+          set -euo pipefail
+          tag_version="${GITHUB_REF_NAME#v}"
+          manifest_version="$(node -p "require('./package.json').version")"
+          if [[ "$tag_version" != "$manifest_version" ]]; then
+            echo "Tag $GITHUB_REF_NAME does not match package version $manifest_version" >&2
+            exit 1
+          fi
+
+          mkdir -p target/release/assets
+          for artifact in target/release/downloads/yukinal-release-*; do
+            [[ -d "$artifact" ]] || { echo "No downloaded package artifact: $artifact" >&2; exit 1; }
+            installer_dir="$artifact/installers"
+            manifest_dir="$artifact/bundle"
+            find "$installer_dir" -maxdepth 1 -type f \
+              \( -name '*.exe' -o -name '*.deb' -o -name '*.dmg' \) -exec cp {} target/release/assets/ \;
+            artifact_name="${artifact##*/yukinal-release-}"
+            cp "$manifest_dir/release-manifest.json" "target/release/assets/release-manifest-$artifact_name.json"
+            cp "$manifest_dir/SHA256SUMS.txt" "target/release/assets/payload-checksums-$artifact_name.txt"
+          done
+
+          shopt -s nullglob
+          installers=(target/release/assets/*.exe target/release/assets/*.deb target/release/assets/*.dmg)
+          if [[ ${#installers[@]} -ne 3 ]]; then
+            echo "Expected exactly three platform installers, found ${#installers[@]}" >&2
+            exit 1
+          fi
+          (cd target/release/assets && sha256sum *.exe *.deb *.dmg release-manifest-*.json payload-checksums-*.txt > SHA256SUMS.txt)
+
+      - name: Publish install packages
+        env:
+          GH_TOKEN: ${{ github.token }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          gh release create "$GITHUB_REF_NAME" target/release/assets/* \
+            --verify-tag \
+            --latest \
+            --title "Yukinal ${GITHUB_REF_NAME#v}" \
+            --notes "Windows NSIS, macOS DMG, and Debian Linux installers. These binaries are unsigned and the macOS app is not notarized; complete interactive/provider/SSH/file-transfer acceptance before broad production deployment."

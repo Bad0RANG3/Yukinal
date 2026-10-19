@@ -43,7 +43,7 @@
  */
 
 import { spawnSync } from "node:child_process";
-import { copyFileSync, existsSync, mkdirSync, readFileSync, rmSync, statSync } from "node:fs";
+import { copyFileSync, existsSync, mkdirSync, readFileSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { cp, readdir, readFile, writeFile } from "node:fs/promises";
 import { basename, dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -62,6 +62,8 @@ import {
   staleInputProblem,
   verifyReleaseManifest,
 } from "./lib/release-artifacts.mjs";
+import { renderUnixLauncher, renderWindowsLauncher } from "./lib/launchers.mjs";
+import { wrapPngAsIco } from "./lib/png-ico.mjs";
 
 const root = resolve(dirname(fileURLToPath(import.meta.url)), "..");
 const executableSuffix = process.platform === "win32" ? ".exe" : "";
@@ -434,8 +436,9 @@ async function stagedPythonDistributions(payloadRoot) {
 
 function manifestNotes(inputs, staleExempted) {
   const notes = [
-    "This directory is a staged distributable, not an installed release.",
-    "No installer is generated (NSIS/MSI/DMG/deb, upgrade and data retention are not implemented).",
+    "This directory is the verified application payload used by the platform installer builders.",
+    "The Windows, macOS, and Debian installers are assembled by the release-candidate workflow.",
+    "Application data is stored outside the install directory and is retained on uninstall.",
     "Artifacts are unsigned; signing and notarisation are not configured.",
     "`sourceRevision`/`dirty` describe the worktree the staging ran in; the `inputs` section " +
       "records the sha256 and build time of each build input actually staged (the three " +
@@ -586,6 +589,21 @@ async function stage(options) {
   copyFileSync(opensslLicensePath(), join(payloadRoot, "ssh-service", "OPENSSL-LICENSE.txt"));
   copyFileSync(join(root, "NOTICE"), join(payloadRoot, "NOTICE"));
   copyFileSync(join(root, "LICENSE"), join(payloadRoot, "LICENSE"));
+  mkdirSync(join(payloadRoot, "assets"), { recursive: true });
+  copyFileSync(
+    join(root, "apps", "desktop", "src", "assets", "brand-mark.png"),
+    join(payloadRoot, "assets", "yukinal.png"),
+  );
+  copyFileSync(
+    join(root, "apps", "desktop", "design", "app-icon.png"),
+    join(payloadRoot, "assets", "app-icon.png"),
+  );
+  writeFileSync(
+    join(payloadRoot, "assets", "yukinal.ico"),
+    wrapPngAsIco(readFileSync(join(root, "apps", "desktop", "src", "assets", "brand-mark.png"))),
+  );
+  await writeFile(join(payloadRoot, "yukinal.cmd"), renderWindowsLauncher(), "utf8");
+  await writeFile(join(payloadRoot, "yukinal"), renderUnixLauncher(), { encoding: "utf8", mode: 0o755 });
 
   const manifest = buildReleaseManifest({
     version,

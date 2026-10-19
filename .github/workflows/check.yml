@@ -12,8 +12,8 @@ on:
 jobs:
   gate:
     name: pnpm check (${{ matrix.os }})
-    # Release packaging is not implemented yet; keep the tag-triggered check workflow
-    # focused on the dependency advisory audit.
+    # The release-candidate workflow runs the full gate before building platform
+    # installers, so the tag-triggered check workflow only repeats the advisory audit.
     if: github.event_name != 'push' || github.ref_type != 'tag'
     strategy:
       fail-fast: false

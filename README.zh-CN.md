@@ -12,7 +12,7 @@
 [English](README.md) · [**中文**](README.zh-CN.md)
 
 [![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](./LICENSE)
-[![Version](https://img.shields.io/badge/interface-2.0.0--perview-informational.svg)](./packages/shared/src/version.ts)
+[![Version](https://img.shields.io/badge/interface-2.0.0--rc.1-informational.svg)](./packages/shared/src/version.ts)
 [![Platform](https://img.shields.io/badge/platform-Windows%20%7C%20macOS%20%7C%20Linux-6f42c1.svg)](#构建与运行)
 [![Python](https://img.shields.io/badge/python-3.11%2B-3776ab.svg)](./agent/README.md)
 [![Node](https://img.shields.io/badge/node-%3E%3D24-339933.svg)](package.json)
@@ -23,10 +23,11 @@
 ---
 
 > **状态：** Yukinal 2.0 正在重写中：SSH 操作迁移到独立的 C++ 服务和
-> Python Agent，React 界面仍是产品 UI。当前 app/package 接口版本为 `2.0.0-perview`。
+> Python Agent，React 界面仍是产品 UI。当前 app/package 接口版本为 `2.0.0-rc.1`。
 > Rust/Tauri 宿主与 legacy Node agent
-> 已从仓库删除，C++ WebView 宿主是唯一桌面宿主。打包（安装器、签名、公证）
-> **尚未实现**。详见[重写状态](./docs/rewrite-cpp-python.md)与
+> 已从仓库删除，C++ WebView 宿主是唯一桌面宿主。候选 CI 已构建 Windows NSIS、
+> macOS DMG 和 Debian Linux 安装包；代码签名、公证、真实 Provider/SSH 与文件传输验收仍待完成。
+> 详见[重写状态](./docs/rewrite-cpp-python.md)与
 > [交付与发布](./docs/release.md)。
 
 ## 目录
@@ -118,7 +119,8 @@ Yukinal 是面向少量 Linux 服务器运维的桌面工作区。用户提出�
 | 持久审批：逐次调用指纹绑定与有效期 | ✅ 已实现 |
 | 控制平面：租户、节点、任务、审批、策略、审计 | ✅ 已实现（SQLite 验证） |
 | 任务/计划持久恢复 | 🚧 部分完成 |
-| 安装器、签名、公证、跨平台验收 | ❌ 未实现 |
+| Windows NSIS、macOS DMG、Debian Linux 安装包 | 🧪 候选 CI 构建与安装冒烟 |
+| 代码签名、公证、真实 Provider/SSH 与 GUI 验收 | ❌ 待完成 |
 
 完整细节与证据见[重写方案](./docs/rewrite-cpp-python.md)与[交付与发布](./docs/release.md)。
 
@@ -179,7 +181,8 @@ pnpm desktop:dev:cpp   # C++ WebView 宿主 + Vite（真实桌面）
 pnpm desktop:dev       # 仅浏览器 UI 预览（无 SQLite/SSH/PTY）
 ```
 
-打包只暂存分发布局，**尚不生成安装器**：
+`pnpm package` 会暂存带校验清单的分发布局。release-candidate workflow 会生成
+Windows NSIS、macOS DMG 与 Debian Linux 安装包，并在托管 runner 上安装、启动、卸载和检查数据保留：
 
 ```bash
 pnpm build:ssh-service

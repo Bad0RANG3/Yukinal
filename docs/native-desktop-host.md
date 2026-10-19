@@ -162,8 +162,10 @@ C++; the React UI keeps using the shared IPC contract.
    RPC handlers (`host.tool.execute`, investigation and MCP) are next.
 5. Port task history, schedules, recovery, audit and remaining UI commands. Validate
    each command and event against the shared contracts and existing desktop tests.
-6. Build and smoke-test Windows, macOS, and Linux installers (not implemented yet;
-   see [the Rust removal plan](./rust-removal-plan.md)).
+6. The candidate workflow builds and installation-smokes Windows NSIS, macOS DMG,
+   and Debian Linux packages. Real provider/SSH tasks, GUI file-manager drag/drop,
+   signing, notarization, upgrades, and restart acceptance remain; see
+   [release status](./release.md).
 
 ## Native-host storage and server CRUD
 

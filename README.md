@@ -12,7 +12,7 @@ controlled AI Agent with a hardened, structured SSH service.
 [**English**](README.md) · [中文](README.zh-CN.md)
 
 [![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](./LICENSE)
-[![Version](https://img.shields.io/badge/interface-2.0.0--perview-informational.svg)](./packages/shared/src/version.ts)
+[![Version](https://img.shields.io/badge/interface-2.0.0--rc.1-informational.svg)](./packages/shared/src/version.ts)
 [![Platform](https://img.shields.io/badge/platform-Windows%20%7C%20macOS%20%7C%20Linux-6f42c1.svg)](#build-and-run)
 [![Python](https://img.shields.io/badge/python-3.11%2B-3776ab.svg)](./agent/README.md)
 [![Node](https://img.shields.io/badge/node-%3E%3D24-339933.svg)](package.json)
@@ -24,10 +24,11 @@ controlled AI Agent with a hardened, structured SSH service.
 
 > **Status:** Yukinal 2.0 is an in-progress rewrite that moves SSH operations
 > behind a standalone C++ service and a Python Agent while the React interface
-> stays the product UI. The current app/package interface version is `2.0.0-perview`.
+> stays the product UI. The current app/package interface version is `2.0.0-rc.1`.
 > The Rust/Tauri host and the legacy Node agent have been removed; the C++
-> WebView host is now the only desktop host. Packaging (installers, signing,
-> notarization) is **not implemented yet**. See
+> WebView host is now the only desktop host. A CI candidate pipeline builds Windows
+> NSIS, macOS DMG, and Debian Linux installers; signing, notarization, and live
+> provider/SSH/file-transfer acceptance are still pending. See
 > [rewrite status](./docs/rewrite-cpp-python.md) and
 > [release status](./docs/release.md).
 
@@ -122,7 +123,8 @@ desktop path.
 | Durable approvals with per-call fingerprint binding and expiry | ✅ Implemented |
 | Control plane: tenants, nodes, tasks, approvals, policy, audit | ✅ Implemented (SQLite-verified) |
 | Durable task/plan recovery | 🚧 Partial |
-| Installers, signing, notarization, cross-platform acceptance | ❌ Not implemented |
+| Windows NSIS, macOS DMG, Debian Linux installers | 🧪 Candidate CI build and install smoke |
+| Code signing, notarization, real provider/SSH and GUI acceptance | ❌ Pending |
 
 Full detail and evidence live in the [rewrite log](./docs/rewrite-cpp-python.md)
 and [release status](./docs/release.md).
@@ -193,7 +195,9 @@ while an AI run or unsent input is present. Native C++ changes require rebuildin
 and reopening the host. Set `YUKINAL_DESKTOP_DEV_PORT` to choose another local port
 when the default port is occupied.
 
-Packaging stages a distributable layout but does **not** produce installers yet:
+`pnpm package` stages a checksummed distributable payload. The release-candidate
+workflow wraps it as a Windows NSIS installer, macOS DMG, and Debian Linux package,
+then installs, launches, removes, and checks data retention on each hosted runner:
 
 ```bash
 pnpm build:ssh-service

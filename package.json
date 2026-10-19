@@ -1,6 +1,6 @@
 {
   "name": "yukinal",
-  "version": "2.0.0-perview",
+  "version": "2.0.0-rc.1",
   "private": true,
   "type": "module",
   "description": "AI-native Remote Development & Infrastructure Workspace",
