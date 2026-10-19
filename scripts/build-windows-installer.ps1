@@ -47,9 +47,9 @@ $script = Join-Path $repo 'packaging/windows/yukinal.nsi'
 
 $arguments = @(
   "/DAPP_VERSION=$($manifest.version)",
-  "/DPAYLOAD_DIR=`"$payload`"",
-  "/DOUT_FILE=`"$installer`"",
-  "/DICON_FILE=`"$iconOutput`"",
+  "/DPAYLOAD_DIR=$payload",
+  "/DOUT_FILE=$installer",
+  "/DICON_FILE=$iconOutput",
   $script
 )
 & $makensis.Source @arguments

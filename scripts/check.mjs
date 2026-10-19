@@ -617,6 +617,10 @@ async function main() {
     // The packaging integrity contract: a staged payload either matches its
     // manifest and checksum listing, or verification fails loudly.
     { name: "release artifact tests", command: process.execPath, args: ["--test", "scripts/lib/release-artifacts.test.mjs"], required: true },
+    // The macOS Python framework in PyInstaller's onedir uses internal symlinks;
+    // materialization must preserve their contents while refusing targets outside
+    // the runtime before the regular-file release manifest is built.
+    { name: "Agent runtime symlink tests", command: process.execPath, args: ["--test", "scripts/lib/materialize-internal-symlinks.test.mjs"], required: true },
     // Guardrails for the runner itself. An explicit build directory that cannot run
     // tests must stop the gate rather than drop 13 native targets behind a green line.
     { name: "gate runner guardrail tests", command: process.execPath, args: ["--test", "scripts/lib/gate.test.mjs"], required: true },

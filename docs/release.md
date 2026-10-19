@@ -1,6 +1,6 @@
 # 交付与发布
 
-**候选版本（2026-10-20）：`2.0.0-rc.4`。** 版本源为 `packages/shared/src/version.ts`，JavaScript workspace 清单、IPC fixture、原生 sidecar 版本和 README 由版本测试对齐。[release-candidate workflow](../.github/workflows/release-candidate.yml) 在 Windows、Ubuntu 24.04、macOS 15 Intel 上运行完整门禁，生成冻结 Agent 与 C++ 载荷，构建 NSIS/DEB/DMG，安装并 smoke 启动/卸载后上传校验清单和安装包。稳定 `vX.Y.Z` 标签仅在三平台作业全部成功后创建 GitHub Release；候选标签只保存 CI artifact。候选 [GitHub Run 39298269150](https://github.com/Bad0RANG3/Yukinal/actions/runs/39298269150) 暴露 Windows 路径模拟和 Windows Agent 虚拟环境两项问题，rc.2 修复路径模拟、rc.3 加入按平台创建 Agent 环境。RC.2 的 Ubuntu 完整门禁又发现 SSH 终端远端关闭时工作进程未退出；rc.4 让桌面宿主在收到 `closed` 帧后关闭 worker stdin，并增加回归覆盖，等待新的三平台验证。当前产物配置未签名/公证，真实 Provider、SSH 和安装版 GUI 文件传输验收仍未完成，因此不能据此宣布稳定版已交付。
+**候选版本（2026-10-20）：`2.0.0-rc.5`。** 版本源为 `packages/shared/src/version.ts`，JavaScript workspace 清单、IPC fixture、原生 sidecar 版本和 README 由版本测试对齐。[release-candidate workflow](../.github/workflows/release-candidate.yml) 在 Windows、Ubuntu 24.04、macOS 15 Intel 上运行完整门禁，生成冻结 Agent 与 C++ 载荷，构建 NSIS/DEB/DMG，安装并 smoke 启动/卸载后上传校验清单和安装包。稳定 `vX.Y.Z` 标签仅在三平台作业全部成功后创建 GitHub Release；候选标签只保存 CI artifact。候选 [GitHub Run 39298269150](https://github.com/Bad0RANG3/Yukinal/actions/runs/39298269150) 暴露 Windows 路径模拟和 Windows Agent 虚拟环境两项问题，rc.2 修复路径模拟、rc.3 加入按平台创建 Agent 环境。RC.2 Ubuntu 曾因终端 worker 在远端 shell 关闭后未退出而失败；rc.4 让桌面宿主在收到 `closed` 帧后关闭 worker stdin 并加入回归。RC.3 Ubuntu 的门禁和 Debian smoke 通过，但 macOS 在载荷暂存时遇到 PyInstaller Python.framework 内部 symlink；rc.5 仅展开 runtime 内的安全链接并拒绝越界。RC.4 Windows 的 NSIS 编译因命令行宏值包含重复引号而失败；rc.5 移除宏值中的字面引号，并等待新的三平台验证。当前产物配置未签名/公证，真实 Provider、SSH 和安装版 GUI 文件传输验收仍未完成，因此不能据此宣布稳定版已交付。
 
 > **历史记录（截至 2026-10-17）：** Rust/Tauri 宿主移除和 C++ 分发布局的早期状态。下方旧 Tauri/MSI/Node runtime 的 run、哈希与验收只适用于当时源码；本页当前状态以 2026-10-20 更新为准。
 
@@ -24,7 +24,7 @@ C++ 宿主已接替旧的 Tauri 打包路径：`scripts/package.mjs` 把 C++ 桌
 
 2026-10-15 起的当前源码配置已把安装包资源切换为冻结 Python Agent、C++ SSH 服务和 `NOTICE`，移除了 Node Agent 与 Node runtime 的发行资源及下载步骤。安装版 smoke 会从 Tauri 资源映射暂存文件，在受限 PATH 下启动 Python Agent 并完成协议检查。当前工作树尚未生成或安装这一新布局的 Tauri 安装器；下表、历史快照和旧产物哈希记录的是先前携带 Node runtime 的版本，不能当作新布局的验收证据。
 
-当前候选版本为 `2.0.0-rc.4`。旧版 Tauri 的包运行记录不覆盖当前 C++ 宿主载荷。版本号以 `packages/shared/src/version.ts` 为源，测试检查 JavaScript 清单、IPC fixture 与 README；原生 Python Agent 客户端版本也必须同步。
+当前候选版本为 `2.0.0-rc.5`。旧版 Tauri 的包运行记录不覆盖当前 C++ 宿主载荷。版本号以 `packages/shared/src/version.ts` 为源，测试检查 JavaScript 清单、IPC fixture 与 README；原生 Python Agent 客户端版本也必须同步。
 
 | 项目 | 已有证据 | 发布前仍需完成 |
 | --- | --- | --- |

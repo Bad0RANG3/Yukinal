@@ -2,6 +2,10 @@
 
 本文件记录对用户有意义的版本变化和交付状态。详细实现与历史讨论可通过 Git 记录追溯。
 
+## 2.0.0-rc.5 — 2026-10-20
+
+修复 macOS Agent 冻结载荷暂存：RC.3 的 macOS job 发现 PyInstaller 会在 Python.framework 中产生内部 symlink，而发布 manifest 只接受普通文件。构建现在只展开目标仍在 Agent runtime 内的链接，并拒绝越界链接、目录循环和特殊文件；新增覆盖展开和越界拒绝的测试。修复 Windows NSIS 构建参数把路径双重引号传入 `OutFile` 导致的安装器编译失败。等待 RC.5 三平台完整验证。
+
 ## 2.0.0-rc.4 — 2026-10-20
 
 修复 macOS/Linux 候选门禁中发现的 SSH 终端子进程生命周期问题：远端 shell 关闭后，桌面宿主收到 `closed` 帧会关闭工作进程的 stdin，确保输入读取线程退出并回收子进程。终端宿主集成 mock 现在会等待 stdin EOF，以覆盖此行为。rc.4 等待三平台全门禁和安装器 smoke 结果。

@@ -4,6 +4,7 @@ import { existsSync, rmSync, statSync } from "node:fs";
 import { join } from "node:path";
 import { spawnSync } from "node:child_process";
 import { fileURLToPath } from "node:url";
+import { materializeInternalSymlinks } from "./lib/materialize-internal-symlinks.mjs";
 
 const root = fileURLToPath(new URL("..", import.meta.url));
 const venvPython = join(
@@ -69,6 +70,17 @@ if (result.error) {
   process.exit(1);
 }
 if (result.status !== 0) process.exit(result.status ?? 1);
+
+if (process.platform === "darwin") {
+  const runtime = join(output, "yukinal-agent");
+  try {
+    const links = await materializeInternalSymlinks(runtime);
+    console.log(`Materialized ${links.length} internal macOS Agent symlink(s).`);
+  } catch (error) {
+    console.error(`Could not safely materialize the macOS Agent runtime: ${error.message}`);
+    process.exit(1);
+  }
+}
 
 const executable = join(output, "yukinal-agent", process.platform === "win32" ? "yukinal-agent.exe" : "yukinal-agent");
 if (!existsSync(executable) || !statSync(executable).isFile()) {
