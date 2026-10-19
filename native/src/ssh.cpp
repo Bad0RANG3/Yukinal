@@ -17,7 +17,6 @@
 #include <iostream>
 #include <memory>
 #include <mutex>
-#include <stop_token>
 #include <string_view>
 #include <thread>
 #include <utility>
@@ -1426,6 +1425,7 @@ struct TerminalInputCommand {
 struct TerminalInputQueue {
   std::mutex mutex;
   std::condition_variable changed;
+  std::atomic_bool stop_requested{false};
   std::deque<TerminalInputCommand> commands;
   std::size_t queued_data_bytes = 0;
   std::size_t expected_auth_responses = 0;
@@ -1441,12 +1441,12 @@ constexpr std::size_t kMaxQueuedTerminalCommands = 256;
 
 enum class TerminalInputReadStatus { data, timeout, eof, error };
 
-TerminalInputReadStatus read_terminal_input_chunk(std::stop_token stop,
-                                                  std::array<char, 4096>* buffer,
-                                                  std::size_t* bytes_read) {
+TerminalInputReadStatus read_terminal_input_chunk(
+    const std::shared_ptr<TerminalInputQueue>& input, std::array<char, 4096>* buffer,
+    std::size_t* bytes_read) {
   if (!buffer || !bytes_read) return TerminalInputReadStatus::error;
   *bytes_read = 0;
-  if (stop.stop_requested()) return TerminalInputReadStatus::timeout;
+  if (input->stop_requested.load()) return TerminalInputReadStatus::timeout;
 #ifdef _WIN32
   const HANDLE standard_input = GetStdHandle(STD_INPUT_HANDLE);
   if (standard_input == nullptr || standard_input == INVALID_HANDLE_VALUE) {
@@ -1542,7 +1542,7 @@ TerminalInputReadStatus read_terminal_input_chunk(std::stop_token stop,
 }
 
 bool queue_terminal_input_line(const std::shared_ptr<TerminalInputQueue>& input,
-                               std::string line, std::stop_token stop) {
+                               std::string line) {
   StringWiper line_wiper{&line};
   if (line.size() > kMaxTerminalInputJsonBytes) {
     std::lock_guard lock(input->mutex);
@@ -1630,13 +1630,12 @@ bool queue_terminal_input_line(const std::shared_ptr<TerminalInputQueue>& input,
     }
 
     std::unique_lock lock(input->mutex);
-    std::stop_callback wake_on_stop(stop, [&input] { input->changed.notify_all(); });
     input->changed.wait(lock, [&] {
-      return stop.stop_requested() || input->eof || input->auth_prompt_active ||
+      return input->stop_requested.load() || input->eof || input->auth_prompt_active ||
              (input->commands.size() < kMaxQueuedTerminalCommands &&
               input->queued_data_bytes + command.data.size() <= kMaxQueuedTerminalInputBytes);
     });
-    if (stop.stop_requested()) return false;
+    if (input->stop_requested.load()) return false;
     if (input->eof || input->auth_prompt_active) {
       input->invalid = true;
       input->changed.notify_all();
@@ -1655,14 +1654,13 @@ bool queue_terminal_input_line(const std::shared_ptr<TerminalInputQueue>& input,
   }
 }
 
-void read_terminal_input(const std::shared_ptr<TerminalInputQueue>& input,
-                         std::stop_token stop) {
+void read_terminal_input(const std::shared_ptr<TerminalInputQueue>& input) {
   std::string pending_line;
   std::array<char, 4096> buffer{};
   bool input_eof = false;
-  while (!stop.stop_requested()) {
+  while (!input->stop_requested.load()) {
     std::size_t bytes_read = 0;
-    const auto status = read_terminal_input_chunk(stop, &buffer, &bytes_read);
+    const auto status = read_terminal_input_chunk(input, &buffer, &bytes_read);
     if (status == TerminalInputReadStatus::timeout) continue;
     if (status == TerminalInputReadStatus::eof) {
       input_eof = true;
@@ -1680,7 +1678,7 @@ void read_terminal_input(const std::shared_ptr<TerminalInputQueue>& input,
         if (!pending_line.empty() && pending_line.back() == '\r') pending_line.pop_back();
         std::string line = std::move(pending_line);
         pending_line.clear();
-        if (!queue_terminal_input_line(input, std::move(line), stop)) goto finished;
+        if (!queue_terminal_input_line(input, std::move(line))) goto finished;
         continue;
       }
       pending_line.push_back(character);
@@ -1692,9 +1690,9 @@ void read_terminal_input(const std::shared_ptr<TerminalInputQueue>& input,
       }
     }
   }
-  if (input_eof && !pending_line.empty() && !stop.stop_requested()) {
+  if (input_eof && !pending_line.empty() && !input->stop_requested.load()) {
     if (!pending_line.empty() && pending_line.back() == '\r') pending_line.pop_back();
-    (void)queue_terminal_input_line(input, std::move(pending_line), stop);
+    (void)queue_terminal_input_line(input, std::move(pending_line));
   }
 finished:
   wipe(&pending_line);
@@ -1704,6 +1702,26 @@ finished:
   }
   input->changed.notify_all();
 }
+
+class TerminalInputReader {
+ public:
+  explicit TerminalInputReader(std::shared_ptr<TerminalInputQueue> input)
+      : input_(std::move(input)), reader_([input = input_] { read_terminal_input(input); }) {}
+
+  ~TerminalInputReader() {
+    if (!reader_.joinable()) return;
+    input_->stop_requested.store(true);
+    input_->changed.notify_all();
+    reader_.join();
+  }
+
+  TerminalInputReader(const TerminalInputReader&) = delete;
+  TerminalInputReader& operator=(const TerminalInputReader&) = delete;
+
+ private:
+  std::shared_ptr<TerminalInputQueue> input_;
+  std::thread reader_;
+};
 
 bool emit_terminal_message(const nlohmann::json& message) {
   std::cout << message.dump(-1, ' ', false, nlohmann::json::error_handler_t::replace)
@@ -1835,9 +1853,7 @@ int run_terminal_session(const TargetConfig& target, std::uint16_t columns,
     return 2;
   }
   const auto input = std::make_shared<TerminalInputQueue>();
-  std::jthread input_reader([input](std::stop_token stop) {
-    read_terminal_input(input, stop);
-  });
+  TerminalInputReader input_reader(input);
   TerminalAuthContext terminal_auth{input};
   ExecResult connection_result;
   SshResources resources;
