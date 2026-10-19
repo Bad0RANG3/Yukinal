@@ -58,6 +58,9 @@ pnpm-debug.log*
 # local agent worktrees: per-session checkouts, never part of the repository
 .claude/
 
+# External task input; keep it local and out of release provenance.
+ssh_agent_development_brief.md
+
 # 2.0 SSH rewrite: Python virtualenv, caches and native build trees
 .venv/
 agent/.venv/
