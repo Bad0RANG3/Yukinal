@@ -1,0 +1,47 @@
+name: live Provider acceptance
+
+on:
+  workflow_dispatch:
+    inputs:
+      enable_billable_provider_request:
+        description: Run one live tool-call request against the configured provider
+        required: true
+        type: boolean
+        default: false
+
+permissions:
+  contents: read
+
+concurrency:
+  group: live-provider-acceptance
+  cancel-in-progress: false
+
+jobs:
+  provider:
+    if: ${{ inputs.enable_billable_provider_request }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    env:
+      YUKINAL_LIVE_PROVIDER_TESTS: "1"
+      YUKINAL_LIVE_PROVIDER: ${{ vars.YUKINAL_LIVE_PROVIDER }}
+      YUKINAL_LIVE_MODEL: ${{ vars.YUKINAL_LIVE_MODEL }}
+      YUKINAL_LIVE_BASE_URL: ${{ vars.YUKINAL_LIVE_BASE_URL }}
+      YUKINAL_LIVE_API_VERSION: ${{ vars.YUKINAL_LIVE_API_VERSION }}
+      YUKINAL_LIVE_WIRE_API: ${{ vars.YUKINAL_LIVE_WIRE_API }}
+      YUKINAL_LIVE_API_KEY: ${{ secrets.YUKINAL_LIVE_API_KEY }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - uses: actions/setup-python@83679a892e2d95755f2dac6acb0bfd1e9ac5d548 # v6.1.0
+        with:
+          python-version: "3.14"
+          cache: pip
+          cache-dependency-path: agent/pyproject.toml
+
+      - name: Install Python Agent provider dependencies
+        run: python -m pip install -e "agent[agent,models]"
+
+      - name: Run live Provider tool-loop acceptance
+        run: python scripts/accept_live_python_provider.py

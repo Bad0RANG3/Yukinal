@@ -238,6 +238,8 @@ ctest --test-dir native/build-check -C Release -R openssh_container_integration 
 
 当前 Python Agent 已有显式 opt-in 的 live 工具调用验收脚本 `scripts/accept_live_python_provider.py`。它经实际 LangChain provider adapter 和 `ModelDrivenAgent` 发起一次模型请求，只暴露一个本地只读探针工具，验证模型确实调用工具并准确返回工具生成的随机 token；不写远端，也不打印 API key、完整回答或原始异常。
 
+可在 GitHub Actions 手动运行 `.github/workflows/provider-live-acceptance.yml`：先用 repository Variables 配置 `YUKINAL_LIVE_PROVIDER`、`YUKINAL_LIVE_MODEL` 和需要的 endpoint 参数，用 repository Secret 配置 `YUKINAL_LIVE_API_KEY`，然后显式勾选 `enable_billable_provider_request`。未勾选时 Provider job 跳过；勾选后只发出一条真实工具调用请求。探针本身也要求 `YUKINAL_LIVE_PROVIDER_TESTS=1`，两道 opt-in 都保留。该 workflow 只验 Provider/tool loop，不代替真实 MCP/SSH 和安装版 GUI 任务。
+
 PowerShell（先安装 `agent[agent,models,test]`）：
 
 ```powershell

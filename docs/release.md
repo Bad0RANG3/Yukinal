@@ -131,4 +131,6 @@ macOS/Linux 上将安装命令中的 `agent/.venv/Scripts/python.exe` 换成
 
 真实 Provider 的可选探针为 `scripts/accept_live_python_provider.py`，用 `YUKINAL_LIVE_PROVIDER_TESTS=1` 显式启用，并以 `YUKINAL_LIVE_PROVIDER`、`YUKINAL_LIVE_MODEL`、`YUKINAL_LIVE_API_KEY` 和可选 endpoint 参数选择当前 Python Agent adapter。探针真实请求一次模型并验证实际工具调用，但只使用本地只读 token 工具，不覆盖安装版桌面、MCP、SSH 目标或完整 A/O/F/R 路径。真实 Provider、MCP 和 SSH 任务需单独记录实现、版本、认证方式、测试目标和通过的输入组合；没有跑到的组合继续标为未验证。
 
+托管真实 Provider 探针位于 [provider-live-acceptance workflow](../.github/workflows/provider-live-acceptance.yml)，仅支持手动触发且默认跳过；操作者必须显式勾选一次计费请求，并预先配置 repository Variables 与 `YUKINAL_LIVE_API_KEY` Secret。workflow 不把密钥写入日志或仓库。
+
 发布记录不得包含真实凭据、私钥、完整远端正文或未脱敏的模型上下文。签名、公证和自动更新尚未配置；向外提供安装包时必须明确说明。
