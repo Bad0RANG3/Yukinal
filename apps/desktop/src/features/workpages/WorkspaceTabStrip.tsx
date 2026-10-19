@@ -105,7 +105,7 @@ export function TabStripView({ pages, activeId, orientation, serverNames, onLaun
             const selected = page.id === activeId;
             const label = WORKPAGE_LABEL[page.kind];
             return (
-              <div className="workspace-tabstrip-cell" key={page.id} data-active={selected}>
+              <div className="workspace-tabstrip-cell" key={page.id} data-active={selected} role="presentation">
                 <button
                   type="button"
                   role="tab"

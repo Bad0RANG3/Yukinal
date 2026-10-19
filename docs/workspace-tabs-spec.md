@@ -215,13 +215,13 @@ v1 把标签条放进 AI 面板内部（2.3），`readCaptionSurface` 与面数�
 | 文件 | 覆盖 |
 | --- | --- |
 | `tests/workpages.test.ts` | 8 页上限与 `recent` 前移；方向轴决定方向键而不决定排布标识；方向值持久化与清洗（含 `"diagonal"`、`null` 回落到 `horizontal`，以及工作页对象键集合不变） |
-| `tests/workpages-strip.test.tsx` | 空态下启动入口仍渲染且不出现空 tablist；开标签后的 `tablist`/`tab`/`aria-controls`/roving `tabIndex`；关闭按钮独立命名且不进 Tab 序；`data-orientation` 与 `aria-orientation` 同源；无目标标签不画空 `<small>` |
+| `tests/workpages-strip.test.tsx` | 空态下启动入口仍渲染且不出现空 tablist；开标签后的 `tablist`/`tab`/`aria-controls`/roving `tabIndex`；标签外层的 `role="presentation"`（tablist 的拥有对象必须是 tab 本身）；关闭按钮独立命名且不进 Tab 序；`data-orientation` 与 `aria-orientation` 同源；无目标标签不画空 `<small>` |
 
 未做的两项：面数据不受影响（`readCaptionSurface` 的几何回归）与 `pendingApprovalIds` 提示按钮 —— 前者因为本轮没碰原生契约，后者因为 v1 明确不做按标签的状态提示（见 4.2）。
 
 ### 5.3 可访问性与键盘清单（v1 实际状态）
 
-- [x] 标签条 `role="tablist"` + `aria-label="已打开的工作页"`，标签 `role="tab"`、`aria-selected`、roving `tabIndex`。
+- [x] 标签条 `role="tablist"` + `aria-label="已打开的工作页"`，标签 `role="tab"`、`aria-selected`、roving `tabIndex`。每个标签外层还有一个布局用的 `div.workspace-tabstrip-cell`，它带 `role="presentation"` —— 否则 `tablist` 的直接拥有者是那个 div，ARIA 的 required-owned-element 规则落空（`role="presentation"` 的子元素会被跳过，`tab` 重新成为拥有对象）。
 - [x] 面板 `role="tabpanel"` + `aria-controls`/`aria-labelledby` 双向对应；被关闭页不渲染（`pages` 里已移除），不残留可聚焦元素。
 - [x] `ArrowLeft/Right`（水平）或 `ArrowUp/Down`（垂直）、`Home`/`End`；关闭用 `Delete`；鼠标中键关闭。
 - [x] 关闭后焦点回退到后继标签，无邻居时回退到启动器（`tab-navigation.ts` 的 `focusWorkpageTab`）。
@@ -264,4 +264,17 @@ v1 把标签条放进 AI 面板内部（2.3），`readCaptionSurface` 与面数�
 - `pnpm -r --if-present typecheck` 与 `pnpm -r --if-present test`：四个 workspace 全绿。
 - `pnpm check`（文档链接、密钥扫描、契约、类型、测试、sidecar 冒烟、CTest）：`check: green`。
 - **未做**：真实桌面宿主与真实供体的实机验收；原生对照（拖动、双击最大化、≥1181px 融合路径、`smoke` 非融合路径）。这些在合入前仍需按第 3.4 节单独验收。
+
+### 6.3 分支状态与合入前要处理的事
+
+分支 `feat/workspace-tab-strip` 起于 `736f06a`，落后 `origin/main` 9 个提交。试合并（`git merge-tree`）会在 4 个文件上产生内容冲突：
+
+| 文件 | `origin/main` 侧改动量 | 冲突原因 |
+| --- | --- | --- |
+| `apps/desktop/src/app/AppShell.tsx` | 94 行 | 同一处 `workspaceWorkpages`／`workspaceControls` 插槽 |
+| `apps/desktop/src/features/workpages/WorkpagesDock.tsx` | 146 行 | 标签条与启动器已从该文件移除，主干又改过它 |
+| `apps/desktop/src/features/workpages/workpages.css` | 170 行 | 同样规则块两边都动过 |
+| `apps/desktop/tests/workpages.test.ts` | 97 行 | 追加测试的位置重叠 |
+
+合并结果本身不丢文件：`ApprovalCard.tsx`／`NativeTaskApprovals.tsx`／`run-stream.ts` 等主干新增文件都在合并树里（753 个文件 vs 主干 747 vs 本分支 615）。但**必须 rebase 后逐个解冲突，不能把主干侧的审批改动当"删除"接受** —— 这条分支的全部主张就是不碰审批边界。
 

@@ -69,6 +69,9 @@ test("open tabs render as a named tablist with one roving tab stop", () => {
   const closeButtons = markup.match(/<button[^>]*workspace-tabstrip-close[^>]*>/g) ?? [];
   assert.equal(closeButtons.length, 2);
   for (const tag of closeButtons) assert.ok(tag.includes('tabindex="-1"'), tag);
+  // 单元格只是布局壳：`role="presentation"` 让 tablist 的直接拥有者成为 tab 本身，
+  // 否则 tablist 拥有的是 div，ARIA 的 required-owned-element 规则就落空了。
+  assert.equal(markup.match(/class="workspace-tabstrip-cell"[^>]*role="presentation"/g)?.length, 2);
   assert.ok(markup.includes('id="workpage-tab-tool:terminal:server-a"'));
   assert.ok(markup.includes('aria-controls="workpage-panel-tool:terminal:server-a"'));
   assert.ok(markup.includes('id="workpage-tab-tool:logs:server-b"'));
