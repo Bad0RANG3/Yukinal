@@ -3,6 +3,7 @@
 #include <webview/webview.h>
 
 #include <atomic>
+#include <csignal>
 #include <filesystem>
 #include <functional>
 #include <mutex>
@@ -610,6 +611,11 @@ int WINAPI wWinMain(HINSTANCE, HINSTANCE, PWSTR, int) {
 }
 #else
 int main(int argc, char** argv) {
+#ifndef _WIN32
+  // Sidecar pipes can close while the host is draining callbacks. Let write()
+  // report EPIPE rather than letting the default SIGPIPE action kill the UI.
+  std::signal(SIGPIPE, SIG_IGN);
+#endif
   return run(std::vector<std::string>(argv, argv + argc));
 }
 #endif

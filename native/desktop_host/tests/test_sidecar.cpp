@@ -5,6 +5,7 @@
 
 #include <atomic>
 #include <chrono>
+#include <csignal>
 #include <cstddef>
 #include <cstdlib>
 #include <filesystem>
@@ -633,6 +634,11 @@ for line in sys.stdin:
 }
 
 int main(int argc, char** argv) {
+#ifndef _WIN32
+  // This executable exercises the pipe-failure path handled by the desktop
+  // host's POSIX entry point.
+  std::signal(SIGPIPE, SIG_IGN);
+#endif
   try {
     return run_tests(argc, argv);
   } catch (const std::exception& error) {

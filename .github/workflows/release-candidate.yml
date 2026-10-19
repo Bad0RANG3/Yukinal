@@ -68,6 +68,10 @@ jobs:
           sudo apt-get update
           sudo apt-get install -y libwebkit2gtk-4.1-dev librsvg2-dev libsecret-1-dev build-essential curl wget file libssl-dev
 
+      - name: Install OpenSSL 3 (macOS)
+        if: matrix.os == 'macos-15-intel'
+        run: brew install openssl@3
+
       - name: Create Python Agent build environment (Windows)
         if: runner.os == 'Windows'
         shell: pwsh
@@ -101,7 +105,12 @@ jobs:
           if (-not $nmake) { throw 'NMake was not found in the selected Visual Studio installation.' }
           Add-Content -LiteralPath $env:GITHUB_PATH -Value (Split-Path -Parent $nmake)
 
+      - name: Configure native host and service (macOS)
+        if: matrix.os == 'macos-15-intel'
+        run: cmake -S native -B native/build-release -DCMAKE_BUILD_TYPE=RelWithDebInfo -DYUKINAL_FETCH_DEPS=ON -DYUKINAL_BUILD_TESTS=ON -DYUKINAL_ENABLE_SSH_CONTAINER_TEST=${{ matrix.openssh_container_test }} -DOPENSSL_ROOT_DIR="$(brew --prefix openssl@3)"
+
       - name: Configure native host and service
+        if: matrix.os != 'macos-15-intel'
         run: cmake -S native -B native/build-release -DCMAKE_BUILD_TYPE=RelWithDebInfo -DYUKINAL_FETCH_DEPS=ON -DYUKINAL_BUILD_TESTS=ON -DYUKINAL_ENABLE_SSH_CONTAINER_TEST=${{ matrix.openssh_container_test }}
 
       - name: Build native targets

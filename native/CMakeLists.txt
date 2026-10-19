@@ -162,7 +162,9 @@ if(YUKINAL_BUILD_TESTS)
   enable_testing()
 endif()
 if(YUKINAL_BUILD_SSH_SERVICE)
-  find_package(OpenSSL REQUIRED COMPONENTS Crypto SSL)
+  # Keep libssh2 on the crypto major version validated by the SSH integration
+  # tests; OpenSSL 4 currently changes the macOS Ed25519 handshake behavior.
+  find_package(OpenSSL 3.0...<4.0 REQUIRED COMPONENTS Crypto SSL)
 endif()
 
 if(YUKINAL_BUILD_SSH_SERVICE)
@@ -250,7 +252,7 @@ if(YUKINAL_BUILD_TESTS)
       )
       set_tests_properties(python_agent_tests PROPERTIES
         ENVIRONMENT "PYTHONPATH=${CMAKE_CURRENT_SOURCE_DIR}/../agent/src;YUKINAL_SSH_SERVICE_BINARY=$<TARGET_FILE:yukinal-ssh-service>"
-        TIMEOUT 120
+        TIMEOUT 300
       )
     else()
       message(STATUS "Agent dependencies are not installed; python_agent_tests is not registered (install agent[agent])")

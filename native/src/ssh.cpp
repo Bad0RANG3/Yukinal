@@ -898,15 +898,18 @@ class SshResources {
  public:
   ~SshResources() {
     if (shutdown_socket_before_cleanup_ && session_) {
-      // One-shot requests have already received their result. Do not wait for
-      // another peer acknowledgement during cleanup; shutting down our socket
-      // makes libssh2 free locally, including when the remote peer is slow to
-      // complete its close handshake.
+      // Metadata discovery has its own total deadline. Keep its cleanup from
+      // extending that deadline while the remote SFTP endpoint is unresponsive.
 #ifdef _WIN32
       if (socket_ != kInvalidSocket) shutdown(socket_, SD_BOTH);
 #else
       if (socket_ != kInvalidSocket) shutdown(socket_, SHUT_RDWR);
 #endif
+      libssh2_session_set_blocking(session_, 0);
+    }
+    if (graceful_channel_cleanup_ && session_) {
+      // One-shot commands have returned their result. Make a bounded attempt to
+      // finish the SSH close exchange so the peer can reap its channel promptly.
       libssh2_session_set_blocking(session_, 0);
     }
     if (agent_) {
@@ -917,16 +920,46 @@ class SshResources {
     if (sftp_) libssh2_sftp_shutdown(sftp_);
     if (channel_) {
       libssh2_channel_set_blocking(channel_, 0);
-      libssh2_channel_close(channel_);
-      libssh2_channel_free(channel_);
+      if (graceful_channel_cleanup_ && session_ && socket_ != kInvalidSocket) {
+        const auto cleanup_deadline = Clock::now() + std::chrono::milliseconds(250);
+        int close_result = LIBSSH2_ERROR_EAGAIN;
+        do {
+          close_result = libssh2_channel_close(channel_);
+          if (close_result != LIBSSH2_ERROR_EAGAIN) break;
+        } while (wait_for_ssh(socket_, session_, cleanup_deadline));
+        if (close_result != 0) abort_socket();
+      } else {
+        libssh2_channel_close(channel_);
+      }
+      int free_result = libssh2_channel_free(channel_);
+      if (free_result == LIBSSH2_ERROR_EAGAIN && graceful_channel_cleanup_) {
+        abort_socket();
+        free_result = libssh2_channel_free(channel_);
+      }
+      (void)free_result;
     }
     if (known_hosts_) libssh2_knownhost_free(known_hosts_);
     if (session_) {
       libssh2_session_set_blocking(session_, 0);
-      libssh2_session_free(session_);
+      const int free_result = libssh2_session_free(session_);
+      if (free_result == LIBSSH2_ERROR_EAGAIN && graceful_channel_cleanup_) {
+        abort_socket();
+        (void)libssh2_session_free(session_);
+      }
     }
     proxy_tls_.reset();
     close_socket(socket_);
+  }
+
+  void abort_socket() {
+    if (socket_ == kInvalidSocket) return;
+#ifdef _WIN32
+    shutdown(socket_, SD_BOTH);
+#else
+    shutdown(socket_, SHUT_RDWR);
+#endif
+    close_socket(socket_);
+    socket_ = kInvalidSocket;
   }
 
   bool initialize_session() {
@@ -944,6 +977,7 @@ class SshResources {
   }
 
   bool shutdown_socket_before_cleanup_ = false;
+  bool graceful_channel_cleanup_ = false;
   Socket socket_ = kInvalidSocket;
   SslPtr proxy_tls_{nullptr, SSL_free};
   Libssh2SessionContext session_context_;
@@ -1659,7 +1693,7 @@ int run_terminal_session(const TargetConfig& target, std::uint16_t columns,
   }
   // The terminal process is one-shot; its final frame is the last data the
   // caller needs from this SSH session.
-  resources.shutdown_socket_before_cleanup_ = true;
+  resources.graceful_channel_cleanup_ = true;
   if (!set_session_timeout(resources.session_, deadline)) {
     emit_terminal_message({{"type", "error"}, {"code", "timeout"}, {"message", "SSH terminal startup timed out"}});
     return 2;
@@ -2147,7 +2181,7 @@ static ExecResult run_ssh_command_with_limits(const TargetConfig& target,
   if (!connect_authenticated(target, deadline, &resources, &result)) return result;
   // This session serves one structured request. The result has no further use
   // for the connection, so release the socket locally after the result is read.
-  resources.shutdown_socket_before_cleanup_ = true;
+  resources.graceful_channel_cleanup_ = true;
 
   if (!set_session_timeout(resources.session_, deadline)) {
     fail(&result, "timeout", "SSH command timed out");
