@@ -2,6 +2,10 @@
 
 本文件记录对用户有意义的版本变化和交付状态。详细实现与历史讨论可通过 Git 记录追溯。
 
+## 2.0.0-rc.2 — 2026-10-20
+
+修复首轮跨平台 CI 暴露的问题：macOS/Linux 跑门禁时，对 Windows 工具链的模拟测试错误地使用 runner 本机的 POSIX 路径拼接，导致三个 guardrail 测试失败。路径解析现在按目标平台选择；Windows 本地完整门禁及对应 guardrail 测试通过。新一轮三平台安装器 CI 正在运行。
+
 ## 2.0.0-rc.1 — 2026-10-20
 
 这是重写后首个跨平台安装包候选，尚不是稳定版。除桌面工作区标签导航、Agent 会话恢复、SSH 认证挑战、流式传输和控制平面改进外，本候选增加 Windows NSIS、macOS DMG、Debian Linux 安装包构建与安装/启动/卸载 smoke。自动 smoke 不替代真实 Provider、SSH、GUI 文件拖放、签名和公证验收；发布状态见[交付与发布](./release.md)。

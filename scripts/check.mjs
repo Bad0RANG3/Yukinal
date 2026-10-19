@@ -19,7 +19,7 @@
 
 import { spawn } from "node:child_process";
 import { existsSync, readFileSync } from "node:fs";
-import { join, resolve } from "node:path";
+import { join, resolve, win32 as windowsPath } from "node:path";
 import { pathToFileURL } from "node:url";
 import { resolveCommandInvocation, spawnCommandSync } from "./lib/commands.mjs";
 
@@ -221,13 +221,17 @@ export function nativeBuildToolForGenerator(generator) {
 }
 
 /** Default PATH lookup; injectable so the guardrail tests never touch the process. */
+function joinForPlatform(platform, ...parts) {
+  return platform === "win32" ? windowsPath.join(...parts) : join(...parts);
+}
+
 export function defaultWhich(name, { env = process.env, platform = process.platform, exists = existsSync } = {}) {
   const extensions = platform === "win32" ? ["", ".exe", ".cmd", ".bat"] : [""];
   const pathValue = String(env.PATH ?? env.Path ?? "");
   for (const directory of pathValue.split(platform === "win32" ? ";" : ":")) {
     if (!directory) continue;
     for (const extension of extensions) {
-      const candidate = join(directory, name + extension);
+      const candidate = joinForPlatform(platform, directory, name + extension);
       if (exists(candidate)) return candidate;
     }
   }
@@ -235,9 +239,9 @@ export function defaultWhich(name, { env = process.env, platform = process.platf
 }
 
 /** The vswhere executable, from its documented default install location. */
-export function vswherePath(env = process.env) {
+export function vswherePath(env = process.env, platform = process.platform) {
   const programFilesX86 = env["ProgramFiles(x86)"] ?? env.ProgramFilesX86 ?? "C:\\Program Files (x86)";
-  return join(programFilesX86, "Microsoft Visual Studio", "Installer", "vswhere.exe");
+  return joinForPlatform(platform, programFilesX86, "Microsoft Visual Studio", "Installer", "vswhere.exe");
 }
 
 let cachedVcvars64Path;
@@ -262,7 +266,7 @@ export function findVcvars64({
 } = {}) {
   if (platform !== "win32") return undefined;
   if (cachedVcvars64Path && exists(cachedVcvars64Path)) return cachedVcvars64Path;
-  const result = run(vswherePath(env), [
+  const result = run(vswherePath(env, platform), [
     "-latest",
     "-products",
     "*",
@@ -275,7 +279,7 @@ export function findVcvars64({
     .split(/\r?\n/u)[0]
     ?.trim();
   if (!installationPath) return undefined;
-  const vcvars = join(installationPath, "VC", "Auxiliary", "Build", "vcvars64.bat");
+  const vcvars = joinForPlatform(platform, installationPath, "VC", "Auxiliary", "Build", "vcvars64.bat");
   if (!exists(vcvars)) return undefined;
   cachedVcvars64Path = vcvars;
   return vcvars;
