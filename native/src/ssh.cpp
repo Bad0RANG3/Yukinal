@@ -17,6 +17,7 @@
 #include <iostream>
 #include <memory>
 #include <mutex>
+#include <stop_token>
 #include <string_view>
 #include <thread>
 #include <utility>
@@ -29,10 +30,12 @@
 #include <winsock2.h>
 #include <ws2tcpip.h>
 #include <bcrypt.h>
+#include <windows.h>
 #else
 #include <arpa/inet.h>
 #include <fcntl.h>
 #include <netdb.h>
+#include <poll.h>
 #include <sys/socket.h>
 #include <unistd.h>
 #include <openssl/evp.h>
@@ -1436,111 +1439,265 @@ constexpr std::size_t kMaxTerminalInputJsonBytes = kMaxTerminalInputFrameBytes *
 constexpr std::size_t kMaxQueuedTerminalInputBytes = 1024 * 1024;
 constexpr std::size_t kMaxQueuedTerminalCommands = 256;
 
-void read_terminal_input(const std::shared_ptr<TerminalInputQueue>& input) {
-  std::string line;
-  while (std::getline(std::cin, line)) {
-    StringWiper line_wiper{&line};
-    if (line.size() > kMaxTerminalInputJsonBytes) {
+enum class TerminalInputReadStatus { data, timeout, eof, error };
+
+TerminalInputReadStatus read_terminal_input_chunk(std::stop_token stop,
+                                                  std::array<char, 4096>* buffer,
+                                                  std::size_t* bytes_read) {
+  if (!buffer || !bytes_read) return TerminalInputReadStatus::error;
+  *bytes_read = 0;
+  if (stop.stop_requested()) return TerminalInputReadStatus::timeout;
+#ifdef _WIN32
+  const HANDLE standard_input = GetStdHandle(STD_INPUT_HANDLE);
+  if (standard_input == nullptr || standard_input == INVALID_HANDLE_VALUE) {
+    return TerminalInputReadStatus::error;
+  }
+
+  DWORD available = 0;
+  if (PeekNamedPipe(standard_input, nullptr, 0, nullptr, &available, nullptr)) {
+    if (available == 0) {
+      std::this_thread::sleep_for(std::chrono::milliseconds(20));
+      return TerminalInputReadStatus::timeout;
+    }
+    DWORD received = 0;
+    const DWORD requested = static_cast<DWORD>(std::min<std::size_t>(buffer->size(), available));
+    if (!ReadFile(standard_input, buffer->data(), requested, &received, nullptr)) {
+      return GetLastError() == ERROR_BROKEN_PIPE ? TerminalInputReadStatus::eof
+                                                 : TerminalInputReadStatus::error;
+    }
+    if (received == 0) return TerminalInputReadStatus::eof;
+    *bytes_read = received;
+    return TerminalInputReadStatus::data;
+  }
+
+  const DWORD peek_error = GetLastError();
+  if (peek_error == ERROR_BROKEN_PIPE) return TerminalInputReadStatus::eof;
+  if (GetFileType(standard_input) == FILE_TYPE_DISK) {
+    DWORD received = 0;
+    if (!ReadFile(standard_input, buffer->data(), static_cast<DWORD>(buffer->size()),
+                  &received, nullptr)) {
+      return TerminalInputReadStatus::error;
+    }
+    if (received == 0) return TerminalInputReadStatus::eof;
+    *bytes_read = received;
+    return TerminalInputReadStatus::data;
+  }
+  if (peek_error != ERROR_INVALID_HANDLE && peek_error != ERROR_INVALID_FUNCTION) {
+    return TerminalInputReadStatus::error;
+  }
+  // Direct console use is uncommon (the desktop host connects this worker with
+  // pipes), but keep it cancellable too. Consume key events rather than entering
+  // a blocking ReadConsole call so destruction can always join the reader.
+  DWORD mode = 0;
+  if (!GetConsoleMode(standard_input, &mode)) return TerminalInputReadStatus::error;
+  const DWORD wait_result = WaitForSingleObject(standard_input, 20);
+  if (wait_result == WAIT_TIMEOUT) return TerminalInputReadStatus::timeout;
+  if (wait_result != WAIT_OBJECT_0) return TerminalInputReadStatus::error;
+  INPUT_RECORD records[64]{};
+  DWORD record_count = 0;
+  if (!ReadConsoleInputW(standard_input, records, 64, &record_count)) {
+    return TerminalInputReadStatus::error;
+  }
+  std::wstring characters;
+  characters.reserve(record_count);
+  for (DWORD index = 0; index < record_count; ++index) {
+    if (records[index].EventType != KEY_EVENT || !records[index].Event.KeyEvent.bKeyDown) continue;
+    const wchar_t character = records[index].Event.KeyEvent.uChar.UnicodeChar;
+    if (character == L'\r') characters.push_back(L'\n');
+    else if (character != L'\0') characters.push_back(character);
+  }
+  if (characters.empty()) return TerminalInputReadStatus::timeout;
+  const int encoded_size = WideCharToMultiByte(CP_UTF8, WC_ERR_INVALID_CHARS,
+      characters.data(), static_cast<int>(characters.size()), nullptr, 0, nullptr, nullptr);
+  if (encoded_size <= 0) return TerminalInputReadStatus::error;
+  std::string encoded(static_cast<std::size_t>(encoded_size), '\0');
+  if (WideCharToMultiByte(CP_UTF8, WC_ERR_INVALID_CHARS, characters.data(),
+                          static_cast<int>(characters.size()), encoded.data(), encoded_size,
+                          nullptr, nullptr) != encoded_size) {
+    return TerminalInputReadStatus::error;
+  }
+  const auto count = std::min(encoded.size(), buffer->size());
+  std::copy_n(encoded.data(), count, buffer->data());
+  *bytes_read = count;
+  return TerminalInputReadStatus::data;
+#else
+  pollfd descriptor{STDIN_FILENO, POLLIN, 0};
+  const int ready = ::poll(&descriptor, 1, 40);
+  if (ready == 0) return TerminalInputReadStatus::timeout;
+  if (ready < 0) {
+    if (errno == EINTR) return TerminalInputReadStatus::timeout;
+    return TerminalInputReadStatus::error;
+  }
+  const auto count = ::read(STDIN_FILENO, buffer->data(), buffer->size());
+  if (count == 0) return TerminalInputReadStatus::eof;
+  if (count < 0) {
+    if (errno == EINTR || errno == EAGAIN || errno == EWOULDBLOCK) {
+      return TerminalInputReadStatus::timeout;
+    }
+    return TerminalInputReadStatus::error;
+  }
+  *bytes_read = static_cast<std::size_t>(count);
+  return TerminalInputReadStatus::data;
+#endif
+}
+
+bool queue_terminal_input_line(const std::shared_ptr<TerminalInputQueue>& input,
+                               std::string line, std::stop_token stop) {
+  StringWiper line_wiper{&line};
+  if (line.size() > kMaxTerminalInputJsonBytes) {
+    std::lock_guard lock(input->mutex);
+    input->invalid = true;
+    input->changed.notify_all();
+    return false;
+  }
+  try {
+    auto message = nlohmann::json::parse(line);
+    wipe(&line);
+    JsonStringWiper message_wiper{&message};
+    if (!message.is_object() || !message.contains("type") || !message["type"].is_string()) {
       std::lock_guard lock(input->mutex);
       input->invalid = true;
-      break;
+      input->changed.notify_all();
+      return false;
     }
-    try {
-      auto message = nlohmann::json::parse(line);
-      wipe(&line);
-      JsonStringWiper message_wiper{&message};
-      if (!message.is_object() || !message.contains("type") || !message["type"].is_string()) {
+    const std::string type = message["type"].get<std::string>();
+    TerminalInputCommand command;
+    if (type == "write" && message.size() == 2 && message.contains("data") &&
+        message["data"].is_string()) {
+      command.kind = TerminalInputCommand::Kind::write;
+      command.data = message["data"].get<std::string>();
+      if (command.data.size() > kMaxTerminalInputFrameBytes) {
         std::lock_guard lock(input->mutex);
         input->invalid = true;
-        break;
+        input->changed.notify_all();
+        return false;
       }
-      const std::string type = message["type"].get<std::string>();
-      TerminalInputCommand command;
-      if (type == "write" && message.size() == 2 && message.contains("data") &&
-          message["data"].is_string()) {
-        command.kind = TerminalInputCommand::Kind::write;
-        command.data = message["data"].get<std::string>();
-        if (command.data.size() > kMaxTerminalInputFrameBytes) {
-          std::lock_guard lock(input->mutex);
-          input->invalid = true;
-          break;
-        }
-      } else if (type == "resize" && message.size() == 3 && message.contains("columns") &&
-                 message.contains("rows") && message["columns"].is_number_unsigned() &&
-                 message["rows"].is_number_unsigned()) {
-        const auto columns = message["columns"].get<unsigned int>();
-        const auto rows = message["rows"].get<unsigned int>();
-        if (columns == 0 || columns > 1000 || rows == 0 || rows > 1000) {
-          std::lock_guard lock(input->mutex);
-          input->invalid = true;
-          break;
-        }
-        command.kind = TerminalInputCommand::Kind::resize;
-        command.columns = static_cast<std::uint16_t>(columns);
-        command.rows = static_cast<std::uint16_t>(rows);
-      } else if (type == "auth_response" && message.size() == 2 &&
-                 message.contains("responses") && message["responses"].is_array() &&
-                 message["responses"].size() <= 16) {
-        command.kind = TerminalInputCommand::Kind::auth_response;
-        bool valid_responses = true;
-        for (auto& response : message["responses"]) {
-          if (!response.is_string()) {
-            valid_responses = false;
-            break;
-          }
-          auto& secret = response.get_ref<std::string&>();
-          if (secret.size() > 4096) {
-            valid_responses = false;
-            break;
-          }
-          command.responses.push_back(std::move(secret));
-        }
-        std::lock_guard lock(input->mutex);
-        if (!valid_responses || !input->auth_prompt_active ||
-            command.responses.size() != input->expected_auth_responses) {
-          for (auto& response : command.responses) wipe(&response);
-          input->invalid = true;
-          input->changed.notify_all();
-          break;
-        }
-        input->auth_prompt_active = false;
-        input->expected_auth_responses = 0;
-        input->commands.push_back(std::move(command));
-        input->changed.notify_all();
-        continue;
-      } else if (type == "close" && message.size() == 1) {
-        command.kind = TerminalInputCommand::Kind::close;
-        std::lock_guard lock(input->mutex);
-        input->commands.push_back(std::move(command));
-        input->changed.notify_all();
-        break;
-      } else {
+    } else if (type == "resize" && message.size() == 3 && message.contains("columns") &&
+               message.contains("rows") && message["columns"].is_number_unsigned() &&
+               message["rows"].is_number_unsigned()) {
+      const auto columns = message["columns"].get<unsigned int>();
+      const auto rows = message["rows"].get<unsigned int>();
+      if (columns == 0 || columns > 1000 || rows == 0 || rows > 1000) {
         std::lock_guard lock(input->mutex);
         input->invalid = true;
-        break;
+        input->changed.notify_all();
+        return false;
       }
-
-      std::unique_lock lock(input->mutex);
-      input->changed.wait(lock, [&] {
-        return input->eof || input->auth_prompt_active ||
-               (input->commands.size() < kMaxQueuedTerminalCommands &&
-                input->queued_data_bytes + command.data.size() <= kMaxQueuedTerminalInputBytes);
-      });
-      if (input->eof || input->auth_prompt_active) {
+      command.kind = TerminalInputCommand::Kind::resize;
+      command.columns = static_cast<std::uint16_t>(columns);
+      command.rows = static_cast<std::uint16_t>(rows);
+    } else if (type == "auth_response" && message.size() == 2 &&
+               message.contains("responses") && message["responses"].is_array() &&
+               message["responses"].size() <= 16) {
+      command.kind = TerminalInputCommand::Kind::auth_response;
+      bool valid_responses = true;
+      for (auto& response : message["responses"]) {
+        if (!response.is_string()) {
+          valid_responses = false;
+          break;
+        }
+        auto& secret = response.get_ref<std::string&>();
+        if (secret.size() > 4096) {
+          valid_responses = false;
+          break;
+        }
+        command.responses.push_back(std::move(secret));
+      }
+      std::lock_guard lock(input->mutex);
+      if (!valid_responses || !input->auth_prompt_active ||
+          command.responses.size() != input->expected_auth_responses) {
+        for (auto& response : command.responses) wipe(&response);
         input->invalid = true;
         input->changed.notify_all();
-        break;
+        return false;
       }
-      input->queued_data_bytes += command.data.size();
+      input->auth_prompt_active = false;
+      input->expected_auth_responses = 0;
       input->commands.push_back(std::move(command));
       input->changed.notify_all();
-    } catch (const nlohmann::json::exception&) {
-      wipe(&line);
+      return true;
+    } else if (type == "close" && message.size() == 1) {
+      command.kind = TerminalInputCommand::Kind::close;
+      std::lock_guard lock(input->mutex);
+      input->commands.push_back(std::move(command));
+      input->changed.notify_all();
+      return false;
+    } else {
       std::lock_guard lock(input->mutex);
       input->invalid = true;
+      input->changed.notify_all();
+      return false;
+    }
+
+    std::unique_lock lock(input->mutex);
+    std::stop_callback wake_on_stop(stop, [&input] { input->changed.notify_all(); });
+    input->changed.wait(lock, [&] {
+      return stop.stop_requested() || input->eof || input->auth_prompt_active ||
+             (input->commands.size() < kMaxQueuedTerminalCommands &&
+              input->queued_data_bytes + command.data.size() <= kMaxQueuedTerminalInputBytes);
+    });
+    if (stop.stop_requested()) return false;
+    if (input->eof || input->auth_prompt_active) {
+      input->invalid = true;
+      input->changed.notify_all();
+      return false;
+    }
+    input->queued_data_bytes += command.data.size();
+    input->commands.push_back(std::move(command));
+    input->changed.notify_all();
+    return true;
+  } catch (const nlohmann::json::exception&) {
+    wipe(&line);
+    std::lock_guard lock(input->mutex);
+    input->invalid = true;
+    input->changed.notify_all();
+    return false;
+  }
+}
+
+void read_terminal_input(const std::shared_ptr<TerminalInputQueue>& input,
+                         std::stop_token stop) {
+  std::string pending_line;
+  std::array<char, 4096> buffer{};
+  bool input_eof = false;
+  while (!stop.stop_requested()) {
+    std::size_t bytes_read = 0;
+    const auto status = read_terminal_input_chunk(stop, &buffer, &bytes_read);
+    if (status == TerminalInputReadStatus::timeout) continue;
+    if (status == TerminalInputReadStatus::eof) {
+      input_eof = true;
       break;
     }
+    if (status == TerminalInputReadStatus::error) {
+      std::lock_guard lock(input->mutex);
+      input->invalid = true;
+      input->changed.notify_all();
+      break;
+    }
+    for (std::size_t index = 0; index < bytes_read; ++index) {
+      const char character = buffer[index];
+      if (character == '\n') {
+        if (!pending_line.empty() && pending_line.back() == '\r') pending_line.pop_back();
+        std::string line = std::move(pending_line);
+        pending_line.clear();
+        if (!queue_terminal_input_line(input, std::move(line), stop)) goto finished;
+        continue;
+      }
+      pending_line.push_back(character);
+      if (pending_line.size() > kMaxTerminalInputJsonBytes) {
+        std::lock_guard lock(input->mutex);
+        input->invalid = true;
+        input->changed.notify_all();
+        goto finished;
+      }
+    }
   }
+  if (input_eof && !pending_line.empty() && !stop.stop_requested()) {
+    if (!pending_line.empty() && pending_line.back() == '\r') pending_line.pop_back();
+    (void)queue_terminal_input_line(input, std::move(pending_line), stop);
+  }
+finished:
+  wipe(&pending_line);
   {
     std::lock_guard lock(input->mutex);
     input->eof = true;
@@ -1678,7 +1835,9 @@ int run_terminal_session(const TargetConfig& target, std::uint16_t columns,
     return 2;
   }
   const auto input = std::make_shared<TerminalInputQueue>();
-  std::thread(read_terminal_input, input).detach();
+  std::jthread input_reader([input](std::stop_token stop) {
+    read_terminal_input(input, stop);
+  });
   TerminalAuthContext terminal_auth{input};
   ExecResult connection_result;
   SshResources resources;
