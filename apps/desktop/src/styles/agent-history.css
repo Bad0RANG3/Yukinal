@@ -605,11 +605,12 @@
 }
 
 /* The title keeps its place while secondary launcher labels fold to icons.
-   Text stays in the accessibility tree and every control remains in Tab order. */
+   Text stays in the accessibility tree and every control remains in Tab order.
+   The workpage launcher moved out of this row into `WorkspaceTabStrip`; what
+   remains here are the workspace-level toggles (preview, guide, inspector). */
 .ai-first .agent-header .agent-task-heading { flex: 1 1 0; }
 .ai-first .agent-header .agent-header-actions { flex: 0 1 auto; }
 .agent-workspace-controls { display: inline-flex; min-width: 0; flex: 0 1 auto; align-items: center; gap: 5px; }
-.agent-workspace-controls > .workpages-launcher { flex-shrink: 0; }
 .agent-workspace-controls .workspace-guide-toggle { display: inline-flex; flex-shrink: 0; align-items: center; gap: 5px; min-height: 28px; padding: 4px 6px; white-space: nowrap; font-size: var(--text-caption); }
 .agent-workspace-controls > :is(button, .live-preview-control) { flex-shrink: 0; }
 @container agent-workspace (max-width: 1000px) {
@@ -617,8 +618,6 @@
   .ai-first .agent-header .agent-header-actions { gap: 6px; }
   .ai-first .agent-header .agent-status[data-idle="true"] { display: none; }
   .agent-workspace-controls { gap: 3px; }
-  .ai-first .agent-header .workpages-launcher-button { width: 28px; min-width: 28px; min-height: 28px; padding: 5px; }
-  .ai-first .agent-header .workpages-launcher-button > span,
   .ai-first .agent-header .live-preview-label { position: absolute; display: block; width: 1px; height: 1px; overflow: hidden; clip-path: inset(50%); white-space: nowrap; }
   .ai-first .agent-header .live-preview-control { min-height: 28px; gap: 4px; padding: 4px 6px; }
   .ai-first .agent-header .agent-token-usage { display: none; }

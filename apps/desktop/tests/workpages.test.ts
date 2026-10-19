@@ -1,7 +1,9 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import { artifactFromContent, sandboxedArtifactDocument } from "../src/features/workpages/workpage-model.js";
+import { nextTabIndex } from "../src/features/workpages/tab-navigation.js";
 import { useWorkpagesStore } from "../src/features/workpages/workpages-store.js";
+import { DEFAULT_UI_PREFERENCES, sanitizePreferences } from "../src/stores/preferences-store.js";
 
 test("artifact output requires an explicit bounded visual envelope", () => {
   const rawHtml = artifactFromContent("a", "Reply", "<script>window.parent.postMessage('x','*')</script>");
@@ -46,4 +48,48 @@ test("workpages lock server targets and closing a terminal preserves its mounted
   store.close(terminal.id);
   assert.equal(useWorkpagesStore.getState().expandedId, null);
   assert.equal(useWorkpagesStore.getState().activeId, "tool:logs:server-b");
+});
+
+test("the strip keeps at most eight tabs and moves the dropped one to recents", () => {
+  useWorkpagesStore.setState({ pages: [], retainedTerminals: [], recent: [], activeId: null, expandedId: null });
+  const store = useWorkpagesStore.getState();
+  for (let index = 1; index <= 10; index += 1) store.openTool("logs", { serverId: `server-${index}` });
+  const state = useWorkpagesStore.getState();
+  assert.equal(state.pages.length, 8);
+  // 最早的两个被挤到「最近关闭」，且顺序是旧在前，方便直接重开。
+  assert.deepEqual(state.recent.slice(0, 2).map((page) => page.serverId), ["server-2", "server-1"]);
+  assert.equal(state.activeId, "tool:logs:server-10");
+});
+
+test("the orientation axis decides the arrow keys, and never the layout identity", () => {
+  // 横向只认左右：上下键必须交还给浏览器（滚标签行 / 滚对话）。
+  assert.equal(nextTabIndex("ArrowRight", 0, 3, "horizontal"), 1);
+  assert.equal(nextTabIndex("ArrowRight", 2, 3, "horizontal"), 0);
+  assert.equal(nextTabIndex("ArrowLeft", 0, 3, "horizontal"), 2);
+  assert.equal(nextTabIndex("ArrowDown", 0, 3, "horizontal"), null);
+  assert.equal(nextTabIndex("ArrowUp", 0, 3, "horizontal"), null);
+  // 纵向反过来。
+  assert.equal(nextTabIndex("ArrowDown", 1, 3, "vertical"), 2);
+  assert.equal(nextTabIndex("ArrowUp", 0, 3, "vertical"), 2);
+  assert.equal(nextTabIndex("ArrowRight", 1, 3, "vertical"), null);
+  assert.equal(nextTabIndex("ArrowLeft", 1, 3, "vertical"), null);
+  // Home/End 与越界输入。
+  assert.equal(nextTabIndex("Home", 2, 5, "horizontal"), 0);
+  assert.equal(nextTabIndex("End", 0, 5, "vertical"), 4);
+  assert.equal(nextTabIndex("ArrowRight", -1, 3, "horizontal"), null);
+  assert.equal(nextTabIndex("ArrowRight", 3, 3, "horizontal"), null);
+  assert.equal(nextTabIndex("ArrowRight", 0, 0, "horizontal"), null);
+});
+
+test("orientation is persisted and cannot be smuggled in as anything else", () => {
+  assert.equal(DEFAULT_UI_PREFERENCES.workpagesOrientation, "horizontal");
+  assert.equal(sanitizePreferences({ workpagesOrientation: "vertical" }).workpagesOrientation, "vertical");
+  // 老版本存档没有这个键，读出来必须是默认值而不是 undefined。
+  assert.equal(sanitizePreferences({ terminalFontSize: 14 }).workpagesOrientation, "horizontal");
+  assert.equal(sanitizePreferences({ workpagesOrientation: "diagonal" }).workpagesOrientation, "horizontal");
+  assert.equal(sanitizePreferences(null).workpagesOrientation, "horizontal");
+  // 方向只是标签栏的性质：它不出现在工作页对象里。
+  useWorkpagesStore.setState({ pages: [], retainedTerminals: [], recent: [], activeId: null, expandedId: null });
+  useWorkpagesStore.getState().openTool("files", { serverId: "server-a" });
+  assert.deepEqual(Object.keys(useWorkpagesStore.getState().pages[0]!).sort(), ["dock", "id", "kind", "serverId", "title"]);
 });

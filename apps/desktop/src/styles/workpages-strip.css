@@ -1,0 +1,234 @@
+/* 工作页标签栏：位于 AgentHeader 之下、内容舞台之上的一行。
+   方向由容器上的 data-orientation 决定；v1 只出现 horizontal，vertical 的规则是 v2
+   的落点（同一套 DOM，不换结构）。颜色、圆角、字号全部取设计令牌。
+
+   背景透明、只留一条下边线：这样它是"面板顶部的一行"，而不是又一条独立的深色工具
+   栏。上面 AgentHeader 与下面内容舞台同色，中间插一条不同深浅的带子会让窗口看起来
+   被切了三段。 */
+
+.workspace-tabstrip {
+  display: flex;
+  flex: 0 0 auto;
+  align-items: center;
+  gap: 8px;
+  min-width: 0;
+  min-height: 40px;
+  padding: 4px var(--ai-content-inset);
+  border-bottom: 1px solid var(--line);
+  background: transparent;
+  color: var(--text);
+}
+
+.workspace-tabstrip-launcher {
+  display: inline-flex;
+  flex: 0 0 auto;
+  align-items: center;
+  gap: 2px;
+}
+
+.workspace-tabstrip-launch {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 5px;
+  min-height: 28px;
+  padding: 4px 7px;
+  border: 0;
+  border-radius: var(--radius-control);
+  background: transparent;
+  color: var(--muted);
+  font-size: var(--text-caption);
+  white-space: nowrap;
+}
+
+.workspace-tabstrip-launch:hover {
+  color: var(--text);
+  background: var(--material-hover);
+}
+
+.workspace-tabstrip-launch > svg {
+  flex-shrink: 0;
+}
+
+.workspace-tabstrip-tabs {
+  display: flex;
+  flex: 1 1 auto;
+  align-items: center;
+  gap: 3px;
+  min-width: 0;
+  overflow-x: auto;
+  scrollbar-width: thin;
+}
+
+.workspace-tabstrip-cell {
+  display: inline-flex;
+  flex: 0 0 auto;
+  align-items: center;
+  min-width: 0;
+  max-width: 220px;
+  border: 1px solid transparent;
+  border-radius: var(--radius-control);
+  color: var(--muted);
+}
+
+.workspace-tabstrip-cell[data-active="true"] {
+  border-color: var(--edge-normal);
+  background: var(--material-active);
+  color: var(--text);
+}
+
+.workspace-tabstrip-cell:not([data-active="true"]):hover {
+  background: var(--material-hover);
+  color: var(--text);
+}
+
+.workspace-tabstrip-tab {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  min-width: 0;
+  min-height: 28px;
+  padding: 4px 2px 4px 8px;
+  border: 0;
+  border-radius: var(--radius-control);
+  background: transparent;
+  color: inherit;
+  font-size: var(--text-label);
+  text-align: left;
+}
+
+.workspace-tabstrip-tab > svg {
+  flex-shrink: 0;
+}
+
+.workspace-tabstrip-tab > span {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.workspace-tabstrip-tab small {
+  overflow: hidden;
+  max-width: 100px;
+  color: var(--faint);
+  font-size: var(--text-caption);
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.workspace-tabstrip-close {
+  display: inline-flex;
+  flex: 0 0 auto;
+  align-items: center;
+  justify-content: center;
+  width: 22px;
+  height: 22px;
+  margin-right: 3px;
+  padding: 0;
+  border: 0;
+  border-radius: var(--radius-badge);
+  background: transparent;
+  color: var(--faint);
+}
+
+.workspace-tabstrip-close:hover {
+  color: var(--text);
+  background: var(--material-hover);
+}
+
+.workspace-tabstrip-hint {
+  flex: 1 1 auto;
+  min-width: 0;
+  margin: 0;
+  overflow: hidden;
+  color: var(--faint);
+  font-size: var(--text-caption);
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+/* 纵向：标签叠成一列，方向键改走上下。这条规则与 tab-navigation.ts 的判据必须
+   同时改 —— 一侧改了另一侧没改，就会出现"竖着排、横向走"的键盘错位。 */
+.workspace-tabstrip[data-orientation="vertical"] {
+  flex-direction: column;
+  align-items: stretch;
+  gap: 4px;
+  padding-block: 8px;
+}
+
+.workspace-tabstrip[data-orientation="vertical"] .workspace-tabstrip-launcher {
+  flex-wrap: wrap;
+}
+
+.workspace-tabstrip[data-orientation="vertical"] .workspace-tabstrip-tabs {
+  flex-direction: column;
+  align-items: stretch;
+  max-height: min(240px, 32vh);
+  overflow-x: hidden;
+  overflow-y: auto;
+}
+
+.workspace-tabstrip[data-orientation="vertical"] .workspace-tabstrip-cell {
+  max-width: none;
+  width: 100%;
+}
+
+.workspace-tabstrip[data-orientation="vertical"] .workspace-tabstrip-tab {
+  flex: 1 1 auto;
+}
+
+/* 标签行不跟着内容列一起收窄：先折叠文字，最后才让标签横向滚动。 */
+@container agent-workspace (max-width: 1000px) {
+  .workspace-tabstrip {
+    gap: 6px;
+  }
+
+  .workspace-tabstrip-launch {
+    width: 28px;
+    min-width: 28px;
+    min-height: 28px;
+    padding: 5px;
+  }
+
+  .workspace-tabstrip-launch > span {
+    position: absolute;
+    display: block;
+    width: 1px;
+    height: 1px;
+    overflow: hidden;
+    clip-path: inset(50%);
+    white-space: nowrap;
+  }
+}
+
+@container agent-workspace (max-width: 780px) {
+  .workspace-tabstrip {
+    padding-inline: 16px;
+  }
+
+  .workspace-tabstrip-hint {
+    display: none;
+  }
+}
+
+@container agent-workspace (max-width: 560px) {
+  .workspace-tabstrip {
+    gap: 3px;
+    padding-inline: 12px;
+  }
+
+  .workspace-tabstrip-cell {
+    max-width: 150px;
+  }
+
+  .workspace-tabstrip-tab small {
+    display: none;
+  }
+}
+
+@media (max-height: 620px) {
+  .workspace-tabstrip {
+    min-height: 34px;
+    padding-block: 2px;
+  }
+}

@@ -10,7 +10,8 @@ import { PRIMARY_NAV, SERVER_PAGES, useWorkspaceStore, type PrimaryNav, type Ser
 import { LivePreviewControl } from "./LivePreviewControl.js";
 import { ServerInspectorHeader } from "./ServerInspectorHeader.js";
 import { isPreviewFixture } from "../lib/preview-fixtures.js";
-import { WorkpagesDock, WorkpagesLauncher } from "../features/workpages/WorkpagesDock.js";
+import { WorkpagesDock } from "../features/workpages/WorkpagesDock.js";
+import { WorkspaceTabStrip } from "../features/workpages/WorkspaceTabStrip.js";
 import { openNativeWorkpage } from "../lib/ipc.js";
 
 const TerminalPane = lazy(async () => ({ default: (await import("../features/terminal/TerminalPane.js")).TerminalPane }));
@@ -110,11 +111,13 @@ export function AppShell() {
       {sidebarOpen ? <button type="button" className="navigation-scrim" aria-label="关闭导航" onClick={() => setSidebarOpen(false)} /> : null}
       <div className="ai-workspace-column" ref={aiWorkspaceRef} tabIndex={-1}>
         <AgentPanel workspace onAttentionRequested={returnToAI}
-          workspaceWorkpages={<WorkpagesDock onPopOut={async (page) => {
-            if (!page.serverId || page.kind === "evidence" || page.kind === "artifact") throw new Error("该内容可在工作页中展开");
-            await openNativeWorkpage({ kind: page.kind, serverId: page.serverId });
-          }} />} workspaceControls={<>
-          <WorkpagesLauncher />
+          workspaceWorkpages={<>
+            <WorkspaceTabStrip />
+            <WorkpagesDock onPopOut={async (page) => {
+              if (!page.serverId || page.kind === "evidence" || page.kind === "artifact") throw new Error("该内容可在工作页中展开");
+              await openNativeWorkpage({ kind: page.kind, serverId: page.serverId });
+            }} />
+          </>} workspaceControls={<>
           {import.meta.env.DEV ? <LivePreviewControl /> : null}
           <button type="button" ref={sidebarToggleRef} className="icon-button navigation-toggle" aria-label="打开导航" aria-controls="workspace-sidebar" aria-expanded={sidebarOpen} onClick={() => setSidebarOpen(true)}><Icon name="projects" /></button>
           <button type="button" className="text-button workspace-guide-toggle" aria-label="连接设置" title="连接设置" onClick={() => { setGuideOpen((open) => !open); openContext(); }}><Icon name="settings" size="sm" /><span>连接设置</span></button>

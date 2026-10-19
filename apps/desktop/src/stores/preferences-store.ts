@@ -11,6 +11,18 @@ export type TerminalFontSize = 12 | 13 | 14 | 15 | 16;
 export type TerminalLineHeight = 1.2 | 1.35 | 1.5;
 export type AgentDelivery = "async" | "sync";
 
+/**
+ * 工作页标签栏的方向。
+ *
+ * 这是一个真实的方向轴，不是占位：它同时决定标签行的排布方向（CSS 的
+ * `[data-orientation]`）与方向键的轴向（`tab-navigation.ts`）。v1 只渲染
+ * `"horizontal"`，也不提供切换入口 —— 但值已经进持久化和清洗表，v2 加一个设置项就能
+ * 落地，不必再改存储结构。
+ *
+ * 不要把它做成每页一个：方向是标签栏的性质，不是工作页的性质。
+ */
+export type WorkpagesOrientation = "horizontal" | "vertical";
+
 export interface UiPreferences {
   terminalFont: TerminalFont;
   terminalFontSize: TerminalFontSize;
@@ -26,6 +38,8 @@ export interface UiPreferences {
   /** Whether Send returns immediately or waits for the terminal run result. */
   agentDelivery: AgentDelivery;
   agentReasoningEffort: AgentReasoningEffort | null;
+  /** 标签栏方向：影响排布与键盘轴向，不影响任何工作页的身份或目标。 */
+  workpagesOrientation: WorkpagesOrientation;
 }
 
 export interface PreferencesState extends UiPreferences {
@@ -42,6 +56,7 @@ export const DEFAULT_UI_PREFERENCES: UiPreferences = {
   agentRunMode: "goal",
   agentDelivery: "async",
   agentReasoningEffort: null,
+  workpagesOrientation: "horizontal",
 };
 
 function isTerminalFontSize(value: unknown): value is TerminalFontSize {
@@ -57,7 +72,7 @@ function isAgentRunMode(value: unknown): value is AgentRunMode {
   return typeof value === "string" && (AGENT_RUN_MODES as readonly string[]).includes(value);
 }
 
-function sanitizePreferences(value: unknown): UiPreferences {
+export function sanitizePreferences(value: unknown): UiPreferences {
   if (!value || typeof value !== "object") return DEFAULT_UI_PREFERENCES;
   const candidate = value as Partial<UiPreferences>;
   return {
@@ -72,6 +87,7 @@ function sanitizePreferences(value: unknown): UiPreferences {
     agentRunMode: isAgentRunMode(candidate.agentRunMode) ? candidate.agentRunMode : DEFAULT_UI_PREFERENCES.agentRunMode,
     agentDelivery: candidate.agentDelivery === "sync" ? "sync" : "async",
     agentReasoningEffort: typeof candidate.agentReasoningEffort === "string" && (AGENT_REASONING_EFFORTS as readonly string[]).includes(candidate.agentReasoningEffort) ? candidate.agentReasoningEffort : null,
+    workpagesOrientation: candidate.workpagesOrientation === "vertical" ? "vertical" : "horizontal",
   };
 }
 
@@ -94,6 +110,7 @@ export const usePreferencesStore = create<PreferencesState>()(
         agentRunMode: state.agentRunMode,
         agentDelivery: state.agentDelivery,
         agentReasoningEffort: state.agentReasoningEffort,
+        workpagesOrientation: state.workpagesOrientation,
       }),
       merge: (persisted, current) => ({ ...current, ...sanitizePreferences(persisted) }),
     },

@@ -72,16 +72,19 @@ test("the task switcher reports context only from backend turn counts", () => {
 });
 
 test("compact header controls retain explicit names and keyboard buttons", () => {
+  // The workpage launcher moved out of this row into `WorkspaceTabStrip`; what is
+  // pinned here is that whatever a workspace passes in keeps its own accessible
+  // name and that nothing in the row lands in the untabbable state.
   const markup = renderToStaticMarkup(<AgentHeader
     running={false} runState={null} tokenUsage={null} agentReady agentOpen shell historyOpen={false}
     historyButtonRef={{ current: null }} closeButtonRef={{ current: null }} onToggleHistory={() => {}} onToggle={() => {}}
     workspace taskTitle="当前任务" workspaceControls={<>
-      <div className="workpages-launcher"><button type="button" className="workpages-launcher-button" aria-label="打开终端"><span>终端</span></button></div>
+      <button type="button" aria-label="浏览器预览" className="live-preview-control"><span className="live-preview-label">浏览器预览</span></button>
       <button type="button" aria-label="连接设置" className="workspace-guide-toggle"><span>连接设置</span></button>
     </>}
   />);
   assert.ok(markup.includes('class="agent-workspace-controls"'));
-  assert.ok(markup.includes('aria-label="打开终端"'));
+  assert.ok(markup.includes('aria-label="浏览器预览"'));
   assert.ok(markup.includes('aria-label="连接设置"'));
   assert.equal(markup.includes('tabindex="-1"'), false);
 });

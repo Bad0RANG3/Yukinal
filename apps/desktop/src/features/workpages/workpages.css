@@ -1,12 +1,5 @@
-.workpages-launcher { display: inline-flex; align-items: center; gap: 2px; min-width: 0; }
-.workpages-launcher-button { display: inline-flex; align-items: center; justify-content: center; gap: 5px; min-height: 28px; padding: 4px 7px; border: 0; border-radius: var(--radius-control); background: transparent; color: var(--muted); font-size: var(--text-caption); white-space: nowrap; }
-.workpages-launcher-button:hover { color: var(--text); background: var(--material-hover); }
 .workpages-dock { display: flex; flex: 0 1 auto; flex-direction: column; width: 100%; min-width: 0; min-height: 0; max-height: min(54%, 520px); color: var(--text); }
 .workpages-dock.has-workpages { padding-bottom: 8px; }
-.workpage-tabs { display: flex; flex: 0 0 auto; align-items: center; gap: 3px; padding: 0 2px 6px; overflow-x: auto; scrollbar-width: thin; }
-.workpage-tabs > button { display: inline-flex; flex-shrink: 0; align-items: center; gap: 6px; max-width: 220px; min-height: 28px; padding: 4px 8px; border: 1px solid transparent; border-radius: var(--radius-control); background: transparent; color: var(--muted); font-size: var(--text-label); }
-.workpage-tabs > button.is-active { border-color: var(--edge-normal); background: var(--material-active); color: var(--text); }
-.workpage-tabs small { overflow: hidden; max-width: 100px; text-overflow: ellipsis; white-space: nowrap; color: var(--faint); font-size: var(--text-caption); }
 .workpages-stage { display: grid; flex: 1 1 auto; grid-template-columns: repeat(2, minmax(0, 1fr)); align-content: stretch; gap: 8px; block-size: clamp(180px, 30vh, 320px); min-height: 120px; }
 .workpages-stage.is-empty { display: none; }
 .workpages-stage:has(> .workpage-frame:not([hidden]):only-of-type), .workpages-stage:has(> .workpage-frame:not([hidden])):not(:has(> .workpage-dock-left:not([hidden]))):not(:has(> .workpage-dock-right:not([hidden]))) { grid-template-columns: minmax(0, 1fr); }
@@ -104,8 +97,6 @@
   .workpages-stage { grid-template-columns: minmax(0, 1fr); }
   .workpage-frame:not([data-active="true"]) { display: none !important; }
   .workpage-frame[data-active="true"] { grid-column: 1 / -1; }
-  .workpages-launcher-button { padding-inline: 5px; }
-  .workpages-launcher-button > span { display: none; }
   .workpage-operation-list > li { grid-template-columns: minmax(35px, .5fr) minmax(45px, .8fr) minmax(65px, 1.5fr) auto 30px; gap: 5px; }
   .workpage-target { max-width: 110px; }
 }
