@@ -48,6 +48,7 @@ export const EVENT_NAMES = [
   // approval_expired/completed/failed（`sidecar.py:1019` 转发 `params.type`），没有
   // thinking/usage。UI 有分支（`useAgentRun.ts`），所以这是「界面等待一个从不出现的
   // 增量」，保留是为了让补发成为增量改动，而不是让 UI 的既有分支变成死代码。
+  "agent.team_task",
   "agent.thinking",
   "agent.text",
   // 无生产者：同上，`agent.usage` 在 sidecar 里没有任何 emit。
@@ -216,4 +217,4 @@ export type YukinalEvent =
   | { name: "investigation.schedule_notification"; payload: InvestigationScheduleNotificationEvent }
   | { name: "file.local_dropped"; payload: LocalFileDropEvent }
   | { name: "file.transfer_updated"; payload: FileTransferUpdatedEvent }
-  | { name: "agent.started" | "agent.thinking" | "agent.text" | "agent.usage" | "agent.tool_call" | "agent.tool_result" | "agent.waiting_approval" | "agent.approval_expired" | "agent.completed" | "agent.failed"; payload: AgentStreamEvent };
+  | { name: "agent.team_task" | "agent.started" | "agent.thinking" | "agent.text" | "agent.usage" | "agent.tool_call" | "agent.tool_result" | "agent.waiting_approval" | "agent.approval_expired" | "agent.completed" | "agent.failed"; payload: AgentStreamEvent };

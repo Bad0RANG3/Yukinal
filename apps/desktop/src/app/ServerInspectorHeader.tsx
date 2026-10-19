@@ -13,7 +13,7 @@ export function ServerInspectorHeader({ onBack, onClose }: { onBack: () => void;
     <header className="inspector-object-header" aria-label="当前服务器">
       <div className="inspector-object-navigation">
         <button type="button" className="text-button inspector-back" onClick={onBack}>
-          <Icon name="chevronRight" size="xs" /><span>所有服务器</span>
+          <Icon name="chevronRight" size="xs" /><span>动态</span>
         </button>
         {server ? <span className={`inspector-connection inspector-connection-${server.status}`}>
           <span aria-hidden="true" />{SERVER_STATUS_LABEL[server.status]}
@@ -28,7 +28,7 @@ export function ServerInspectorHeader({ onBack, onClose }: { onBack: () => void;
           </span>
           {server.metadata.region ? <span>{server.metadata.region}</span> : null}
         </div>
-        <p className="inspector-object-address"><code>{server.connection.username}@{server.connection.host}:{server.connection.port}</code></p>
+        <p className="inspector-object-address"><code title={`${server.connection.username}@${server.connection.host}:${server.connection.port}`}>{server.connection.username}@{server.connection.host}:{server.connection.port}</code></p>
       </div> : null}
     </header>
   );

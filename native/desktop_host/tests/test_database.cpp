@@ -3407,7 +3407,7 @@ int main(int argc, char** argv) {
 
       const auto recovered = router.invoke("investigation_task_recover",
                                            {{"input", {{"taskId", "itask_recover"}}}});
-      check(recovered.ok && recovered.value.at("task").at("status") == "investigating" &&
+      check(recovered.ok && recovered.value.at("task").at("status") == "waiting_user" &&
                 recovered.value.at("task").at("phase") == "recovery" &&
                 !recovered.value.at("task").contains("activeRunId") &&
                 recovered.value.at("task").at("lastFailure").at("code") == "transport" &&
@@ -3434,7 +3434,7 @@ int main(int argc, char** argv) {
       const auto inspected = router.invoke(
           "investigation_task_recover",
           {{"input", {{"taskId", "itask_recover"}, {"optionId", "inspect"}}}});
-      check(inspected.ok && inspected.value.at("task").at("status") == "investigating",
+      check(inspected.ok && inspected.value.at("task").at("status") == "waiting_user",
             "the inspect recovery option should leave the task untouched");
       check(!router
                  .invoke("investigation_task_recover",

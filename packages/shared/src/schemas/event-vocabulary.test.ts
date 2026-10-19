@@ -25,6 +25,7 @@ import { EVENT_SCHEMAS } from "./ipc.js";
 
 /** Channels the UI can subscribe to: declared *and* gated. */
 const SUBSCRIBABLE = [
+  "agent.team_task",
   "agent.started",
   "agent.thinking",
   "agent.text",
@@ -181,6 +182,7 @@ test("the agent channels the sidecar actually emits are all subscribable", () =>
   // `:1015-1019` forwards `params.type`) and `model_agent.py:793,824`. A member the
   // sidecar gains has to be added here, or the UI silently cannot listen to it.
   const emitted = [
+    "agent.team_task",
     "agent.started",
     "agent.text",
     "agent.tool_call",

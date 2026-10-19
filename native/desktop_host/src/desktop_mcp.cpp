@@ -16,6 +16,7 @@
 #include <cstdlib>
 #include <ctime>
 #include <iomanip>
+#include <exception>
 #include <map>
 #include <memory>
 #include <mutex>
@@ -356,10 +357,41 @@ struct McpSupervisor::Impl {
     std::thread stderr_reader;
   };
 
+  // One attempt is shared by callers that arrive while a server is starting.
+  // Failed attempts stay alive for their waiters; a later call can retry.
+  struct StartAttempt {
+    bool done = false;
+    std::shared_ptr<Session> session;
+    std::exception_ptr error;
+  };
+
+  struct Lifecycle {
+    std::mutex mutex;
+    std::condition_variable cv;
+    std::shared_ptr<StartAttempt> starting;
+  };
+
   DesktopDatabase* database = nullptr;
   const CredentialStore* credentials = nullptr;
   std::mutex mutex;
   std::map<std::string, std::shared_ptr<Session>> sessions;
+  std::map<std::string, std::weak_ptr<Lifecycle>> lifecycles;
+
+  std::shared_ptr<Lifecycle> lifecycle_for(const std::string& server_id) {
+    std::lock_guard lock(mutex);
+    // Do not retain an entry for every deleted or failed server forever.
+    for (auto it = lifecycles.begin(); it != lifecycles.end();) {
+      if (it->second.expired()) it = lifecycles.erase(it);
+      else ++it;
+    }
+    auto& weak = lifecycles[server_id];
+    auto lifecycle = weak.lock();
+    if (!lifecycle) {
+      lifecycle = std::make_shared<Lifecycle>();
+      weak = lifecycle;
+    }
+    return lifecycle;
+  }
 
   ~Impl() {
     std::map<std::string, std::shared_ptr<Session>> snapshot;
@@ -834,8 +866,12 @@ struct McpSupervisor::Impl {
   void shutdown(const std::shared_ptr<Session>& session) {
     if (!session) return;
     if (session->transport == "http") {
-      const bool was_running = session->running;
-      session->running = false;
+      bool was_running = false;
+      {
+        std::lock_guard lock(session->mutex);
+        was_running = session->running;
+        session->running = false;
+      }
       if (was_running) {
         try {
           delete_http_session(session);
@@ -1148,25 +1184,69 @@ struct McpSupervisor::Impl {
 
   std::shared_ptr<Session> ensure_started(const nlohmann::json& row) {
     const auto server_id = row.value("id", std::string());
+    const auto lifecycle = lifecycle_for(server_id);
+    std::unique_lock lifecycle_lock(lifecycle->mutex);
+    if (const auto attempt = lifecycle->starting) {
+      lifecycle->cv.wait(lifecycle_lock, [&] { return attempt->done; });
+      if (attempt->error) std::rethrow_exception(attempt->error);
+      return attempt->session;
+    }
+
+    std::shared_ptr<Session> stale;
     {
       std::lock_guard lock(mutex);
       const auto found = sessions.find(server_id);
-      if (found != sessions.end() && found->second->running) return found->second;
-      if (found != sessions.end()) sessions.erase(found);
+      if (found != sessions.end()) stale = found->second;
     }
-    return start_server(row);
+    if (stale) {
+      {
+        std::lock_guard lock(stale->mutex);
+        if (stale->running) return stale;
+      }
+      std::lock_guard lock(mutex);
+      sessions.erase(server_id);
+    }
+    const auto attempt = std::make_shared<StartAttempt>();
+    lifecycle->starting = attempt;
+    lifecycle_lock.unlock();
+    // No map or lifecycle lock is held during process startup or handshake.
+    // Other servers can start, and same-server callers wait on this attempt.
+    try {
+      if (stale) shutdown(stale);
+      auto session = start_server(row);
+      lifecycle_lock.lock();
+      attempt->session = session;
+      attempt->done = true;
+      lifecycle->starting.reset();
+      lifecycle_lock.unlock();
+      lifecycle->cv.notify_all();
+      return session;
+    } catch (...) {
+      lifecycle_lock.lock();
+      attempt->error = std::current_exception();
+      attempt->done = true;
+      lifecycle->starting.reset();
+      lifecycle_lock.unlock();
+      lifecycle->cv.notify_all();
+      throw;
+    }
   }
 
-  void stop_server(const std::string& server_id) {
+  bool stop_server(const std::string& server_id) {
+    const auto lifecycle = lifecycle_for(server_id);
+    std::unique_lock lifecycle_lock(lifecycle->mutex);
+    lifecycle->cv.wait(lifecycle_lock, [&] { return !lifecycle->starting; });
     std::shared_ptr<Session> session;
     {
       std::lock_guard lock(mutex);
       const auto found = sessions.find(server_id);
-      if (found == sessions.end()) return;
+      if (found == sessions.end()) return false;
       session = found->second;
       sessions.erase(found);
     }
+    // Serialize stop/restart for this server only, including pipe/thread cleanup.
     shutdown(session);
+    return true;
   }
 
   nlohmann::json status_for(const std::shared_ptr<Session>& session) {
@@ -1214,12 +1294,7 @@ nlohmann::json McpSupervisor::start(const std::string& server_id) {
 }
 
 nlohmann::json McpSupervisor::stop(const std::string& server_id) {
-  bool was_running = false;
-  {
-    std::lock_guard lock(impl_->mutex);
-    was_running = impl_->sessions.find(server_id) != impl_->sessions.end();
-  }
-  impl_->stop_server(server_id);
+  const bool was_running = impl_->stop_server(server_id);
   const auto row = impl_->database->get_mcp_server(server_id);
   if (!row.has_value()) throw std::runtime_error("the MCP server was not found");
   nlohmann::json status = {{"serverId", server_id},

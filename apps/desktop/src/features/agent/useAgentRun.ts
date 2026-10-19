@@ -1,9 +1,9 @@
 /**
- * 一次 Agent 运行的全部机制：宿主事件流、run 生命周期握手、审批簿记。
+ * 一次 Agent 运行的全部机制：Tauri 事件流、run 生命周期握手、审批簿记。
  *
  * 这个模块存在的理由，是 panel 里最难写对、也最难用界面验证的那部分：
  *
- *  - 宿主可能在 `agent_run_start` 命令 resolve *之前* 就发出 started/completed，
+ *  - Rust 可能在 `agent_run_start` 命令 resolve *之前* 就发出 started/completed，
  *    所以「claim 一个 run 槽位」必须先于命令发生，并且只接受自己期望的那个 runId。
  *  - 一个 dying sidecar 会在没人看事件流的时候断开，因此轮询到的存活信号
  *    也必须能把在途运行判死。
@@ -15,8 +15,10 @@
 import {
   IPC_COMMANDS,
   type AgentPromptPart,
+  type AgentCoordinationConfig,
   type AgentPermissionMode,
   type AgentRunMode,
+  type AgentRunResult,
   type AgentTokenUsage,
   type AgentContextUsage,
   type AgentParticipant,
@@ -28,16 +30,16 @@ import {
 } from "@yukinal/shared";
 import { useCallback, useEffect, useRef, useState } from "react";
 
-import { errorMessage } from "../../lib/format.js";
 import { callDesktop, isDesktopShell, subscribeDesktop, type AgentEventName, type DesktopEventPayload, type DesktopSubscription } from "../../lib/ipc.js";
-import { resetAdmissionOnFailure, RunLifecycle, type AdmissionRef, type PendingAdmission } from "./run-lifecycle.js";
+import { errorMessage } from "../../lib/format.js";
+import { resetAdmissionOnFailure, type AdmissionRef, type PendingAdmission } from "./run-lifecycle.js";
 import { ASSISTANT_REPLY_NOT_SAVED, assistantReplyNotSaved } from "./session-persistence.js";
+import type { AgentTeam } from "../agent-nist/agent-nist.js";
+import { useTeamRuntimeStore } from "../agent-nist/team-runtime-store.js";
+import { AgentRunStream, appendStreamBatch, settleStreamText, type RunStreamScope } from "./run-stream.js";
 import {
-  appendAssistantDelta,
   appendEntries,
-  appendReasoningDelta,
   appendToolCall,
-  settleAssistantText,
   settleToolResult,
   targetLabel,
   toolResultSummary,
@@ -64,6 +66,10 @@ export type StartOutcome =
 export type StartRunInput = {
   prompt: string;
   persona?: AgentPersona;
+  coordination?: AgentCoordinationConfig;
+  team?: AgentTeam;
+  /** Snapshot captured on first admission, retained unchanged across retries. */
+  uiContext?: string;
   participant?: AgentParticipant;
   /** Optional durable investigation objective receiving read-only evidence. */
   taskId?: string | null;
@@ -122,11 +128,7 @@ export function useAgentRun(options: {
    * 运行以终态回复结束时的回调 —— 落库的唯一入口。
    * 通过 ref 读取，因此订阅只建立一次也不会拿到过期的闭包。
    */
-  /**
-   * 一次回复结束后的落库回调。返回 false 表示没写进任何会话；
-   * 运行模块会把这件事变成一条可见提示，而不是假装成功。
-   */
-  onAssistantMessage?: (text: string, identity: ReplyIdentity) => boolean | void | Promise<boolean | void>;
+  onAssistantMessage?: (text: string, identity: ReplyIdentity, sessionId: string) => boolean | void | Promise<boolean | void>;
   /** 运行开始等待审批；面板据此把 Agent 面板带到前景。 */
   onApprovalRequested?: () => void;
   /** sidecar 存活信号；false 表示进程已经不在了。 */
@@ -147,10 +149,9 @@ export function useAgentRun(options: {
   const onApprovalRequested = useRef(options.onApprovalRequested);
   onApprovalRequested.current = options.onApprovalRequested;
 
-  // 流式文本按 run 累积（事件乱序也没关系，同 run 追加）。
-  const lifecycle = useRef(new RunLifecycle());
   const approvalLocks = useRef(new Set<string>());
-  const replyIdentity = useRef<ReplyIdentity>({});
+  const stoppingScope = useRef<RunStreamScope | null>(null);
+  const mounted = useRef(true);
   /**
    * A message admitted with `resume: false` but not yet executed.
    *
@@ -169,9 +170,54 @@ export function useAgentRun(options: {
   const [approvalStatuses, setApprovalStatuses] = useState<Record<string, string>>({});
   const [tokenUsage, setTokenUsage] = useState<AgentTokenUsage | null>(null);
   const [contextUsage, setContextUsage] = useState<AgentContextUsage | null>(null);
+  const streamRef = useRef<AgentRunStream | null>(null);
+  if (streamRef.current === null) {
+    streamRef.current = new AgentRunStream((deltas, identity) => {
+      // Capture the run's identity now; React may apply this updater after a new run begins.
+      setEntries((current) => appendStreamBatch(current, deltas, identity));
+    });
+  }
+  const stream = streamRef.current;
+
+  const completeRun = useCallback((eventRunId: string, result: AgentRunResult): void => {
+    if (result.runId !== eventRunId) return;
+    const finished = stream.finish(eventRunId);
+    if (!finished) return;
+    const { scope, streamedText } = finished;
+    if (pendingAdmission.current?.runId === eventRunId) pendingAdmission.current = null;
+    setRunning(false);
+    setStopping(false);
+    setPendingApprovalIds([]);
+    setRunState(result.state);
+    useTeamRuntimeStore.getState().stage(eventRunId, result.state === "completed" ? "completed" : result.state === "cancelled" ? "cancelled" : "failed");
+    setContextUsage(result.context ?? null);
+    if (result.text) {
+      if (scope.sessionId) {
+        void Promise.resolve(onAssistantMessage.current?.(result.text, scope.identity, scope.sessionId))
+          .then((persisted) => {
+            if (mounted.current && assistantReplyNotSaved(persisted)) {
+              setEntries((current) => appendEntries(current, [{ kind: "error", text: ASSISTANT_REPLY_NOT_SAVED }]));
+            }
+          })
+          .catch((error: unknown) => {
+            if (mounted.current) setEntries((current) => appendEntries(current, [{ kind: "error", text: errorMessage(error) }]));
+          });
+      }
+      setEntries((current) => settleStreamText(current, result.text, scope.identity, streamedText));
+    } else if (result.state === "failed" && result.error) {
+      const error = result.error;
+      setEntries((current) => appendEntries(current, [{ kind: "error", text: error }]));
+    }
+  }, []);
 
   useEffect(() => {
-    if (!isDesktopShell()) return;
+    mounted.current = true;
+    const resetView = (): void => {
+      mounted.current = false;
+      stream.reset();
+      stoppingScope.current = null;
+    };
+    if (!isDesktopShell()) return resetView;
     const subscriptions: DesktopSubscription[] = [];
     let disposed = false;
     // 订阅/退订的竞态由 `subscribeDesktop` 负责；这里只关心两件事 —— 把 8 个通道
@@ -192,30 +238,35 @@ export function useAgentRun(options: {
       );
     };
 
-    const isActive = (payload: { runId: string }): boolean => lifecycle.current.isActive(payload.runId);
+    const isActive = (payload: { runId: string }): boolean => stream.isActive(payload.runId);
 
     on("agent.started", (event) => {
-      if (!lifecycle.current.started(event.runId)) return;
+      if (!stream.started(event.runId)) return;
       setRunId(event.runId);
       setRunning(true);
       setRunState("thinking");
+      useTeamRuntimeStore.getState().stage(event.runId, "thinking");
     });
     on("agent.thinking", (event) => {
       if (!isActive(event)) return;
       const delta = event.textDelta ?? "";
-      setEntries((current) => appendReasoningDelta(current, delta));
+      stream.enqueue(event.runId, "reasoning", delta);
     });
     on("agent.text", (event) => {
       if (!isActive(event)) return;
-      setEntries((current) => appendAssistantDelta(current, event.textDelta, replyIdentity.current));
+      stream.enqueue(event.runId, "assistant", event.textDelta);
     });
     on("agent.usage", (event) => {
+      useTeamRuntimeStore.getState().usage(event.runId, event.usage);
       if (!isActive(event)) return;
       setTokenUsage(event.usage);
     });
     on("agent.tool_call", (event) => {
       if (!isActive(event)) return;
+      stream.boundary();
       setRunState("running_tool");
+      useTeamRuntimeStore.getState().stage(event.runId, "running_tool");
+      useTeamRuntimeStore.getState().tool(event.runId, event.toolName, event.target.serverId ?? null, false, event.callId);
       setEntries((current) =>
         appendToolCall(current, {
           callId: event.callId,
@@ -229,6 +280,9 @@ export function useAgentRun(options: {
     });
     on("agent.tool_result", (event) => {
       if (!isActive(event)) return;
+      stream.boundary();
+      useTeamRuntimeStore.getState().stage(event.runId, "thinking");
+      useTeamRuntimeStore.getState().tool(event.runId, event.toolName, event.target.serverId ?? null, true, event.callId);
       setRunState("thinking");
       setEntries((current) =>
         settleToolResult(
@@ -251,39 +305,26 @@ export function useAgentRun(options: {
     });
     on("agent.waiting_approval", (event) => {
       if (!isActive(event)) return;
+      stream.boundary();
       setRunState("waiting_approval");
+      useTeamRuntimeStore.getState().stage(event.runId, "waiting_approval");
       onApprovalRequested.current?.();
       setEntries((current) => appendEntries(current, [{ kind: "approval", approval: event.approval }]));
     });
     on("agent.approval_expired", (event) => {
       if (!isActive(event)) return;
+      stream.flush();
       setApprovalStatuses((current) => ({ ...current, [event.approvalId]: "审批已过期" }));
     });
-    on("agent.completed", (event) => {
-      if (!lifecycle.current.finish(event.runId)) return;
-      if (pendingAdmission.current?.runId === event.runId) pendingAdmission.current = null;
-      setRunning(false);
-      setRunState(event.result.state);
-      setContextUsage(event.result.context ?? null);
-      if (!event.result.text) return;
-      const text = event.result.text;
-      const identity = replyIdentity.current;
-      setEntries((current) => settleAssistantText(current, text, identity));
-      void Promise.resolve(onAssistantMessage.current?.(text, identity))
-        .then((persisted) => {
-          if (!disposed && assistantReplyNotSaved(persisted)) {
-            setEntries((current) => appendEntries(current, [{ kind: "error", text: ASSISTANT_REPLY_NOT_SAVED }]));
-          }
-        })
-        .catch((error: unknown) => {
-          if (!disposed) setEntries((current) => appendEntries(current, [{ kind: "error", text: errorMessage(error) }]));
-        });
-    });
+    on("agent.completed", (event) => completeRun(event.runId, event.result));
     on("agent.failed", (event) => {
-      if (!lifecycle.current.finish(event.runId)) return;
+      if (!stream.finish(event.runId)) return;
+      useTeamRuntimeStore.getState().stage(event.runId, "failed");
       if (pendingAdmission.current?.runId === event.runId) pendingAdmission.current = null;
       setRunning(false);
       setRunState("failed");
+      setStopping(false);
+      setPendingApprovalIds([]);
       setEntries((current) => appendEntries(current, [{ kind: "error", text: event.error }]));
     });
 
@@ -292,22 +333,22 @@ export function useAgentRun(options: {
         if (!disposed) setListening(true);
       })
       .catch((error) => {
-        if (!disposed) setEntries([{ kind: "error", text: `无法接收 Agent 事件：${errorMessage(error)}` }]);
+        if (!disposed) setEntries(appendEntries([], [{ kind: "error", text: `无法接收 Agent 事件：${String(error)}` }]));
       });
 
     return () => {
       disposed = true;
       subscriptions.forEach((subscription) => subscription.stop());
+      resetView();
     };
   }, []);
 
   // 轮询到的存活信号是权威的：进程没了，在途运行不可能继续。
   useEffect(() => {
     if (!running || sidecarRunning !== false) return;
-    lifecycle.current.fail();
-    // The process that held the admission is gone; reusing its runId/messageId on the
-    // next send would target a run the new sidecar has never heard of.
+    if (!stream.fail()) return;
     resetAdmissionOnFailure(pendingAdmission);
+    useTeamRuntimeStore.getState().runs.filter((run) => ["starting", "thinking", "running_tool", "waiting_approval"].includes(run.stage)).forEach((run) => useTeamRuntimeStore.getState().stage(run.id, "interrupted"));
     setRunning(false);
     setRunId(null);
     setStopping(false);
@@ -332,9 +373,9 @@ export function useAgentRun(options: {
     if (next === null || next === seenRestart.current) return;
     seenRestart.current = next;
     if (!running) return;
-    lifecycle.current.fail();
-    // Same reasoning as the exit signal above: the restart proves the old process died.
+    if (!stream.fail()) return;
     resetAdmissionOnFailure(pendingAdmission);
+    useTeamRuntimeStore.getState().runs.filter((run) => ["starting", "thinking", "running_tool", "waiting_approval"].includes(run.stage)).forEach((run) => useTeamRuntimeStore.getState().stage(run.id, "interrupted"));
     setRunning(false);
     setRunId(null);
     setStopping(false);
@@ -348,6 +389,7 @@ export function useAgentRun(options: {
   }, [sidecarRestart, running]);
 
   const start = useCallback(async (input: StartRunInput): Promise<StartOutcome> => {
+    if (!mounted.current) return "failed";
     const prompt = input.prompt;
     const parts =
       input.parts?.length
@@ -356,30 +398,35 @@ export function useAgentRun(options: {
           ? [{ type: "text" as const, text: prompt }]
           : [];
     if (!parts.length) {
-      setEntries([{ kind: "error", text: "消息必须包含文字或图片。" }]);
+      setEntries(appendEntries([], [{ kind: "error", text: "消息必须包含文字或图片。" }]));
       return "failed";
     }
     const contentKey = JSON.stringify(parts);
-    const routingKey = JSON.stringify({ persona: input.persona, participant: input.participant, providerId: input.providerId, model: input.model, focusServerId: input.focusServerId, reasoningEffort: input.reasoningEffort, toolAccess: input.toolAccess, permissionMode: input.permissionMode, mode: input.mode, policyId: input.policyId });
+    const routingKey = JSON.stringify({ persona: input.persona, coordination: input.coordination, participant: input.participant, providerId: input.providerId, model: input.model, focusServerId: input.focusServerId, reasoningEffort: input.reasoningEffort, toolAccess: input.toolAccess, permissionMode: input.permissionMode, mode: input.mode, policyId: input.policyId });
     const previous = pendingAdmission.current;
     const reusable =
       previous?.prompt === prompt && JSON.stringify(previous.parts) === contentKey && previous.taskId === (input.taskId ?? null) && previous.routingKey === routingKey
         ? previous
         : null;
     const expectedRunId = reusable?.runId ?? newId("run");
-    if (!lifecycle.current.begin(expectedRunId)) return "busy";
+    const scope = stream.begin(expectedRunId, { ...(input.participant ? { participant: input.participant } : {}), ...(input.model ? { model: input.model } : {}) });
+    if (!scope) return "busy";
+    if (input.team) useTeamRuntimeStore.getState().begin({ id: expectedRunId, team: input.team, source: input.coordination ? "coordinator" : undefined, serverId: input.focusServerId ?? null, taskId: input.taskId ?? undefined, goal: prompt });
     setRunning(true);
     setRunState("starting");
     setRunId(null);
     setApprovalStatuses({});
     setPendingApprovalIds([]);
     setTokenUsage(null);
-    replyIdentity.current = { ...(input.participant ? { participant: input.participant } : {}), ...(input.model ? { model: input.model } : {}) };
+    setStopping(false);
+    stoppingScope.current = null;
     approvalLocks.current.clear();
 
     const attachments = parts.filter((part) => part.type === "image" || part.type === "file" || part.type === "document");
+    const messageId = reusable?.messageId ?? newId("msg");
     const userEntry: Entry = {
       kind: "user",
+      entryId: messageId,
       text: prompt,
       ...(attachments.length ? { attachments } : {}),
     };
@@ -389,12 +436,14 @@ export function useAgentRun(options: {
       // the resume; keeping these separate is what makes retrying the second call
       // idempotent rather than producing a second user message or run.
       if (!reusable) {
-        const messageId = newId("msg");
         const sessionId = await input.persistUserMessage(messageId, parts);
-        pendingAdmission.current = { runId: expectedRunId, messageId, sessionId, prompt, parts, taskId: input.taskId ?? null, routingKey };
+        if (!stream.isPending(scope)) return "started";
+        pendingAdmission.current = { runId: expectedRunId, messageId, sessionId, prompt, parts, taskId: input.taskId ?? null, routingKey, uiContext: input.uiContext };
       }
       const admitted = pendingAdmission.current;
-      if (!admitted) throw new Error("运行受理状态丢失，请重新发送。");
+      if (!admitted || admitted.runId !== scope.runId) throw new Error("运行受理状态丢失，请重新发送。");
+      scope.sessionId = admitted.sessionId;
+      useTeamRuntimeStore.getState().bind(expectedRunId, admitted.sessionId, input.taskId);
       const request: IpcCommandMap[typeof IPC_COMMANDS.agentRunStart]["params"] = {
         runId: admitted.runId,
         sessionId: admitted.sessionId,
@@ -406,7 +455,8 @@ export function useAgentRun(options: {
         model: input.model ?? undefined,
         reasoningEffort: input.reasoningEffort,
         toolAccess: input.toolAccess,
-        persona: input.persona,
+        coordination: input.coordination,
+        persona: input.persona && admitted.uiContext ? { ...input.persona, systemPrompt: `${input.persona.systemPrompt}\n\n${admitted.uiContext}` } : input.persona,
         participant: input.participant,
         focusServerId: input.focusServerId ?? undefined,
         permissionMode: input.permissionMode,
@@ -417,55 +467,71 @@ export function useAgentRun(options: {
       const admissionResponse = await callDesktop(IPC_COMMANDS.agentRunStart, {
         ...request, delivery: "async", resume: false,
       });
+      if (!stream.isPending(scope)) return "started";
       if (admissionResponse.runId !== admitted.runId) {
         throw new Error("sidecar 为已受理消息返回了不同的 runId。");
       }
       const response = await callDesktop(IPC_COMMANDS.agentRunStart, {
         ...request, delivery: input.delivery ?? "async", resume: true,
       });
+      if (!stream.isPending(scope)) return "started";
+      if (response.runId !== scope.runId) throw new Error("sidecar 为运行返回了不同的 runId。");
       if (response.duplicate || !response.started || !response.resumed) {
         throw new Error("这条消息已经由另一个调用启动，当前界面不能重复接管它。");
       }
-      pendingAdmission.current = null;
+      if (pendingAdmission.current?.runId === scope.runId) pendingAdmission.current = null;
       const started = response.runId;
-      if (lifecycle.current.acknowledge(started)) {
+      if (stream.acknowledge(scope)) {
         setRunId(started);
         setRunState("thinking");
       }
+      // Sync delivery can carry the terminal snapshot even if its event was missed.
+      if (response.result && ["completed", "cancelled", "failed"].includes(response.result.state)) completeRun(started, response.result);
       return "started";
     } catch (error) {
-      lifecycle.current.fail();
-      // A thrown start (IPC error, failed message record, rejected resume) leaves no
-      // usable admission behind. Keeping it would make the retry reuse a dead pairing.
+      // A terminal event or a view change wins over a late RPC response/error.
+      if (!stream.fail(scope)) return "started";
       resetAdmissionOnFailure(pendingAdmission);
+      useTeamRuntimeStore.getState().stage(expectedRunId, "failed");
       setRunning(false);
+      setStopping(false);
+      setPendingApprovalIds([]);
       setRunState("failed");
-      setEntries((current) => appendEntries(current, [{ kind: "error", text: errorMessage(error) }]));
+      setEntries((current) => appendEntries(current, [{ kind: "error", text: String(error) }]));
       return "failed";
     }
-  }, []);
+  }, [completeRun]);
 
   const stop = useCallback(async (): Promise<void> => {
-    if (!runId || stopping) return;
+    const scope = runId ? stream.scopeFor(runId) : null;
+    if (!scope || !stream.isPending(scope) || stoppingScope.current === scope) return;
+    stoppingScope.current = scope;
     setStopping(true);
     try {
-      const { stopped } = await callDesktop(IPC_COMMANDS.agentRunStop, { runId });
-      if (stopped && lifecycle.current.finish(runId)) {
+      const { stopped } = await callDesktop(IPC_COMMANDS.agentRunStop, { runId: scope.runId });
+      if (!stream.isPending(scope)) return;
+      if (stopped && stream.finish(scope.runId)) {
         setRunning(false);
+        setPendingApprovalIds([]);
         setRunState("cancelled");
-      } else if (!stopped && lifecycle.current.isActive(runId)) {
+        useTeamRuntimeStore.getState().stage(scope.runId, "cancelled");
+      } else if (!stopped) {
         throw new Error("停止请求未被接受，请重试。");
       }
     } catch (error) {
-      setEntries((current) => appendEntries(current, [{ kind: "error", text: errorMessage(error) }]));
+      if (!stream.isPending(scope)) return;
+      stream.flush();
+      setEntries((current) => appendEntries(current, [{ kind: "error", text: String(error) }]));
     } finally {
-      setStopping(false);
+      if (stoppingScope.current === scope) stoppingScope.current = null;
+      if (stream.isCurrent(scope)) setStopping(false);
     }
-  }, [runId, stopping]);
+  }, [runId]);
 
   const respondApproval = useCallback(
     async (approval: ApprovalRequest, decision: ApprovalDecision): Promise<void> => {
-      if (approvalLocks.current.has(approval.approvalId) || !lifecycle.current.isActive(approval.runId)) return;
+      const scope = stream.scopeFor(approval.runId);
+      if (!scope || approvalLocks.current.has(approval.approvalId) || !stream.isActive(approval.runId)) return;
       if (Date.parse(approval.expiresAt) <= Date.now()) {
         setApprovalStatuses((current) => ({ ...current, [approval.approvalId]: "审批已过期" }));
         return;
@@ -479,6 +545,7 @@ export function useAgentRun(options: {
           decision,
           respondedAt: new Date().toISOString(),
         });
+        if (!stream.isCurrent(scope)) return;
         setApprovalStatuses((current) => ({
           ...current,
           [approval.approvalId]: !accepted
@@ -490,18 +557,23 @@ export function useAgentRun(options: {
                 : "已批准本次运行",
         }));
       } catch (error) {
+        if (!stream.isPending(scope)) return;
         approvalLocks.current.delete(approval.approvalId);
-        setEntries((current) => appendEntries(current, [{ kind: "error", text: errorMessage(error) }]));
+        stream.flush();
+        setEntries((current) => appendEntries(current, [{ kind: "error", text: String(error) }]));
       } finally {
-        setPendingApprovalIds((current) => current.filter((id) => id !== approval.approvalId));
+        if (stream.isCurrent(scope)) setPendingApprovalIds((current) => current.filter((id) => id !== approval.approvalId));
       }
     },
     [],
   );
 
   const loadTranscript = useCallback((next: Entry[]): void => {
+    stream.reset();
+    stoppingScope.current = null;
     pendingAdmission.current = null;
-    setEntries(next);
+    setEntries(appendEntries([], next));
+    setRunning(false);
     setRunState(null);
     setRunId(null);
     setStopping(false);
@@ -518,6 +590,7 @@ export function useAgentRun(options: {
   }, [loadTranscript]);
 
   const appendSystemEntry = useCallback((text: string): void => {
+    stream.flush();
     setEntries((current) => appendEntries(current, [{ kind: "system", text }]));
   }, []);
 

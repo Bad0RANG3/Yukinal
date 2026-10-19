@@ -301,6 +301,51 @@ int main() {
         "server_services should require a server id");
   check(!router.invoke("server_services", {{"serverId", "srv_ok"}}).ok,
         "server_services should report a missing local database");
+  // Python deliberately omits timestamps, including on degraded collectors.
+  // The shared builder used by both UI and Agent tool routes completes the
+  // strict snapshot contract without dropping a failing collector's evidence.
+  json normalized_snapshot = {{"health", "warning"},
+                              {"capabilities", {{"linux", true}, {"docker", false}}},
+                              {"collectors", json::array()}};
+  for (const auto* id : {"os", "cpu", "memory", "uptime", "disk", "network", "docker"}) {
+    normalized_snapshot["collectors"].push_back({{"collectorId", id}, {"ok", true}});
+  }
+  normalized_snapshot["collectors"][1]["ok"] = false;
+  normalized_snapshot["collectors"][1]["error"] = "CPU sample unavailable";
+  normalized_snapshot["collectors"][6]["collectedAt"] = "stale-agent-time";
+  const auto snapshot = yukinal::desktop_host::detail::make_snapshot_record(
+      "srv_local_snapshot", normalized_snapshot);
+  check(snapshot.at("id").get<std::string>().starts_with("snap_srv_local_snapshot_") &&
+            snapshot.at("serverId") == "srv_local_snapshot",
+        "snapshot identity should be supplied by the desktop host");
+  check(snapshot.at("collectedAt").is_string() &&
+            !snapshot.at("collectedAt").get<std::string>().empty() &&
+            snapshot.at("collectors").size() == 7,
+        "the normalized seven-collector batch should receive a collection timestamp");
+  for (const auto& collector : snapshot.at("collectors")) {
+    check(collector.at("collectedAt") == snapshot.at("collectedAt"),
+          "all collector timestamps must match the host-owned batch timestamp");
+  }
+  check(snapshot.at("collectors")[1].at("ok") == false &&
+            snapshot.at("collectors")[1].at("error") == "CPU sample unavailable" &&
+            snapshot.at("capabilities") == normalized_snapshot.at("capabilities") &&
+            !normalized_snapshot.at("collectors")[0].contains("collectedAt") &&
+            normalized_snapshot.at("collectors")[6].at("collectedAt") == "stale-agent-time",
+        "timestamp completion must preserve collector failures and not mutate normalized input");
+  auto invalid_snapshot = normalized_snapshot;
+  invalid_snapshot["collectors"] = json::object();
+  expect_runtime_error(
+      [&] { (void)yukinal::desktop_host::detail::make_snapshot_record("srv_local_snapshot", invalid_snapshot); },
+      "snapshot construction should reject a non-array collector collection");
+  invalid_snapshot["collectors"] = json::array({nullptr});
+  expect_runtime_error(
+      [&] { (void)yukinal::desktop_host::detail::make_snapshot_record("srv_local_snapshot", invalid_snapshot); },
+      "snapshot construction should reject malformed collector records");
+  invalid_snapshot["collectors"] = json::array();
+  check(yukinal::desktop_host::detail::make_snapshot_record("srv_local_snapshot", invalid_snapshot)
+            .at("collectors").empty(),
+        "an empty collector batch should remain a valid partial snapshot");
+
   check(!router.invoke("server_snapshot", nlohmann::json::object()).ok,
         "server_snapshot should require a server id");
   check(!router.invoke("server_snapshot", {{"serverId", "not-a-server"}}).ok,

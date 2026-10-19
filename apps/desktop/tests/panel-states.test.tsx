@@ -12,6 +12,9 @@
  * So the original JSX is kept here verbatim as a fixture, rendered through the same
  * `renderToStaticMarkup` the components render through, and compared byte for byte.
  * That makes "this shape must not change" an assertion rather than an intention.
+ * The later workflow QA explicitly adds shared live-region semantics; only those
+ * attributes are removed for this historical layout comparison. The real new
+ * attributes are checked independently in ui-workflow-quality.test.tsx.
  *
  * The two `error-panel` structures below are not a mistake and are not meant to be
  * harmonised here: three call sites put the retry button inside the body `div` next
@@ -78,6 +81,13 @@ const originalPreviewEmptyNoIcon = (body: string) => (
 
 /* ── 断言 ──────────────────────────────────────────────────────────────────── */
 
+function historicalPanelShape(markup: string): string {
+  return markup
+    .replace(/^<div class="loading-panel" role="status">/, '<div class="loading-panel">')
+    .replace(/^<div class="error-panel" role="alert">/, '<div class="error-panel">')
+    .replace('class="loading-spinner" aria-hidden="true"', 'class="loading-spinner"');
+}
+
 test("LoadingPanel matches the markup it replaced, for every call site", () => {
   const sites: ReadonlyArray<readonly [string, string]> = [
     ["正在读取服务状态", "SSH · systemd / Docker · 预计几秒完成"],
@@ -88,7 +98,7 @@ test("LoadingPanel matches the markup it replaced, for every call site", () => {
   ];
   for (const [title, hint] of sites) {
     assert.equal(
-      renderToStaticMarkup(<LoadingPanel title={title} hint={hint} />),
+      historicalPanelShape(renderToStaticMarkup(<LoadingPanel title={title} hint={hint} />)),
       renderToStaticMarkup(originalLoadingPanel(title, hint)),
       `LoadingPanel drifted for "${title}"`,
     );
@@ -104,9 +114,9 @@ test("the icon variant of ErrorPanel matches the markup it replaced", () => {
   ];
   for (const [title, message, retryLabel] of sites) {
     assert.equal(
-      renderToStaticMarkup(
+      historicalPanelShape(renderToStaticMarkup(
         <ErrorPanel showIcon title={title} message={message} onRetry={() => {}} retryLabel={retryLabel} />,
-      ),
+      )),
       renderToStaticMarkup(originalErrorPanelWithIcon(title, message, retryLabel)),
       `the icon variant drifted for "${title}"`,
     );
@@ -117,7 +127,7 @@ test("the bare variant of ErrorPanel matches the markup it replaced", () => {
   const sites: ReadonlyArray<readonly [string, string]> = [["无法读取动态", "boom"], ["无法读取目录", "boom"]];
   for (const [title, message] of sites) {
     assert.equal(
-      renderToStaticMarkup(<ErrorPanel title={title} message={message} onRetry={() => {}} />),
+      historicalPanelShape(renderToStaticMarkup(<ErrorPanel title={title} message={message} onRetry={() => {}} />)),
       renderToStaticMarkup(originalErrorPanelBare(title, message, "重试")),
       `the bare variant drifted for "${title}"`,
     );

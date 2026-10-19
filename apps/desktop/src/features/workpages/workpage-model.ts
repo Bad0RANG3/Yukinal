@@ -4,7 +4,7 @@ import type { ToolExecutionRecord } from "@yukinal/shared";
 export const WORKPAGE_TOOLS = ["files", "terminal", "logs", "services"] as const;
 export type WorkpageTool = (typeof WORKPAGE_TOOLS)[number];
 export type WorkpageDock = "left" | "right";
-export const WORKPAGE_LABEL = { files: "文件", terminal: "终端", logs: "日志", services: "服务", evidence: "证据", artifact: "产物" } as const;
+export const WORKPAGE_LABEL = { files: "文件", terminal: "终端", logs: "日志", services: "服务", evidence: "证据", artifact: "产物", board: "看板" } as const;
 
 const Text = z.string().max(200_000);
 const ArtifactContentSchema = z.discriminatedUnion("format", [
@@ -18,9 +18,10 @@ export type ArtifactContent = z.output<typeof ArtifactContentSchema>;
 export type WorkpageArtifact = { id: string; title: string; content: ArtifactContent; serverId?: string | null; createdAt?: string };
 export type WorkpageEvidence = { id: string; title: string; actor: string; target: string; execution: ToolExecutionRecord };
 
-type PageBase = { id: string; title: string; serverId: string | null; dock: WorkpageDock };
+type PageBase = { id: string; title: string; serverId: string | null; dock: WorkpageDock; pinned?: boolean };
 export type Workpage = PageBase & (
   | { kind: WorkpageTool }
+  | { kind: "board" }
   | { kind: "evidence"; evidence: WorkpageEvidence }
   | { kind: "artifact"; artifact: WorkpageArtifact }
 );

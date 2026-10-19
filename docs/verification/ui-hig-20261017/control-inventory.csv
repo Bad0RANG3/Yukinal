@@ -1,0 +1,622 @@
+file,line,element,role_expression,class_expression,label_expression
+app/AppShell.tsx,34,div,"""status""","""compact-empty""",
+app/AppShell.tsx,122,button,,"""icon-button navigation-close""","""关闭导航"""
+app/AppShell.tsx,123,button,,"{`workspace-nav-item team-operation-target ${primaryActive(item) ? ""is-active"" : """"}`}",
+app/AppShell.tsx,126,button,,"""navigation-scrim""","""关闭导航"""
+app/AppShell.tsx,134,button,,"""icon-button navigation-toggle""","""打开导航"""
+app/AppShell.tsx,135,button,,"""text-button workspace-guide-toggle""","""连接设置"""
+app/AppShell.tsx,136,button,,"""icon-button context-toggle""","""打开参考面板"""
+app/AppShell.tsx,142,button,,"""icon-button context-close""","""回到对话"""
+app/AppShell.tsx,145,div,"""tablist""","""server-tabs""","""服务器视图"""
+app/AppShell.tsx,145,button,"""tab""","{`server-tab ${serverPage === page ? ""server-tab-active"" : """"}`}",
+app/AppShell.tsx,146,div,"{detail && !guideOpen ? ""tabpanel"" : undefined}","""workspace-content""",
+app/LivePreviewControl.tsx,41,button,,{`live-preview-control is-${state}`},"""刷新实时预览"""
+app/ServerInspectorHeader.tsx,15,button,,"""text-button inspector-back""",
+app/ServerInspectorHeader.tsx,21,button,,"""icon-button context-close""","""回到对话"""
+app/WindowFrame.tsx,90,div,"""group""","{`native-workspace${captionJoined ? "" native-caption-integrated"" : """"}${titlebarControls ? "" native-caption-controls"" : """"}${maximized ? "" native-window-maximized"" : """"}`}","{maximized ? ""最大化工作区"" : ""工作区""}"
+app/WorkpageWindow.tsx,23,button,,"""text-button""",
+app/WorkpageWindow.tsx,28,button,,"""text-button""",
+app/WorkpageWindow.tsx,30,p,"""alert""","""inline-error""",
+components/MarkdownText.tsx,197,button,,"""md-link""",
+components/MarkdownText.tsx,245,button,,"""md-image-prompt""",
+components/PanelStates.tsx,60,button,,"""button-secondary""",
+components/SecondaryWindow.tsx,53,div,"""dialog""","{`secondary-window ${maximized ? ""is-maximized"" : """"}`}",
+components/SecondaryWindow.tsx,57,button,,"""secondary-window-grip""",{`移动${title}窗口，方向键调整位置`}
+components/SecondaryWindow.tsx,58,button,,"""text-button""",
+components/SecondaryWindow.tsx,59,button,,"""icon-button""","{maximized ? ""还原属性窗口"" : ""放大属性窗口""}"
+components/SecondaryWindow.tsx,60,button,,"""icon-button""",{`关闭${title}`}
+components/SecondaryWindow.tsx,64,div,"""tablist""","""secondary-window-tabs""",{`${title}分类`}
+components/SecondaryWindow.tsx,64,button,"""tab""",,
+components/SecondaryWindow.tsx,68,div,"{tabs?.length ? ""tabpanel"" : undefined}","""secondary-window-body""",
+components/SecondaryWindow.tsx,70,button,,"""secondary-window-resize""","""调整属性窗口大小，方向键缩放"""
+features/activity/ActivityFeed.tsx,82,button,,"""icon-button activity-refresh""","""刷新动态"""
+features/activity/ActivityFeed.tsx,83,div,"""group""","""activity-filters""","""动态筛选"""
+features/activity/ActivityFeed.tsx,84,button,,,
+features/activity/ActivityFeed.tsx,85,button,,,
+features/activity/ActivityFeed.tsx,123,button,,"""activity-event-toggle""","{`${expanded ? ""收起"" : ""查看""}动态：${activity.title}${outcome ? `，${outcome}` : """"}，${target}`}"
+features/activity/ActivityFeed.tsx,149,button,,"""text-button""",
+features/activity/ActivityFeed.tsx,162,button,,"""activity-trace-step""",{`查看执行记录：${execution.toolName}`}
+features/agent/AgentComposer.tsx,423,button,,,{`移除${image.name ?? `图片 ${index + 1}`}`}
+features/agent/AgentComposer.tsx,445,button,,,{`移除${attachment.name}`}
+features/agent/AgentComposer.tsx,467,button,,,{`移除${document.name}`}
+features/agent/AgentComposer.tsx,490,button,,,{`移除${audio.name ?? `音频 ${index + 1}`}`}
+features/agent/AgentComposer.tsx,504,p,"""status""","""agent-composer-attachment-error""",
+features/agent/AgentComposer.tsx,506,textarea,,"""agent-composer-input""","""消息输入"""
+features/agent/AgentComposer.tsx,534,input,,"""agent-composer-file-input""",
+features/agent/AgentComposer.tsx,549,ul,"""listbox""","{`composer-suggestions ${suggestionsPresence.closing ? ""is-closing"" : """"}`}","{trigger?.kind === ""command"" ? ""可用命令"" : ""可提及的队伍与服务器""}"
+features/agent/AgentComposer.tsx,561,button,"""option""","{`composer-suggestion ${index === visibleActive ? ""is-active"" : """"}`}",
+features/agent/AgentComposer.tsx,585,div,"""dialog""","{`agent-settings-panel ${settingsPresence.closing ? ""is-closing"" : """"}`}","""附件与对话设置"""
+features/agent/AgentComposer.tsx,597,button,,"""agent-settings-upload""",
+features/agent/AgentComposer.tsx,600,label,,"""agent-settings-permission""",
+features/agent/AgentComposer.tsx,600,select,,,"""访问权限"""
+features/agent/AgentComposer.tsx,604,label,,"""agent-role-picker""",
+features/agent/AgentComposer.tsx,606,select,,,"""优先团队"""
+features/agent/AgentComposer.tsx,615,label,,"""agent-settings-readonly""",
+features/agent/AgentComposer.tsx,615,input,,,
+features/agent/AgentComposer.tsx,626,button,,"{`agent-settings-option ${value === delivery ? ""is-selected"" : """"}`}",
+features/agent/AgentComposer.tsx,642,p,"""status""","""agent-settings-warning""",
+features/agent/AgentComposer.tsx,648,button,,"{`agent-settings-option ${spec.value === runPolicy ? ""is-selected"" : """"}`}",
+features/agent/AgentComposer.tsx,670,button,,"{`agent-composer-tool agent-settings-trigger ${menuOpen ? ""is-open"" : """"}${modeSpec.readOnly ? "" is-readonly"" : """"}`}","""添加附件与对话设置"""
+features/agent/AgentComposer.tsx,705,button,,"{`agent-send-button ${sendPresence.closing ? ""is-closing"" : """"}`}","""发送消息"""
+features/agent/AgentComposer.tsx,718,button,,"{`agent-stop-button${runningPresence.closing ? "" is-closing"" : """"}`}","""停止运行"""
+features/agent/AgentEntryView.tsx,125,summary,,"""agent-reasoning-summary""",
+features/agent/AgentEntryView.tsx,155,p,"""status""","""approval-resolved""",
+features/agent/AgentEntryView.tsx,158,button,,"""approval-button approval-button-reject""",
+features/agent/AgentEntryView.tsx,161,button,,"""approval-button approval-button-approve""",
+features/agent/AgentEntryView.tsx,165,button,,"""approval-button approval-button-approve""",
+features/agent/AgentEntryView.tsx,187,summary,,"""tool-card-heading""",
+features/agent/AgentFeed.tsx,77,button,,"""text-button""",
+features/agent/AgentHeader.tsx,56,button,,"{`agent-task-trigger ${historyOpen ? ""is-active"" : """"}`}",{`切换任务：${taskTitle}`}
+features/agent/AgentHeader.tsx,74,button,,"""icon-button agent-toggle""","""收起对话"""
+features/agent/AgentHeader.tsx,107,span,"""status""","""agent-status is-icon""",{statusLabel}
+features/agent/AgentHeader.tsx,108,span,"""status""","""agent-status agent-status-active""",
+features/agent/AgentHeader.tsx,110,span,"""status""","{`agent-status ${agentReady ? ""agent-status-ready"" : ""agent-status-idle""}`}",
+features/agent/AgentHistoryDeleteConfirm.tsx,43,button,,"""text-button""",
+features/agent/AgentHistoryDeleteConfirm.tsx,46,button,,"""button-secondary agent-history-confirm-delete""",
+features/agent/AgentHistoryPane.tsx,372,button,,"""text-button agent-context-reset""",
+features/agent/AgentHistoryPane.tsx,373,button,,"""button-secondary agent-history-new""",
+features/agent/AgentHistoryPane.tsx,376,button,,"""icon-button""","""关闭对话记录"""
+features/agent/AgentHistoryPane.tsx,393,div,"""alert""","""agent-history-error""",
+features/agent/AgentHistoryPane.tsx,395,div,"""tabpanel""","""agent-history-panel""",
+features/agent/AgentHistoryPane.tsx,416,button,,"""text-button""",
+features/agent/AgentHistoryPane.tsx,427,div,"""list""","""agent-history-list""",
+features/agent/AgentHistoryPane.tsx,429,section,"""group""","""agent-history-group""",{bucket.label}
+features/agent/AgentHistoryPane.tsx,464,button,,"""agent-history-more""",
+features/agent/AgentHistoryRenameForm.tsx,44,label,,"""sr-only""",
+features/agent/AgentHistoryRenameForm.tsx,45,input,,"""form-input agent-history-rename-input""",
+features/agent/AgentHistoryRenameForm.tsx,65,button,,"""text-button""",
+features/agent/AgentHistoryRenameForm.tsx,75,button,,"""button-secondary""",
+features/agent/AgentHistoryRow.tsx,104,article,"""listitem""","{`agent-history-row${isActive ? "" is-active"" : """"}${renaming ? "" is-editing"" : """"}`}",
+features/agent/AgentHistoryRow.tsx,127,button,,"""agent-history-row-open""",
+features/agent/AgentHistoryRow.tsx,162,button,,"""icon-button""",{`重命名 ${session.title}`}
+features/agent/AgentHistoryRow.tsx,174,button,,"""icon-button""","{`${archived ? ""恢复"" : ""归档""} ${session.title}`}"
+features/agent/AgentHistoryRow.tsx,186,button,,"""icon-button agent-history-delete""",{`删除 ${session.title}`}
+features/agent/AgentHistoryToolbar.tsx,63,label,,"""agent-history-search""",
+features/agent/AgentHistoryToolbar.tsx,65,input,,,"""搜索对话记录"""
+features/agent/AgentHistoryToolbar.tsx,78,button,,,"""清空搜索"""
+features/agent/AgentHistoryToolbar.tsx,84,div,"""tablist""","""agent-history-tabs""","""对话状态"""
+features/agent/AgentHistoryToolbar.tsx,107,button,"""tab""","{filter === key ? ""is-selected"" : """"}",
+features/agent/AgentNotices.tsx,44,p,"""status""","""agent-notice""",
+features/agent/AgentNotices.tsx,48,button,,"""text-button""",
+features/agent/AgentNotices.tsx,61,p,"""status""","""agent-notice""",
+features/agent/AgentNotices.tsx,68,p,"""status""","""agent-notice""",
+features/agent/AgentNotices.tsx,74,button,,"""text-button""",
+features/agent/AgentNotices.tsx,82,button,,"""text-button""",
+features/agent/AgentPanel.tsx,446,div,"""dialog""","""agent-task-popover""","""切换任务"""
+features/agent/AgentPanel.tsx,483,p,"""status""","""agent-history-archived""",
+features/agent/AgentPanel.tsx,496,div,"""status""","""agent-history-error agent-history-error-inline""",
+features/agent/AgentPanel.tsx,497,div,"""alert""","""agent-history-error agent-history-error-inline""",
+features/agent/AgentPanel.tsx,498,div,"""status""","""agent-history-error agent-history-error-inline""",
+features/agent/AgentPanel.tsx,502,button,,"""agent-composer-tool agent-scope-trigger""","{selectedServerId ? `当前范围：${focusServer?.name ?? selectedServerId}，切换到全局对话` : ""当前范围：全局工作区""}"
+features/agent/AgentRecentConversations.tsx,19,button,,,
+features/agent/AgentRecentConversations.tsx,20,div,"""status""","""agent-recent-error""",
+features/agent/AgentRecentConversations.tsx,20,button,,,
+features/agent/AgentRecentConversations.tsx,21,button,,"""agent-recent-row""",
+features/agent/ConversationScrollRail.tsx,99,div,"""scrollbar""","""conversation-scroll-rail""","""对话滚动位置"""
+features/agent/CoordinatorTasks.tsx,11,span,"""status""","""coordinator-status""",{`协调助手：${active.length} 项后台任务，可继续对话`}
+features/agent/CoordinatorTasks.tsx,21,button,,"""text-button""",{`停止任务：${task.title}`}
+features/agent/CoordinatorTasks.tsx,23,summary,,,
+features/agent/CoordinatorTasks.tsx,29,summary,,,
+features/agent/CoordinatorTasks.tsx,30,p,"""status""","""agent-history-error""",
+features/agent/CoordinatorTasks.tsx,30,button,,"""text-button""",
+features/agent/MemoryLibrary.tsx,62,dialog,,"""memory-library""","""记忆库"""
+features/agent/MemoryLibrary.tsx,63,button,,"""icon-button""","""关闭记忆库"""
+features/agent/MemoryLibrary.tsx,64,div,"""group""",,"""记忆范围"""
+features/agent/MemoryLibrary.tsx,65,button,,,
+features/agent/MemoryLibrary.tsx,66,button,,,
+features/agent/MemoryLibrary.tsx,67,button,,"""text-button""",
+features/agent/MemoryLibrary.tsx,68,input,,,"""搜索记忆"""
+features/agent/MemoryLibrary.tsx,69,p,"""alert""","""inline-error""",
+features/agent/MemoryLibrary.tsx,72,label,,,
+features/agent/MemoryLibrary.tsx,72,input,,,
+features/agent/MemoryLibrary.tsx,73,label,,,
+features/agent/MemoryLibrary.tsx,73,textarea,,,
+features/agent/MemoryLibrary.tsx,74,button,,"""text-button""",
+features/agent/MemoryLibrary.tsx,74,button,,"""button-secondary""",
+features/agent/MemoryLibrary.tsx,75,p,"""status""",,
+features/agent/MemoryLibrary.tsx,76,button,,"""memory-record""",
+features/agent/MemoryLibrary.tsx,77,button,,"""icon-button""",{`删除记忆 ${memory.title}`}
+features/agent/MemoryLibrary.tsx,82,button,,"""text-button text-button-danger""",
+features/agent/MemoryLibrary.tsx,84,span,"""status""",,
+features/agent/ModelPicker.tsx,149,ul,"""listbox""","""agent-model-menu""","""可用模型"""
+features/agent/ModelPicker.tsx,160,li,"""option""","{`agent-model-option ${index === activeIndex ? ""is-active"" : """"}`}",
+features/agent/ModelPicker.tsx,180,button,"""combobox""","{`agent-model-select ${open ? ""is-open"" : """"}`}","""选择模型"""
+features/agent/PermissionPicker.tsx,23,button,,"""agent-permission-trigger""",{`访问权限：${label}`}
+features/agent/PermissionPicker.tsx,24,div,"""dialog""","""agent-permission-menu""","""访问权限"""
+features/agent/PermissionPicker.tsx,26,div,"""radiogroup""",,"""批准方式"""
+features/agent/PermissionPicker.tsx,33,button,"""radio""",,
+features/agent/PermissionPicker.tsx,35,button,,,
+features/agent/ReasoningPicker.tsx,38,button,,"""agent-effort-trigger""","{`模型与推理强度：${shortModelLabel(model.label)}${levels.length ? `，${effortLabel}` : """"}`}"
+features/agent/ReasoningPicker.tsx,43,div,"""dialog""","""agent-effort-menu""","""模型与推理强度"""
+features/agent/ReasoningPicker.tsx,49,button,,"""icon-button""","""恢复模型默认强度"""
+features/agent/ReasoningPicker.tsx,52,input,,,"""推理强度"""
+features/agent-nist/AgentNistPane.tsx,117,button,,"""agent-nist-text-action""",
+features/agent-nist/AgentNistPane.tsx,120,div,"""group""","""team-workbench-tabs""","""团队工作台视图"""
+features/agent-nist/AgentNistPane.tsx,120,button,,,
+features/agent-nist/AgentNistPane.tsx,122,p,"""status""","""agent-nist-notice""",
+features/agent-nist/AgentNistPane.tsx,123,p,"""status""","""agent-nist-notice""",
+features/agent-nist/AgentNistPane.tsx,124,div,"""alert""","""agent-nist-notice is-error""",
+features/agent-nist/AgentNistPane.tsx,124,button,,"""agent-nist-text-action""",
+features/agent-nist/AgentNistPane.tsx,125,p,"""status""","""agent-nist-notice""",
+features/agent-nist/AgentNistPane.tsx,126,p,"{notice.error ? ""alert"" : ""status""}","{`agent-nist-notice${notice.error ? "" is-error"" : """"}`}",
+features/agent-nist/AgentNistPane.tsx,130,button,,{`team-roster-row team-color-${candidate.id}`},
+features/agent-nist/AgentNistPane.tsx,130,button,,"""agent-nist-text-action""",
+features/agent-nist/AgentNistPane.tsx,130,button,,"""agent-nist-text-action""",
+features/agent-nist/AgentNistPane.tsx,131,button,,"""agent-nist-text-action""",
+features/agent-nist/AgentNistPane.tsx,136,div,"""group""","""agent-nist-teams""","""运维 Agent 队伍"""
+features/agent-nist/AgentNistPane.tsx,137,button,,"{candidate.id === teamId ? ""is-selected"" : """"}",
+features/agent-nist/AgentNistPane.tsx,156,button,,"""agent-nist-text-action""",
+features/agent-nist/AgentNistPane.tsx,164,button,,"""button-secondary""",
+features/agent-nist/AgentNistPane.tsx,165,button,,"""agent-nist-text-action""",
+features/agent-nist/AgentNistPane.tsx,169,label,,"""form-field""",
+features/agent-nist/AgentNistPane.tsx,169,input,,"""form-input""","""角色名称"""
+features/agent-nist/AgentNistPane.tsx,170,label,,"""form-field""",
+features/agent-nist/AgentNistPane.tsx,170,textarea,,"""form-input""","""角色职责"""
+features/agent-nist/AgentNistPane.tsx,171,label,,"""form-field""",
+features/agent-nist/AgentNistPane.tsx,171,select,,"""form-select""","""AI 连接"""
+features/agent-nist/AgentNistPane.tsx,181,label,,"""form-field""",
+features/agent-nist/AgentNistPane.tsx,181,select,,"""form-select""","""模型"""
+features/agent-nist/AgentNistPane.tsx,188,button,,"""button-secondary""",
+features/agent-nist/AgentNistPane.tsx,188,button,,"""agent-nist-text-action""",
+features/agent-nist/TaskPropertiesWindow.tsx,29,p,"""alert""","""agent-nist-notice is-error""",
+features/agent-nist/TaskPropertiesWindow.tsx,29,button,,"""text-button""",
+features/agent-nist/TaskPropertiesWindow.tsx,41,p,"""status""",,
+features/agent-nist/TaskPropertiesWindow.tsx,43,button,,"""team-board-artifact""",
+features/agent-nist/TeamActivity.tsx,82,button,,"""team-feedback-preview agent-nist-text-action""",
+features/agent-nist/TeamActivity.tsx,103,div,"""status""",{`team-run-strip team-color-${run.team}`},
+features/agent-nist/TeamBoardPane.tsx,40,button,,"""icon-button""","""刷新任务看板"""
+features/agent-nist/TeamBoardPane.tsx,42,label,,"""team-board-search""",
+features/agent-nist/TeamBoardPane.tsx,42,input,,,"""搜索看板任务"""
+features/agent-nist/TeamBoardPane.tsx,43,select,,,"""看板服务器范围"""
+features/agent-nist/TeamBoardPane.tsx,44,select,,,"""看板团队筛选"""
+features/agent-nist/TeamBoardPane.tsx,46,div,"""status""","""team-board-status""",
+features/agent-nist/TeamBoardPane.tsx,47,p,"""status""","""agent-nist-notice""",
+features/agent-nist/TeamBoardPane.tsx,48,p,"""alert""","""agent-nist-notice is-error""",
+features/agent-nist/TeamBoardPane.tsx,48,button,,"""agent-nist-text-action""",
+features/agent-nist/TeamBoardPane.tsx,67,button,,"""team-board-card-toggle""","{`查看任务属性：${card.goal || ""附件任务""}`}"
+features/agent-nist/TeamWatchPane.tsx,35,p,"""status""","""agent-nist-notice""",
+features/agent-nist/TeamWatchPane.tsx,36,div,"""alert""","""agent-nist-notice is-error""",
+features/agent-nist/TeamWatchPane.tsx,36,button,,"""agent-nist-text-action""",
+features/agent-nist/TeamWatchPane.tsx,37,p,"""alert""","""agent-nist-notice is-error""",
+features/agent-nist/TeamWatchPane.tsx,40,summary,,"""team-watch-summary""",
+features/agent-nist/TeamWatchPane.tsx,49,button,,"""agent-nist-text-action""",
+features/agent-nist/TeamWatchPane.tsx,61,button,,"""conversation-watch-status""",
+features/files/RemoteFilesPane.tsx,185,button,,"""icon-button""","""返回上级目录"""
+features/files/RemoteFilesPane.tsx,186,input,,"""files-path-input""","""远程路径"""
+features/files/RemoteFilesPane.tsx,186,button,,"""icon-button""","""前往路径"""
+features/files/RemoteFilesPane.tsx,187,button,,"""icon-button""","""刷新远程文件"""
+features/files/RemoteFilesPane.tsx,190,button,,"""button-secondary""","""选择本机文件"""
+features/files/RemoteFilesPane.tsx,191,button,,"""button-secondary""","""选择本机文件夹"""
+features/files/RemoteFilesPane.tsx,192,button,,"""button-secondary""",
+features/files/RemoteFilesPane.tsx,195,p,"""alert""","""file-transfer-alert""",
+features/files/RemoteFilesPane.tsx,200,button,,"""button-secondary""",
+features/files/RemoteFilesPane.tsx,202,button,,"""button-secondary file-download-button""",
+features/files/RemoteFilesPane.tsx,203,button,,"""button-secondary file-download-button""",
+features/files/RemoteFilesPane.tsx,209,button,,"""button-secondary""",
+features/files/RemoteFilesPane.tsx,210,button,,"{""local-handle-row"" + (selectedLocal?.handleId === handle.handleId ? "" remote-file-row-selected"" : """")}",
+features/files/RemoteFilesPane.tsx,214,button,,"""icon-button""","""刷新传输记录"""
+features/files/RemoteFilesPane.tsx,220,div,"""status""","""workpage-loading""","""加载文件列表"""
+features/files/RemoteFilesPane.tsx,220,button,,"{""remote-file-row"" + (selectedRemote?.path === entry.path ? "" remote-file-row-selected"" : """")}",
+features/files/RemoteFilesPane.tsx,263,label,,"""files-filter""",
+features/files/RemoteFilesPane.tsx,263,input,,,"""筛选当前目录文件"""
+features/files/RemoteFilesPane.tsx,264,button,,,"{`按${key === ""name"" ? ""名称"" : key === ""type"" ? ""类型"" : ""大小""}排序`}"
+features/files/RemoteFilesPane.tsx,267,button,,"""icon-button""","""关闭文件预览"""
+features/files/RemoteFilesPane.tsx,271,button,,,
+features/files/RemoteFilesPane.tsx,272,button,,,
+features/files/RemoteFilesPane.tsx,281,p,"""status""","""muted-copy""",
+features/files/RemoteFilesPane.tsx,282,div,"""alert""",,
+features/files/RemoteFilesPane.tsx,282,button,,"""button-secondary""",
+features/files/RemoteFilesPane.tsx,297,button,,"""button-secondary""",
+features/files/RemoteFilesPane.tsx,299,button,,"""button-secondary""",
+features/files/RemoteFilesPane.tsx,299,input,,"""form-input""","""重命名目标"""
+features/files/RemoteFilesPane.tsx,299,button,,"""button-secondary""",
+features/files/RemoteFilesPane.tsx,299,button,,"""button-danger""",
+features/investigations/InvestigationsPane.tsx,261,button,,"""button-secondary""",
+features/investigations/InvestigationsPane.tsx,264,button,,"""button-secondary""",
+features/investigations/InvestigationsPane.tsx,268,section,"""status""","""investigation-notification""",
+features/investigations/InvestigationsPane.tsx,273,button,,"""button-secondary""",
+features/investigations/InvestigationsPane.tsx,281,label,,"""field-label""",
+features/investigations/InvestigationsPane.tsx,282,select,,"""text-input investigation-server-select""",
+features/investigations/InvestigationsPane.tsx,300,div,"""status""","""investigation-target""",
+features/investigations/InvestigationsPane.tsx,314,p,"""alert""","""form-error""",
+features/investigations/InvestigationsPane.tsx,315,label,,"""field-label""",
+features/investigations/InvestigationsPane.tsx,316,textarea,,"""text-input investigation-objective""",
+features/investigations/InvestigationsPane.tsx,324,label,,"""investigation-task-delegation""",
+features/investigations/InvestigationsPane.tsx,325,input,,,
+features/investigations/InvestigationsPane.tsx,341,summary,,,
+features/investigations/InvestigationsPane.tsx,343,label,,"""field-label""",
+features/investigations/InvestigationsPane.tsx,344,textarea,,"""text-input investigation-criteria""",
+features/investigations/InvestigationsPane.tsx,354,label,,"""field-label""",
+features/investigations/InvestigationsPane.tsx,355,select,,"""text-input""",
+features/investigations/InvestigationsPane.tsx,367,label,,"""field-label""",
+features/investigations/InvestigationsPane.tsx,368,select,,"""text-input""",
+features/investigations/InvestigationsPane.tsx,382,label,,,
+features/investigations/InvestigationsPane.tsx,384,input,,"""text-input""","""任务时间窗开始"""
+features/investigations/InvestigationsPane.tsx,392,label,,,
+features/investigations/InvestigationsPane.tsx,394,input,,"""text-input""","""任务时间窗截止"""
+features/investigations/InvestigationsPane.tsx,406,label,,,
+features/investigations/InvestigationsPane.tsx,408,textarea,,"""text-input""",
+features/investigations/InvestigationsPane.tsx,416,label,,,
+features/investigations/InvestigationsPane.tsx,418,textarea,,"""text-input""",
+features/investigations/InvestigationsPane.tsx,438,button,,"""button-primary""",
+features/investigations/InvestigationsPane.tsx,465,p,"""alert""","""form-error""",
+features/investigations/InvestigationsPane.tsx,531,button,,"{`investigation-row ${selected ? ""investigation-row-selected"" : """"}`}",
+features/investigations/InvestigationsPane.tsx,626,button,,"""button-primary""",
+features/investigations/InvestigationsPane.tsx,631,button,,"""button-secondary""",
+features/investigations/InvestigationsPane.tsx,635,button,,"""button-primary""",
+features/investigations/InvestigationsPane.tsx,637,button,,"""button-secondary""",
+features/investigations/InvestigationsPane.tsx,643,p,"""alert""","""form-error""",
+features/investigations/InvestigationsPane.tsx,644,p,"""alert""","""form-error""",
+features/investigations/InvestigationsPane.tsx,653,div,"""status""","""investigation-failure""",
+features/investigations/InvestigationsPane.tsx,664,button,,"""button-secondary""",
+features/investigations/InvestigationsPane.tsx,674,p,"""alert""","""form-error""",
+features/investigations/InvestigationsPane.tsx,677,summary,,,
+features/investigations/InvestigationsPane.tsx,691,summary,,,
+features/investigations/InvestigationsPane.tsx,714,div,"""status""","""investigation-observation""",
+features/investigations/InvestigationsPane.tsx,739,summary,,,
+features/investigations/InvestigationsPane.tsx,740,p,"""alert""","""form-error""",
+features/investigations/InvestigationsPane.tsx,750,button,,"""button-secondary""",
+features/investigations/InvestigationsPane.tsx,752,button,,"""button-secondary""",
+features/investigations/InvestigationsPane.tsx,754,button,,"""button-secondary""",
+features/investigations/InvestigationsPane.tsx,759,label,,,
+features/investigations/InvestigationsPane.tsx,761,select,,"""text-input""",
+features/investigations/InvestigationsPane.tsx,772,label,,,
+features/investigations/InvestigationsPane.tsx,774,select,,"""text-input""",
+features/investigations/InvestigationsPane.tsx,792,button,,"""button-secondary""",
+features/investigations/InvestigationsPane.tsx,805,button,,"""button-secondary""",
+features/investigations/InvestigationsPane.tsx,816,button,,"""button-secondary""",
+features/investigations/InvestigationsPane.tsx,832,summary,,,
+features/investigations/InvestigationsPane.tsx,852,summary,,,
+features/investigations/InvestigationsPane.tsx,860,summary,,,
+features/investigations/InvestigationsPane.tsx,866,summary,,,
+features/investigations/InvestigationsPane.tsx,901,button,,"""button-secondary investigation-option-button""",
+features/investigations/InvestigationsPane.tsx,913,p,"""alert""","""form-error""",
+features/investigations/InvestigationsPane.tsx,937,p,"""status""","""investigation-unknown-outcome""",
+features/investigations/InvestigationsPane.tsx,939,summary,,,
+features/investigations/InvestigationsPane.tsx,940,summary,,,
+features/investigations/InvestigationsPane.tsx,982,button,,"""button-secondary""",
+features/investigations/InvestigationsPane.tsx,986,p,"""alert""","""form-error""",
+features/investigations/InvestigationsPane.tsx,1009,button,,"""button-secondary""",
+features/investigations/InvestigationsPane.tsx,1010,button,,"""button-danger""",
+features/investigations/InvestigationsPane.tsx,1026,button,,"""button-secondary""",
+features/investigations/InvestigationsPane.tsx,1030,p,"""alert""","""form-error""",
+features/investigations/InvestigationsPane.tsx,1042,summary,,,
+features/logs/LogsPane.tsx,53,div,"""status""","""loading-panel""","""读取日志"""
+features/logs/LogsPane.tsx,74,button,,"""button-secondary""","""刷新日志"""
+features/onboarding/GettingStarted.tsx,67,button,,"""button-secondary""",
+features/onboarding/GettingStarted.tsx,74,p,"""status""","""settings-notice""",
+features/onboarding/GettingStarted.tsx,75,p,"""status""",,
+features/onboarding/GettingStarted.tsx,76,div,"""alert""","""form-error""",
+features/onboarding/GettingStarted.tsx,76,button,,"""text-button""",
+features/onboarding/GettingStarted.tsx,81,label,,"""settings-field""",
+features/onboarding/GettingStarted.tsx,82,select,,"""form-input""",
+features/onboarding/GettingStarted.tsx,89,button,,"""button-secondary""",
+features/onboarding/GettingStarted.tsx,103,button,,"""button-secondary""",
+features/onboarding/GettingStarted.tsx,104,p,"""alert""","""form-error""",
+features/onboarding/GettingStarted.tsx,105,button,,"""button-primary""",
+features/onboarding/GettingStarted.tsx,106,p,"""alert""","""form-error""",
+features/onboarding/GettingStarted.tsx,107,p,"""status""","""form-success""",
+features/onboarding/GettingStarted.tsx,112,label,,"""settings-field""",
+features/onboarding/GettingStarted.tsx,112,select,,"""form-input""",
+features/onboarding/GettingStarted.tsx,115,button,,"""button-secondary""",
+features/onboarding/GettingStarted.tsx,116,button,,"""button-secondary""",
+features/onboarding/GettingStarted.tsx,117,button,,"""button-primary""",
+features/onboarding/GettingStarted.tsx,119,p,"""alert""","""form-error""",
+features/onboarding/GettingStarted.tsx,120,p,"""status""","""form-success""",
+features/onboarding/GettingStarted.tsx,125,p,"""alert""","""form-error""",
+features/onboarding/GettingStarted.tsx,127,p,"""alert""","""form-error""",
+features/onboarding/GettingStarted.tsx,131,button,,"""button-secondary""",
+features/onboarding/GettingStarted.tsx,132,button,,"""button-primary""",
+features/onboarding/GettingStarted.tsx,133,button,,"""button-primary""",
+features/overview/InfrastructureDashboard.tsx,50,button,,"""icon-button""","""刷新仪表台"""
+features/overview/InfrastructureDashboard.tsx,50,button,,"""text-button""",
+features/overview/InfrastructureDashboard.tsx,51,p,"""alert""","""dashboard-query-error""",
+features/overview/InfrastructureDashboard.tsx,52,p,"""status""","""dashboard-placeholder""",
+features/overview/InfrastructureDashboard.tsx,55,summary,,,
+features/overview/InfrastructureDashboard.tsx,60,button,,"""text-button""",
+features/overview/InfrastructureDashboard.tsx,61,p,"""alert""","""dashboard-query-error""",
+features/overview/InfrastructureDashboard.tsx,62,p,"""status""","""dashboard-query-error""",
+features/overview/InfrastructureDashboard.tsx,63,p,"""status""","""dashboard-placeholder""",
+features/overview/InfrastructureDashboard.tsx,65,button,,"""dashboard-schedule""",
+features/overview/ServerNetworkSection.tsx,30,summary,,,
+features/overview/ServerNetworkSection.tsx,32,button,,"""icon-button""","""刷新网络与路由"""
+features/overview/ServerNetworkSection.tsx,35,summary,,,
+features/overview/ServerOverview.tsx,141,div,"""group""","""overview-resource-row""","{`${label} ${usage === undefined ? ""读数不可用"" : `${Math.round(usage)}%`}`}"
+features/overview/ServerOverview.tsx,192,button,,"""button-primary""",
+features/overview/ServerOverview.tsx,193,p,"""alert""","""form-error""",
+features/overview/ServerOverview.tsx,214,p,"""alert""","""settings-notice""",
+features/overview/ServerOverview.tsx,282,section,"{server.status === ""error"" ? ""alert"" : ""status""}","{""overview-connection-notice overview-connection-"" + server.status}",
+features/overview/ServerOverview.tsx,288,button,,"""button-secondary""",
+features/overview/ServerOverview.tsx,300,button,,"""icon-button overview-refresh""","{refreshing ? ""正在采集新快照"" : connected ? ""刷新服务器状态"" : ""重新连接后才能刷新""}"
+features/overview/ServerOverview.tsx,304,p,"""status""","""overview-collection-warning""",
+features/overview/ServerOverview.tsx,305,p,"""status""","""overview-collection-progress""",
+features/overview/ServerOverview.tsx,317,summary,,,
+features/overview/ServerOverview.tsx,342,summary,,,
+features/overview/ServerOverview.tsx,356,summary,,,
+features/overview/ServerOverview.tsx,408,summary,,,
+features/overview/ServerOverview.tsx,410,p,"""status""","""muted-copy""",
+features/overview/ServerOverview.tsx,411,p,"""alert""","""error-copy""",
+features/overview/ServerOverview.tsx,420,button,,"""overview-all-activity""",
+features/overview/ServerOverview.tsx,438,button,,"""button-secondary""",
+features/projects/ProjectsPane.tsx,53,button,,"""button-secondary""","""刷新项目"""
+features/servers/AddServerModal.tsx,106,dialog,,"""server-modal""",
+features/servers/AddServerModal.tsx,112,button,,"""icon-button modal-close""","""关闭弹窗"""
+features/servers/AddServerModal.tsx,119,fieldset,,"""server-form-fields""",
+features/servers/AddServerModal.tsx,121,label,,"""field-label""",
+features/servers/AddServerModal.tsx,122,input,,"""form-input""",
+features/servers/AddServerModal.tsx,127,label,,"""field-label""",
+features/servers/AddServerModal.tsx,128,input,,"""form-input""",
+features/servers/AddServerModal.tsx,131,label,,"""field-label""",
+features/servers/AddServerModal.tsx,132,input,,"""form-input form-input-mono""",
+features/servers/AddServerModal.tsx,138,label,,"""field-label""",
+features/servers/AddServerModal.tsx,139,input,,"""form-input""",
+features/servers/AddServerModal.tsx,142,label,,"""field-label""",
+features/servers/AddServerModal.tsx,143,select,,"""form-input""",
+features/servers/AddServerModal.tsx,149,fieldset,,"""form-fieldset""",
+features/servers/AddServerModal.tsx,152,label,,"""form-radio-option""",
+features/servers/AddServerModal.tsx,152,input,,,
+features/servers/AddServerModal.tsx,153,label,,"""form-radio-option""",
+features/servers/AddServerModal.tsx,153,input,,,
+features/servers/AddServerModal.tsx,154,label,,"""form-radio-option""",
+features/servers/AddServerModal.tsx,154,input,,,
+features/servers/AddServerModal.tsx,155,label,,"""form-radio-option""",
+features/servers/AddServerModal.tsx,155,input,,,
+features/servers/AddServerModal.tsx,161,label,,"""field-label""",
+features/servers/AddServerModal.tsx,162,input,,"""form-input""",
+features/servers/AddServerModal.tsx,167,label,,"""field-label""",
+features/servers/AddServerModal.tsx,168,textarea,,"""form-input form-textarea""",
+features/servers/AddServerModal.tsx,171,label,,"""field-label""",
+features/servers/AddServerModal.tsx,172,input,,"""form-input""",
+features/servers/AddServerModal.tsx,180,label,,"""field-label""",
+features/servers/AddServerModal.tsx,181,textarea,,"""form-input form-textarea""",
+features/servers/AddServerModal.tsx,184,label,,"""field-label""",
+features/servers/AddServerModal.tsx,185,input,,"""form-input form-input-mono""",
+features/servers/AddServerModal.tsx,188,label,,"""field-label""",
+features/servers/AddServerModal.tsx,189,input,,"""form-input form-input-mono""",
+features/servers/AddServerModal.tsx,192,label,,"""field-label""",
+features/servers/AddServerModal.tsx,193,input,,"""form-input""",
+features/servers/AddServerModal.tsx,204,fieldset,,"""form-fieldset""",
+features/servers/AddServerModal.tsx,206,label,,"""form-check-option""",
+features/servers/AddServerModal.tsx,207,input,,,
+features/servers/AddServerModal.tsx,217,label,,"""field-label""",
+features/servers/AddServerModal.tsx,218,textarea,,"""form-input form-textarea form-textarea-compact""",
+features/servers/AddServerModal.tsx,229,label,,"""field-label""",
+features/servers/AddServerModal.tsx,230,textarea,,"""form-input form-textarea form-textarea-compact""",
+features/servers/AddServerModal.tsx,242,label,,"""field-label""",
+features/servers/AddServerModal.tsx,243,input,,"""form-input form-input-mono""",
+features/servers/AddServerModal.tsx,255,label,,"""field-label""",
+features/servers/AddServerModal.tsx,256,input,,"""form-input form-input-mono""",
+features/servers/AddServerModal.tsx,268,label,,"""field-label""",
+features/servers/AddServerModal.tsx,271,textarea,,"""form-input form-textarea form-textarea-compact form-input-mono""",
+features/servers/AddServerModal.tsx,288,p,"""alert""","""form-error""",
+features/servers/AddServerModal.tsx,305,button,,"""button-secondary""",
+features/servers/AddServerModal.tsx,306,button,,"""button-primary""",
+features/servers/HostKeyGate.tsx,98,p,"""status""","""muted-copy host-key-gate-loading""",
+features/servers/HostKeyGate.tsx,105,div,"""alert""",,
+features/servers/HostKeyGate.tsx,107,button,,"""button-secondary""",
+features/servers/HostKeySection.tsx,183,div,"""note""","""host-key-policy-note""",
+features/servers/HostKeySection.tsx,256,div,"""alert""","""host-key-warning""",
+features/servers/HostKeySection.tsx,271,p,"""alert""","""form-error""",
+features/servers/HostKeySection.tsx,272,p,"""status""","""form-success""",
+features/servers/HostKeySection.tsx,275,button,,"""button-secondary""",
+features/servers/HostKeySection.tsx,278,button,,"""button-primary""",
+features/servers/HostKeySection.tsx,288,button,,"""button-secondary host-key-forget""",
+features/servers/ServerAuthChallengeModal.tsx,105,dialog,,"""server-modal auth-challenge-modal""",
+features/servers/ServerAuthChallengeModal.tsx,127,fieldset,,"""server-form-fields""",
+features/servers/ServerAuthChallengeModal.tsx,133,label,,"""field-label""",
+features/servers/ServerAuthChallengeModal.tsx,136,input,,"""form-input""",
+features/servers/ServerAuthChallengeModal.tsx,155,p,"""alert""","""form-error""",
+features/servers/ServerAuthChallengeModal.tsx,159,button,,"""button-secondary""",
+features/servers/ServerAuthChallengeModal.tsx,162,button,,"""button-primary""",
+features/servers/ServerList.tsx,47,button,,"""server-preview-toggle""","{preview ? ""退出模拟数据"" : ""加载模拟数据""}"
+features/servers/ServerList.tsx,50,button,,"""icon-button server-sidebar-close""","""关闭服务器列表"""
+features/servers/ServerList.tsx,51,button,,"""icon-button""","""刷新服务器列表"""
+features/servers/ServerList.tsx,52,button,,"""icon-button icon-button-accent""","""添加服务器"""
+features/servers/ServerList.tsx,60,input,,,"""搜索服务器"""
+features/servers/ServerList.tsx,61,button,,"""search-clear""","""清除搜索"""
+features/servers/ServerList.tsx,64,div,"""alert""","""inline-error""",
+features/servers/ServerList.tsx,64,button,,"""text-button text-button-danger""",
+features/servers/ServerList.tsx,65,div,"""alert""","""inline-error""",
+features/servers/ServerList.tsx,65,button,,"""text-button""",
+features/servers/ServerList.tsx,67,button,,"""button-secondary""",
+features/servers/ServerList.tsx,73,button,"""menuitem""",,{`查看 ${server.name} 的属性`}
+features/servers/ServerList.tsx,75,button,"""menuitem""",,{`断开 ${server.name}`}
+features/servers/ServerList.tsx,77,button,"""menuitem""",,{`连接 ${server.name}`}
+features/servers/ServerList.tsx,79,button,"""menuitem""",,{`编辑 ${server.name}`}
+features/servers/ServerList.tsx,80,button,"""menuitem""","""server-action-delete""",{`删除 ${server.name}`}
+features/servers/ServerRowActions.tsx,42,button,,"""server-more-trigger""",{`${name} 的更多操作`}
+features/servers/ServerRowActions.tsx,45,div,"""menu""","""server-actions-menu""",{`${name} 的操作`}
+features/servers/ServerTreeItem.tsx,35,button,,"""server-tree-toggle""","{`${expanded ? ""收起"" : ""展开""} ${server.name} 的资源`}"
+features/servers/ServerTreeItem.tsx,36,button,,"""server-row-main""",{`${server.name}，${address}，${ENVIRONMENT_LABEL_SHORT[server.metadata.environment]}，${SERVER_STATUS_LABEL[server.status]}`}
+features/servers/ServerTreeItem.tsx,47,button,,"""icon-button""",{`打开 ${server.name} 的服务工作页`}
+features/servers/ServerTreeItem.tsx,48,p,"""status""","""server-tree-message""",
+features/servers/ServerTreeItem.tsx,48,button,,"""server-tree-message text-button""",
+features/servers/ServerTreeItem.tsx,49,p,"""status""","""server-tree-message""",
+features/servers/ServerTreeItem.tsx,50,button,,"""server-tree-message text-button""",
+features/servers/ServerTreeItem.tsx,53,summary,,,{`${server.name} · ${container.name}，${container.state}`}
+features/servers/ServerTreeItem.tsx,56,button,,"""server-tree-message text-button""",
+features/services/ServicesPane.tsx,74,button,,"""button-secondary""","""刷新服务"""
+features/settings/McpOAuthDeviceCodeDialog.tsx,86,button,,"""button-secondary""",
+features/settings/McpOAuthDeviceCodeDialog.tsx,90,p,"""status""","""form-hint""",
+features/settings/McpOAuthDeviceCodeDialog.tsx,95,button,,"""button-secondary""",
+features/settings/McpOAuthDeviceCodeDialog.tsx,116,p,"""alert""","""form-error""",
+features/settings/McpOAuthDeviceCodeDialog.tsx,118,p,"""status""","""form-success""",
+features/settings/McpOAuthDeviceCodeDialog.tsx,123,p,"""status""","""form-hint""",
+features/settings/McpOAuthDeviceCodeDialog.tsx,128,p,"""alert""","""form-error""",
+features/settings/McpOAuthDeviceCodeDialog.tsx,135,button,,"""button-secondary""",
+features/settings/McpOAuthDeviceCodeDialog.tsx,139,button,,"""button-primary""",
+features/settings/McpOAuthDeviceCodeDialog.tsx,181,dialog,,"""server-modal mcp-device-code-dialog""",
+features/settings/McpSettings.tsx,323,button,,"""button-secondary""",
+features/settings/McpSettings.tsx,403,p,"""alert""","""form-error""",
+features/settings/McpSettings.tsx,409,summary,,,
+features/settings/McpSettings.tsx,420,button,,"""button-secondary""",
+features/settings/McpSettings.tsx,432,button,,"""button-secondary""",
+features/settings/McpSettings.tsx,443,button,,"""button-primary""",
+features/settings/McpSettings.tsx,461,button,,"""button-secondary""",
+features/settings/McpSettings.tsx,469,button,,"""button-secondary""",
+features/settings/McpSettings.tsx,494,label,,"""field-label""",
+features/settings/McpSettings.tsx,497,input,,"""form-input form-input-mono""",
+features/settings/McpSettings.tsx,507,label,,"""field-label""",
+features/settings/McpSettings.tsx,510,input,,"""form-input""",
+features/settings/McpSettings.tsx,519,label,,"""field-label""",
+features/settings/McpSettings.tsx,522,select,,"""form-input""",
+features/settings/McpSettings.tsx,536,label,,"""field-label""",
+features/settings/McpSettings.tsx,539,input,,"""form-input form-input-mono""",
+features/settings/McpSettings.tsx,549,label,,"""field-label""",
+features/settings/McpSettings.tsx,552,textarea,,"""form-input form-textarea""",
+features/settings/McpSettings.tsx,564,label,,"""field-label""",
+features/settings/McpSettings.tsx,567,input,,"""form-input form-input-mono""",
+features/settings/McpSettings.tsx,578,label,,"""field-label""",
+features/settings/McpSettings.tsx,581,select,,"""form-input""",
+features/settings/McpSettings.tsx,600,label,,"""field-label""",
+features/settings/McpSettings.tsx,603,textarea,,"""form-input form-textarea form-input-mono""",
+features/settings/McpSettings.tsx,620,label,,"""field-label""",
+features/settings/McpSettings.tsx,623,select,,"""form-input""",
+features/settings/McpSettings.tsx,644,label,,"""field-label""",
+features/settings/McpSettings.tsx,647,input,,"""form-input form-input-mono""",
+features/settings/McpSettings.tsx,662,label,,"""field-label""",
+features/settings/McpSettings.tsx,665,input,,"""form-input form-input-mono""",
+features/settings/McpSettings.tsx,677,label,,"""field-label""",
+features/settings/McpSettings.tsx,680,input,,"""form-input form-input-mono""",
+features/settings/McpSettings.tsx,692,label,,"""field-label""",
+features/settings/McpSettings.tsx,695,select,,"""form-input""",
+features/settings/McpSettings.tsx,713,label,,"""settings-check-row""",
+features/settings/McpSettings.tsx,714,input,,,
+features/settings/McpSettings.tsx,728,label,,"""field-label""",
+features/settings/McpSettings.tsx,731,textarea,,"""form-input form-textarea form-input-mono""",
+features/settings/McpSettings.tsx,749,label,,"""settings-check-row""",
+features/settings/McpSettings.tsx,750,input,,,
+features/settings/McpSettings.tsx,763,button,,"""button-primary""",
+features/settings/McpSettings.tsx,766,button,,"""button-secondary""",
+features/settings/McpSettings.tsx,776,p,"""alert""","""form-error""",
+features/settings/McpSettings.tsx,781,p,"""status""","""form-success""",
+features/settings/McpSettings.tsx,810,summary,,,
+features/settings/McpSettings.tsx,813,label,,"""settings-check-row""",
+features/settings/McpSettings.tsx,814,input,,,
+features/settings/McpSettings.tsx,830,label,,"""settings-check-row""",
+features/settings/McpSettings.tsx,831,input,,,
+features/settings/McpSettings.tsx,836,label,,"""settings-check-row""",
+features/settings/McpSettings.tsx,837,input,,,
+features/settings/McpSettings.tsx,846,button,,"""button-secondary""",
+features/settings/NetworkSettings.tsx,64,div,"""alert""","""settings-error-row""",
+features/settings/NetworkSettings.tsx,66,button,,"""text-button""",
+features/settings/NetworkSettings.tsx,72,p,"""status""","""form-hint""",
+features/settings/NetworkSettings.tsx,75,fieldset,,"""settings-form-fields""",
+features/settings/NetworkSettings.tsx,77,label,,"""settings-field""",
+features/settings/NetworkSettings.tsx,79,select,,"""form-input""",
+features/settings/NetworkSettings.tsx,94,label,,"""settings-field""",
+features/settings/NetworkSettings.tsx,96,input,,"""form-input form-input-mono""",
+features/settings/NetworkSettings.tsx,110,label,,"""settings-check-row""",
+features/settings/NetworkSettings.tsx,111,input,,,
+features/settings/NetworkSettings.tsx,125,p,"""status""","""form-hint""",
+features/settings/NetworkSettings.tsx,127,button,,"""button-primary""",
+features/settings/NetworkSettings.tsx,140,div,"""alert""","""settings-error-row""",
+features/settings/NetworkSettings.tsx,145,div,"""status""","""settings-notice""",
+features/settings/PreferenceSettings.tsx,28,select,,"""form-input""",
+features/settings/PreferenceSettings.tsx,33,select,,"""form-input""",
+features/settings/PreferenceSettings.tsx,38,select,,"""form-input""",
+features/settings/PreferenceSettings.tsx,48,select,,"""form-input""",
+features/settings/PreferenceSettings.tsx,56,button,,"""text-button""",
+features/settings/PreferenceSettings.tsx,69,label,,"""settings-field""",
+features/settings/PreferenceSettings.tsx,73,label,,"""settings-check-row""",
+features/settings/PreferenceSettings.tsx,73,input,,,
+features/settings/ProviderPicker.tsx,60,label,,"""settings-field provider-picker-field""",
+features/settings/ProviderPicker.tsx,62,select,,"""form-input""",
+features/settings/ProviderPicker.tsx,79,button,,"""button-secondary""",
+features/settings/ProviderPicker.tsx,92,button,,"""button-secondary provider-picker-delete""",
+features/settings/ProviderPicker.tsx,121,button,,"""text-button""",
+features/settings/ProviderPicker.tsx,124,button,,"""button-secondary provider-picker-confirm-delete""",
+features/settings/RuntimeSettings.tsx,40,div,"""tablist""","""settings-section-tabs""","""设置分区"""
+features/settings/RuntimeSettings.tsx,41,button,"""tab""",,
+features/settings/RuntimeSettings.tsx,52,div,"""tabpanel""",,
+features/settings/RuntimeSettings.tsx,102,button,,"""button-secondary""",
+features/settings/RuntimeSettings.tsx,107,div,"""alert""","""settings-error-row""",
+features/settings/RuntimeSettings.tsx,107,button,,"""text-button""",
+features/settings/RuntimeSettings.tsx,128,div,"""alert""",{`settings-error-row${closing}`},
+features/settings/RuntimeSettings.tsx,130,button,,"""text-button""",
+features/settings/RuntimeSettings.tsx,202,button,,"""button-secondary button-small""",
+features/settings/RuntimeSettings.tsx,204,p,"""status""","""muted-copy""",
+features/settings/RuntimeSettings.tsx,229,div,"""alert""","""settings-error-row""",
+features/settings/RuntimeSettings.tsx,229,button,,"""text-button""",
+features/settings/RuntimeSettings.tsx,230,div,"""alert""","""settings-error-row""",
+features/settings/RuntimeSettings.tsx,230,button,,"""text-button""",
+features/settings/RuntimeSettings.tsx,231,div,"""alert""","""settings-error-row""",
+features/settings/RuntimeSettings.tsx,231,button,,"""text-button""",
+features/settings/RuntimeSettings.tsx,232,p,"""status""","""settings-storage-note provider-picker-notice""",
+features/settings/RuntimeSettings.tsx,318,fieldset,,"""settings-form-fields""",
+features/settings/RuntimeSettings.tsx,320,input,,"""form-input""",
+features/settings/RuntimeSettings.tsx,321,input,,"""form-input""",
+features/settings/RuntimeSettings.tsx,322,select,,"""form-input""",
+features/settings/RuntimeSettings.tsx,323,input,,"""form-input""",
+features/settings/RuntimeSettings.tsx,324,input,,"""form-input""",
+features/settings/RuntimeSettings.tsx,325,input,,"""form-input""",
+features/settings/RuntimeSettings.tsx,328,summary,,,
+features/settings/RuntimeSettings.tsx,330,input,,"""form-input""",
+features/settings/RuntimeSettings.tsx,331,select,,"""form-input""",
+features/settings/RuntimeSettings.tsx,332,input,,"""form-input""",
+features/settings/RuntimeSettings.tsx,333,textarea,,"""form-input form-textarea""",
+features/settings/RuntimeSettings.tsx,338,div,"""alert""","""settings-error-row""",
+features/settings/RuntimeSettings.tsx,338,button,,"""text-button""",
+features/settings/RuntimeSettings.tsx,339,p,"""status""","""form-success""",
+features/settings/RuntimeSettings.tsx,341,button,,"""button-primary""",
+features/settings/RuntimeSettings.tsx,342,button,,"""button-secondary""",
+features/settings/RuntimeSettings.tsx,350,label,,"{className ? `settings-field ${className}` : ""settings-field""}",
+features/terminal/TerminalPane.tsx,258,div,"""alert""","""terminal-io-error""",
+features/terminal/TerminalPane.tsx,261,button,,"""button-secondary""",
+features/workpages/WorkpageArtifactView.tsx,26,button,,"""button-secondary""",
+features/workpages/WorkpageArtifactView.tsx,27,div,"""status""","""workpage-inline-error""",
+features/workpages/WorkpageArtifactView.tsx,38,svg,"""img""",,{title}
+features/workpages/WorkpageArtifactView.tsx,53,svg,"""img""",,{title}
+features/workpages/WorkpagesDock.tsx,37,button,,"""workpages-launcher-button team-operation-target""",{`打开${WORKPAGE_LABEL[kind]}`}
+features/workpages/WorkpagesDock.tsx,50,button,,"""icon-button workpages-add-trigger""","""打开其他工作页"""
+features/workpages/WorkpagesDock.tsx,51,div,"""dialog""","""workpages-add-menu""","""打开工作页"""
+features/workpages/WorkpagesDock.tsx,62,button,,"""workpages-records-button""","""操作记录"""
+features/workpages/WorkpagesDock.tsx,63,button,,"""workpages-layer-toggle""","{state.collapsed ? ""恢复信息层"" : ""收起信息层，展开对话""}"
+features/workpages/WorkpagesDock.tsx,98,div,"""tablist""","""workpage-tabs""","""已打开的工作页"""
+features/workpages/WorkpagesDock.tsx,98,button,"""tab""","{`team-operation-target ${page.id === state.activeId ? ""is-active"" : """"}`}",
+features/workpages/WorkpagesDock.tsx,140,section,"""tabpanel""","{`workpage-frame team-operation-target workpage-kind-${page.kind} workpage-dock-${page.dock} ${active ? ""is-active"" : """"}`}",
+features/workpages/WorkpagesDock.tsx,142,button,,"""icon-button workpage-dock-control""","{page.dock === ""left"" ? ""移到右侧"" : ""移到左侧""}"
+features/workpages/WorkpagesDock.tsx,143,button,,"""icon-button""","{expanded ? ""还原工作页"" : ""展开工作页""}"
+features/workpages/WorkpagesDock.tsx,144,button,,"""icon-button""","{page.kind === ""terminal"" ? ""在独立窗口新建终端会话"" : ""在独立窗口打开""}"
+features/workpages/WorkpagesDock.tsx,145,button,,"""icon-button""",{`关闭${WORKPAGE_LABEL[page.kind]}工作页`}
+features/workpages/WorkpagesDock.tsx,147,div,"""alert""","""workpage-inline-error""",
+features/workpages/WorkpagesDock.tsx,168,div,"""status""","""workpage-loading""","""加载工作页"""
+features/workpages/WorkpagesDock.tsx,181,button,,"""button-secondary""",
+features/workpages/WorkpagesDock.tsx,181,button,,"""button-secondary""",
+features/workpages/WorkpagesDock.tsx,190,summary,,,
+features/workpages/WorkpagesDock.tsx,191,summary,,,
+features/workpages/WorkpagesDock.tsx,203,button,,"""workpage-operations-toggle""",
+features/workpages/WorkpagesDock.tsx,204,button,,,
+features/workpages/WorkpagesDock.tsx,204,button,,,
+features/workpages/WorkpagesDock.tsx,204,button,,,
+features/workpages/WorkpagesDock.tsx,204,button,,"""icon-button""","""刷新操作记录"""
+features/workpages/WorkpagesDock.tsx,205,div,"""alert""","""workpage-inline-error""",
+features/workpages/WorkpagesDock.tsx,205,button,,"""text-button""",
+features/workpages/WorkpagesDock.tsx,206,div,"""status""","""workpage-empty""",
+features/workpages/WorkpagesDock.tsx,206,div,"""alert""","""workpage-inline-error""",
+features/workpages/WorkpagesDock.tsx,206,button,,,
+features/workpages/WorkpagesDock.tsx,207,button,,,
+features/workpages/WorkspaceLayers.tsx,103,button,,"""workspace-conversation-grip""","""上下移动临时对话"""
+features/workpages/WorkspaceLayers.tsx,105,button,,"""text-button workspace-conversation-center""",
+features/workpages/WorkspaceLayers.tsx,106,button,,"""text-button""",
+features/workpages/WorkspaceLayers.tsx,113,button,,"""workspace-conversation-resize""","""调整临时对话大小"""

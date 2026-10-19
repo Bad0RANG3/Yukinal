@@ -136,10 +136,9 @@
 
    The rules of the system:
 
-   - Only `opacity` and `transform` carry movement. Both are compositor-only,
-     so an animation never triggers layout or paint. The single exception is
-     the shell's `grid-template-columns`, which is the one thing that cannot be
-     expressed as a transform.
+   - Prefer small opacity/transform transitions. Compositing depends on the
+     engine and layer budget; disclosure height and shell columns also perform
+     layout and must stay bounded.
 
    - Distance stays small. An element already on screen that enters from 10px
      away reads as a jump; 6px reads as settling.
@@ -653,30 +652,16 @@
   transition: background-color var(--motion-fast) ease, border-color var(--motion-fast) ease;
 }
 
-/* Feed entries arrive as they are appended during a run, staggered just enough
-   that a burst of tool calls reads as a sequence rather than a wall. */
-.agent-feed > :not(.agent-empty) {
-  animation: list-item-enter var(--motion-medium) var(--motion-ease) both;
+/* Animate only entries appended to the active conversation. Restored history
+   stays still; token updates retain the same node and never replay an entrance. */
+.agent-feed > .is-new-entry {
+  animation: list-item-enter var(--motion-fast) var(--motion-ease) both;
 }
 
-.agent-feed > :nth-child(n + 2) { animation-delay: var(--motion-stagger); }
-.agent-feed > :nth-child(n + 3) { animation-delay: calc(var(--motion-stagger) * 2); }
-.agent-feed > :nth-child(n + 4) { animation-delay: calc(var(--motion-stagger) * 3); }
-.agent-feed > :nth-child(n + 5) { animation-delay: calc(var(--motion-stagger) * 4); }
-
-
-/* The caret marks the single place in the feed that is still moving. Without
-   it a slow model turn is indistinguishable from a stalled one. It hangs on the
-   last block of the rendered Markdown, so a streaming answer shows it after the
-   paragraph the model is currently writing. */
-.agent-entry-streaming .agent-entry-body > :last-child::after {
-  display: inline-block;
-  width: 0.5em;
-  margin-left: 0.15em;
+/* The explicit stream indicator also works after tables and structured cards. */
+.agent-stream-caret {
+  display: inline-block; width: 4px; height: 12px; border-radius: 1px;
   background: currentColor;
-  content: "";
-  height: 1em;
-  vertical-align: -0.15em;
   animation: caret-blink var(--motion-blink-cycle) steps(1, end) infinite;
 }
 
@@ -826,7 +811,7 @@
   /* 只有真正的 `<details>` 能用 ::details-content。
      `.activity-trace-detail` 是一个条件渲染的 div，不是 details —— 它靠
      presence + expand-enter / expand-exit 走另一条路，不要写在这里。 */
-  .tool-card::details-content {
+  :is(.tool-card, .agent-reasoning, .approval-input, .agent-settings-advanced)::details-content {
     block-size: 0;
     overflow: hidden;
     transition:
@@ -834,7 +819,7 @@
       content-visibility var(--motion-medium) allow-discrete;
   }
 
-  .tool-card[open]::details-content {
+  :is(.tool-card, .agent-reasoning, .approval-input, .agent-settings-advanced)[open]::details-content {
     block-size: auto;
   }
 }
@@ -857,7 +842,8 @@
 
 .composer-suggestions,
 .agent-settings-panel,
-.agent-model-popover {
+.agent-model-popover,
+.agent-effort-menu {
   transform-origin: bottom center;
   animation: popover-enter var(--motion-fast) var(--motion-ease) both;
 }
@@ -866,13 +852,15 @@
   transform-origin: bottom left;
 }
 
-.agent-model-popover {
+.agent-model-popover,
+.agent-effort-menu {
   transform-origin: bottom right;
 }
 
 .composer-suggestions.is-closing,
 .agent-settings-panel.is-closing,
-.agent-model-popover.is-closing {
+.agent-model-popover.is-closing,
+.agent-effort-menu.is-closing {
   pointer-events: none;
   animation: popover-exit var(--motion-fast) var(--motion-exit) both;
 }

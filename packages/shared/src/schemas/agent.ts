@@ -41,12 +41,29 @@ const ApprovalRequestSchema = z.strictObject({
   }
 });
 
+export const AgentTeamTaskSchema = z.strictObject({
+  id: RunIdSchema, runId: RunIdSchema, sessionId: RunIdSchema, parentRunId: RunIdSchema,
+  roleId: RunIdSchema,
+  team: z.enum(["blue", "red", "purple", "white", "yellow", "orange", "green"]),
+  title: z.string().min(1).max(160),
+  serverId: z.string().regex(/^srv_[a-z0-9]+$/).nullable(),
+  access: z.enum(["read", "write"]),
+  state: z.enum(["queued", "running", "waiting_approval", "completed", "failed", "cancelled", "interrupted"]),
+  createdAt: TimestampSchema, updatedAt: TimestampSchema,
+  revision: z.number().int().nonnegative(), lastTool: z.string().max(256).optional(),
+  result: z.string().max(12000).optional(), error: z.string().max(4000).optional(),
+  usage: z.strictObject({ inputTokens: z.number().int().nonnegative(), outputTokens: z.number().int().nonnegative(), reportedRequests: z.number().int().nonnegative().optional(), unreportedRequests: z.number().int().nonnegative().optional() }).optional(),
+  approval: ApprovalRequestSchema.optional(),
+});
+
 const TokenCountSchema = z.number().int().nonnegative().max(Number.MAX_SAFE_INTEGER);
 
 /** Cumulative totals for one run, not just the latest Provider turn. */
 const AgentTokenUsageSchema = z.strictObject({
   inputTokens: TokenCountSchema,
   outputTokens: TokenCountSchema,
+  reportedRequests: TokenCountSchema.optional(),
+  unreportedRequests: TokenCountSchema.optional(),
 });
 
 /**
@@ -95,6 +112,7 @@ export const AgentRunResultSchema = z.strictObject({
  * stops accepting what the transport cannot produce.
  */
 export const AGENT_EVENT_MEMBER_SCHEMAS = {
+  "agent.team_task": z.strictObject({ type: z.literal("agent.team_task"), runId: RunIdSchema, task: AgentTeamTaskSchema, at: TimestampSchema }),
   "agent.started": z.strictObject({ type: z.literal("agent.started"), runId: RunIdSchema, taskId: RunIdSchema.optional(), at: TimestampSchema }),
   "agent.thinking": z.strictObject({ type: z.literal("agent.thinking"), runId: RunIdSchema, textDelta: z.string().max(20_000).optional(), at: TimestampSchema }),
   "agent.text": z.strictObject({ type: z.literal("agent.text"), runId: RunIdSchema, textDelta: z.string().max(20_000), at: TimestampSchema }),

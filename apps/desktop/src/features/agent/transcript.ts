@@ -46,7 +46,7 @@ export type ToolOutcome = {
  * `system` 是**应用自己的声音**，不是模型的输出（例如 `/help` 的回复）。
  * 它必须与 assistant 分开：把应用的话冒充成 Agent 说的，就是在伪造记录。
  */
-export type Entry =
+export type Entry = (
   | { kind: "user"; text: string; attachments?: AgentPromptPart[] }
   | ({ kind: "assistant"; text: string } & ReplyIdentity)
   | { kind: "reasoning"; text: string }
@@ -57,7 +57,11 @@ export type Entry =
       result?: ToolOutcome;
     })
   | { kind: "approval"; approval: ApprovalRequest }
-  | { kind: "error"; text: string };
+  | { kind: "error"; text: string }
+) & {
+  /** Assigned once at creation/hydration; optional for legacy callers only. */
+  entryId?: string;
+};
 
 /**
  * 长任务会一直往动态里追加。上限只截断最旧的行，不阻止新行写入，
@@ -67,8 +71,17 @@ export const MAX_TRANSCRIPT_ENTRIES = 500;
 
 export type ReplyIdentity = { participant?: AgentParticipant; model?: string };
 
+let entrySequence = 0;
+
+/** Never derive identity from text, array position, or the current object reference. */
+function identifyEntry<T extends Entry>(entry: T): T & { entryId: string } {
+  if (entry.entryId) return entry as T & { entryId: string };
+  const unique = globalThis.crypto?.randomUUID?.() ?? [Date.now(), ++entrySequence, Math.random().toString(36).slice(2)].join("_");
+  return { ...entry, entryId: "entry_" + unique };
+}
+
 export function appendEntries(current: Entry[], additions: Entry[]): Entry[] {
-  return [...current, ...additions].slice(-MAX_TRANSCRIPT_ENTRIES);
+  return [...current, ...additions.slice(-MAX_TRANSCRIPT_ENTRIES).map(identifyEntry)].slice(-MAX_TRANSCRIPT_ENTRIES);
 }
 
 /**
@@ -80,7 +93,7 @@ function appendTextDelta(current: Entry[], kind: "reasoning" | "assistant", delt
   const last = current.at(-1);
   if (last?.kind !== kind || (kind === "assistant" && last.kind === "assistant" && last.participant?.id !== identity.participant?.id)) return appendEntries(current, [{ kind, text: delta, ...identity }]);
   const next = current.slice(-MAX_TRANSCRIPT_ENTRIES);
-  next[next.length - 1] = { ...last, kind, text: last.text + delta };
+  next[next.length - 1] = { ...identifyEntry(last), kind, text: last.text + delta };
   return next;
 }
 
@@ -99,7 +112,7 @@ export function settleAssistantText(current: Entry[], text: string, identity: Re
   const last = current.at(-1);
   if (last?.kind !== "assistant" || last.participant?.id !== identity.participant?.id) return appendEntries(current, [{ kind: "assistant", text, ...identity }]);
   if (last.text === text || text.startsWith(last.text)) {
-    return [...current.slice(0, -1), { ...last, text, ...identity }];
+    return [...current.slice(0, -1), { ...identifyEntry(last), text, ...identity }];
   }
   if (last.text.startsWith(text)) return current;
   return appendEntries(current, [{ kind: "assistant", text, ...identity }]);
@@ -125,7 +138,7 @@ export function settleToolResult(current: Entry[], call: ToolCallFacts, result: 
     (entry) => entry.kind === "tool" && entry.callId === call.callId && entry.result === undefined,
   );
   if (index === -1) return appendEntries(current, [{ kind: "tool", ...call, result }]);
-  const settled: Entry = { kind: "tool", ...call, result };
+  const settled: Entry = { ...identifyEntry(current[index]!), kind: "tool", ...call, result };
   return [...current.slice(0, index), settled, ...current.slice(index + 1)];
 }
 
@@ -140,11 +153,12 @@ export function entriesFromMessages(messages: ChatMessage[]): Entry[] {
         );
         return [{
           kind: "user",
+          entryId: message.id,
           text: message.content,
           ...(attachments?.length ? { attachments } : {}),
         }];
       }
-      if (message.role === "assistant") return [{ kind: "assistant", text: message.content, ...(message.participant ? { participant: message.participant } : {}), ...(message.model ? { model: message.model } : {}) }];
+      if (message.role === "assistant") return [{ kind: "assistant", entryId: message.id, text: message.content, ...(message.participant ? { participant: message.participant } : {}), ...(message.model ? { model: message.model } : {}) }];
       return [];
     })
     .slice(-MAX_TRANSCRIPT_ENTRIES);

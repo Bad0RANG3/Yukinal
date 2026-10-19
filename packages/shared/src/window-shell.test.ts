@@ -5,7 +5,7 @@ import { WindowShellContextSchema, WindowShellSurfaceSchema } from "./window-she
 const context = { section: "servers", serverName: null, serverStatus: null, agentBusy: false };
 
 test("window context covers workspace sections and server lifecycle states", () => {
-  for (const section of ["servers", "agents", "projects", "tasks", "activity", "settings"]) {
+  for (const section of ["servers", "agents", "projects", "tasks", "activity", "board", "settings"]) {
     assert.equal(WindowShellContextSchema.safeParse({ ...context, section }).success, true);
   }
   for (const serverStatus of ["connecting", "connected", "disconnected", "error"]) {

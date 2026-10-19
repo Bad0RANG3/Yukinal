@@ -305,8 +305,12 @@ class ModelLoopTests(unittest.IsolatedAsyncioTestCase):
         )
 
         self.assertEqual(result.status, "succeeded")
-        self.assertEqual([event["type"] for event in events], ["agent.tool_call", "agent.tool_result"])
-        call_event, result_event = events
+        usage_events = [event for event in events if event["type"] == "agent.usage"]
+        self.assertEqual(usage_events[-1]["usage"]["unreportedRequests"], 2)
+        events = [event for event in events if event["type"] != "agent.usage"]
+        self.assertEqual([event["type"] for event in events], ["agent.tool_call", "agent.tool_result", "agent.text"])
+        self.assertEqual(events[-1]["textDelta"], result.answer)
+        call_event, result_event, text_event = events
         self.assertEqual(call_event["runId"], "run-events")
         self.assertEqual(call_event["traceId"], "trace-events")
         self.assertEqual(call_event["input"], {"password": "[redacted]"})
@@ -407,7 +411,8 @@ class ModelLoopTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(resumed.tool_calls, 1)
         self.assertEqual(len(resumed.tool_results), 1)
         self.assertEqual(resumed.tool_results[0]["status"], "succeeded")
-        self.assertEqual([event["type"] for event in events], ["agent.tool_call", "agent.tool_result"])
+        self.assertEqual([event["type"] for event in events], ["agent.tool_call", "agent.tool_result", "agent.text"])
+        self.assertEqual(events[-1]["textDelta"], resumed.answer)
         self.assertEqual(events[1]["callId"], events[0]["callId"])
         self.assertEqual(events[1]["status"], "success")
         self.assertIsNone(resumed.checkpoint_id)

@@ -429,16 +429,24 @@ void SnapshotCell::remove_staging(const TransferStagingFile& artifact) {
 // bookkeeping types stay private to this translation unit.
 struct TransferManagerImpl {
   TransferManagerImpl(std::shared_ptr<TransferBackend> backend_value, std::size_t max_parallel,
-                      std::shared_ptr<TransferHistoryStore> history_value)
+                      std::shared_ptr<TransferHistoryStore> history_value,
+                      TransferManager::WorkerLauncher launcher = {})
       : backend(std::move(backend_value)),
         history(std::move(history_value)),
-        permits(max_parallel < 1 ? 1 : max_parallel) {
+        maximum_admitted(std::clamp(max_parallel, std::size_t{1},
+                            TransferManager::kMaxParallelTransfers) +
+                         TransferManager::kMaxPendingTransfers),
+        permits(std::clamp(max_parallel, std::size_t{1}, TransferManager::kMaxParallelTransfers)),
+        worker_launcher(launcher ? std::move(launcher) : TransferManager::WorkerLauncher{
+            [](std::function<void()> work) { std::thread(std::move(work)).detach(); }}) {
     publisher = std::make_shared<Publisher>();
   }
 
   std::shared_ptr<TransferBackend> backend;
   std::shared_ptr<TransferHistoryStore> history;
+  const std::size_t maximum_admitted;
   Semaphore permits;
+  TransferManager::WorkerLauncher worker_launcher;
   std::shared_ptr<Publisher> publisher;
   std::mutex pending_mutex;
   std::unordered_map<std::string, std::vector<TransferStagingFile>> pending_recovery;
@@ -448,6 +456,7 @@ struct TransferManagerImpl {
   std::atomic<std::size_t> active_workers{0};
   std::mutex workers_mutex;
   std::condition_variable workers_cv;
+  bool shutdown_complete = false;
 };
 
 namespace {
@@ -458,9 +467,38 @@ std::shared_ptr<Job> find_job(TransferManagerImpl& inner, const std::string& id)
   return found == inner.jobs.end() ? nullptr : found->second;
 }
 
+// The reservation also covers persistence and thread creation. Shutdown closes
+// admission and observes registration under the same lock, so it cannot return
+// while an accepted-but-not-yet-spawned request still owns host resources.
+class WorkerAdmission {
+ public:
+  explicit WorkerAdmission(std::shared_ptr<TransferManagerImpl> inner) : inner_(std::move(inner)) {
+    std::lock_guard<std::mutex> lock(inner_->workers_mutex);
+    if (inner_->shutting_down.load()) {
+      throw TransferError(TransferErrorCode::ShuttingDown, "应用正在关闭");
+    }
+    if (inner_->active_workers.load() >= inner_->maximum_admitted) {
+      throw TransferError(TransferErrorCode::Busy, "当前传输较多，请稍后重试");
+    }
+    inner_->active_workers.fetch_add(1);
+  }
+  ~WorkerAdmission() {
+    {
+      std::lock_guard<std::mutex> lock(inner_->workers_mutex);
+      inner_->active_workers.fetch_sub(1);
+    }
+    inner_->workers_cv.notify_all();
+  }
+  WorkerAdmission(const WorkerAdmission&) = delete;
+  WorkerAdmission& operator=(const WorkerAdmission&) = delete;
+ private:
+  std::shared_ptr<TransferManagerImpl> inner_;
+};
+
 void insert_job(TransferManagerImpl& inner, const std::string& id, std::shared_ptr<Job> job) {
+  std::lock_guard<std::mutex> admission_lock(inner.workers_mutex);
   if (inner.shutting_down.load()) {
-    throw TransferError(TransferErrorCode::Cancelled, "the transfer manager is shutting down");
+    throw TransferError(TransferErrorCode::ShuttingDown, "应用正在关闭");
   }
   std::lock_guard<std::mutex> lock(inner.jobs_mutex);
   inner.jobs[id] = std::move(job);
@@ -1590,12 +1628,19 @@ using JobWork = std::function<void(TransferBackend&, const std::shared_ptr<Snaps
 class PermitGuard {
  public:
   explicit PermitGuard(Semaphore& permits) : permits_(permits) {}
-  ~PermitGuard() { permits_.release(); }
+  ~PermitGuard() { release(); }
   PermitGuard(const PermitGuard&) = delete;
   PermitGuard& operator=(const PermitGuard&) = delete;
+  void release() {
+    if (!released_) {
+      permits_.release();
+      released_ = true;
+    }
+  }
 
  private:
   Semaphore& permits_;
+  bool released_ = false;
 };
 
 // Runs on a detached worker. Any exception that escaped run_job is a bug or a
@@ -1625,7 +1670,7 @@ void run_job(const std::shared_ptr<TransferManagerImpl>& inner, const std::strin
     remove_terminal_job(*inner, transfer_id);
     return;
   }
-  const PermitGuard permit_guard(inner->permits);
+  PermitGuard permit_guard(inner->permits);
   bool cancelled_early = false;
   {
     auto guard = job->snapshot->write();
@@ -1641,6 +1686,7 @@ void run_job(const std::shared_ptr<TransferManagerImpl>& inner, const std::strin
   if (!cancelled_early) {
     work(*inner->backend, job->snapshot, job->cancel, *job);
   }
+  permit_guard.release();
   if (cancelled_early) {
     remove_terminal_job(*inner, transfer_id);
     return;
@@ -1660,6 +1706,51 @@ void run_job(const std::shared_ptr<TransferManagerImpl>& inner, const std::strin
   }
   job->snapshot->finalize_status(final_status);
   remove_terminal_job(*inner, transfer_id);
+}
+
+void launch_reserved_job(const std::shared_ptr<TransferManagerImpl>& inner, const std::string& id,
+                         const std::shared_ptr<Job>& job, const char* worker_kind,
+                         std::shared_ptr<WorkerAdmission> admission, JobWork work) {
+  bool persisted = false;
+  bool registered = false;
+  const auto rollback = [&] {
+    if (registered) {
+      std::lock_guard<std::mutex> lock(inner->jobs_mutex);
+      inner->jobs.erase(id);
+    }
+    if (persisted) {
+      job->snapshot->finalize_status(inner->shutting_down.load()
+          ? TransferStatus::Interrupted : TransferStatus::Failed);
+    }
+  };
+  try {
+    job->snapshot->persist_initial();
+    persisted = true;
+    insert_job(*inner, id, job);
+    registered = true;
+    inner->worker_launcher([inner, id, job, worker_kind, admission, work = std::move(work)] {
+      try {
+        run_job(inner, id, job, work);
+      } catch (const std::exception&) {
+        // A provider/allocator exception must release both the I/O permit and
+        // the admitted slot and must not leak internal exception details.
+        fail_job_after_unhandled_exception(inner, id, job,
+            std::string("the ") + worker_kind + " worker failed unexpectedly");
+      } catch (...) {
+        fail_job_after_unhandled_exception(inner, id, job,
+            std::string("the ") + worker_kind + " worker failed unexpectedly");
+      }
+    });
+  } catch (const TransferError&) {
+    rollback();
+    throw;
+  } catch (...) {
+    rollback();
+    throw TransferError(TransferErrorCode::Local, "无法启动文件传输，请稍后重试");
+  }
+  // Retain the start-side owner through publication as well. Shutdown must
+  // wait for both the launching call and the asynchronous job to release it.
+  job->snapshot->publish_initial();
 }
 
 void validate_start(const std::string& server_id, const std::string& remote_dir,
@@ -1762,17 +1853,18 @@ TransferManager::TransferManager(std::shared_ptr<TransferBackend> backend)
     : TransferManager(std::move(backend), kMaxParallelTransfers) {}
 
 TransferManager::TransferManager(std::shared_ptr<TransferBackend> backend,
-                                 std::size_t max_parallel_transfers)
+                                 std::size_t max_parallel_transfers, WorkerLauncher launcher)
     : impl_(std::make_shared<TransferManagerImpl>(std::move(backend), max_parallel_transfers,
-                                                  nullptr)) {}
+                                                  nullptr, std::move(launcher))) {}
 
 TransferManager::TransferManager(std::shared_ptr<TransferManagerImpl> impl)
     : impl_(std::move(impl)) {}
 
 TransferManager TransferManager::with_history(std::shared_ptr<TransferBackend> backend,
-                                              std::shared_ptr<TransferHistoryStore> history) {
+                                              std::shared_ptr<TransferHistoryStore> history,
+                                              WorkerLauncher launcher) {
   auto impl = std::make_shared<TransferManagerImpl>(std::move(backend), kMaxParallelTransfers,
-                                                    std::move(history));
+                                                    std::move(history), std::move(launcher));
   recover_into(impl);
   return TransferManager(std::move(impl));
 }
@@ -1782,40 +1874,20 @@ std::string TransferManager::start_upload(const std::string& server_id,
                                           std::vector<std::filesystem::path> local_paths,
                                           ConflictPolicy policy) {
   validate_start(server_id, remote_dir, local_paths);
+  auto admission = std::make_shared<WorkerAdmission>(impl_);
   const std::string id = new_transfer_id();
   auto snapshot = std::make_shared<SnapshotCell>(
       new_transfer_snapshot(id, server_id, TransferDirection::Upload), impl_->publisher,
       impl_->history);
   auto job = std::make_shared<Job>();
   job->snapshot = snapshot;
-  snapshot->persist_initial();
-  insert_job(*impl_, id, job);
-  snapshot->publish_initial();
-
-  auto inner = impl_;
-  inner->active_workers.fetch_add(1);
-  std::thread([inner, id, job, server_id = std::string(server_id),
-               remote_dir = std::string(remote_dir), local_paths = std::move(local_paths),
-               policy]() {
-    try {
-      run_job(
-          inner, id, job,
-          [&](TransferBackend& backend, const std::shared_ptr<SnapshotCell>& cell,
-              const std::shared_ptr<std::atomic<bool>>& cancel, Job& worker_job) {
-            TransferExecutionContext context{&backend, id, server_id, cell, cancel, policy};
-            upload_batch(context, remote_dir, local_paths, worker_job);
-          });
-    } catch (const std::exception& error) {
-      fail_job_after_unhandled_exception(
-          inner, id, job,
-          std::string("the upload worker failed unexpectedly: ") + error.what());
-    } catch (...) {
-      fail_job_after_unhandled_exception(
-          inner, id, job, "the upload worker failed unexpectedly");
-    }
-    inner->active_workers.fetch_sub(1);
-    inner->workers_cv.notify_all();
-  }).detach();
+  launch_reserved_job(impl_, id, job, "upload", std::move(admission),
+      [id, server_id, remote_dir, local_paths = std::move(local_paths), policy](
+          TransferBackend& backend, const std::shared_ptr<SnapshotCell>& cell,
+          const std::shared_ptr<std::atomic<bool>>& cancel, Job& worker_job) {
+        TransferExecutionContext context{&backend, id, server_id, cell, cancel, policy};
+        upload_batch(context, remote_dir, local_paths, worker_job);
+      });
   return id;
 }
 
@@ -1824,40 +1896,20 @@ std::string TransferManager::start_download(const std::string& server_id,
                                             std::filesystem::path local_dir,
                                             ConflictPolicy policy) {
   validate_download_start(server_id, remote_paths, local_dir);
+  auto admission = std::make_shared<WorkerAdmission>(impl_);
   const std::string id = new_transfer_id();
   auto snapshot = std::make_shared<SnapshotCell>(
       new_transfer_snapshot(id, server_id, TransferDirection::Download), impl_->publisher,
       impl_->history);
   auto job = std::make_shared<Job>();
   job->snapshot = snapshot;
-  snapshot->persist_initial();
-  insert_job(*impl_, id, job);
-  snapshot->publish_initial();
-
-  auto inner = impl_;
-  inner->active_workers.fetch_add(1);
-  std::thread([inner, id, job, server_id = std::string(server_id),
-               remote_paths = std::move(remote_paths), local_dir = std::move(local_dir),
-               policy]() {
-    try {
-      run_job(
-          inner, id, job,
-          [&](TransferBackend& backend, const std::shared_ptr<SnapshotCell>& cell,
-              const std::shared_ptr<std::atomic<bool>>& cancel, Job& worker_job) {
-            TransferExecutionContext context{&backend, id, server_id, cell, cancel, policy};
-            download_batch(context, remote_paths, local_dir, worker_job);
-          });
-    } catch (const std::exception& error) {
-      fail_job_after_unhandled_exception(
-          inner, id, job,
-          std::string("the download worker failed unexpectedly: ") + error.what());
-    } catch (...) {
-      fail_job_after_unhandled_exception(
-          inner, id, job, "the download worker failed unexpectedly");
-    }
-    inner->active_workers.fetch_sub(1);
-    inner->workers_cv.notify_all();
-  }).detach();
+  launch_reserved_job(impl_, id, job, "download", std::move(admission),
+      [id, server_id, remote_paths = std::move(remote_paths), local_dir = std::move(local_dir), policy](
+          TransferBackend& backend, const std::shared_ptr<SnapshotCell>& cell,
+          const std::shared_ptr<std::atomic<bool>>& cancel, Job& worker_job) {
+        TransferExecutionContext context{&backend, id, server_id, cell, cancel, policy};
+        download_batch(context, remote_paths, local_dir, worker_job);
+      });
   return id;
 }
 
@@ -2019,9 +2071,14 @@ void TransferManager::reconcile_remote_staging() {
 }
 
 void TransferManager::shutdown() {
-  if (impl_->shutting_down.exchange(true)) return;
   std::vector<std::shared_ptr<Job>> jobs;
   {
+    std::unique_lock<std::mutex> admission_lock(impl_->workers_mutex);
+    if (impl_->shutting_down.load()) {
+      impl_->workers_cv.wait(admission_lock, [&] { return impl_->shutdown_complete; });
+      return;
+    }
+    impl_->shutting_down.store(true);
     std::lock_guard<std::mutex> lock(impl_->jobs_mutex);
     jobs.reserve(impl_->jobs.size());
     for (auto& entry : impl_->jobs) jobs.push_back(entry.second);
@@ -2045,6 +2102,11 @@ void TransferManager::shutdown() {
     guard->current_item.reset();
     touch(*guard);
   }
+  {
+    std::lock_guard<std::mutex> lock(impl_->workers_mutex);
+    impl_->shutdown_complete = true;
+  }
+  impl_->workers_cv.notify_all();
 }
 
 std::size_t TransferManager::subscribe(SnapshotListener listener) {

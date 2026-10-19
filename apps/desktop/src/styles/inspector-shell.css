@@ -60,10 +60,10 @@
 .inspector-environment-production { color: var(--danger); font-weight: 600; }
 .inspector-environment-staging { color: var(--warning); }
 .inspector-object-address { min-width: 0; margin: 0; color: var(--faint); font-size: var(--text-caption); line-height: 1.5; }
-.inspector-object-address code { font-family: var(--font-terminal); overflow-wrap: anywhere; }
+.inspector-object-address code { display: block; overflow: hidden; font-family: var(--font-terminal); text-overflow: ellipsis; white-space: nowrap; }
 .ai-first .workspace-inspector .server-tabs {
   display: grid;
-  grid-template-columns: repeat(6, minmax(0, 1fr));
+  grid-template-columns: repeat(4, minmax(0, 1fr));
   gap: 0;
   margin: 0 var(--workspace-side-inset);
   padding: 0;
@@ -72,18 +72,18 @@
 }
 .ai-first .workspace-inspector .server-tab {
   min-width: 0;
-  min-height: 34px;
+  min-height: 40px;
   justify-content: center;
   padding: 7px 2px;
   font-size: var(--text-caption);
   white-space: nowrap;
 }
 .ai-first .workspace-inspector .server-tab-active { color: var(--text); }
-.ai-first .workspace-inspector:has(> .inspector-object-header) .workspace-content { padding-top: 18px; }
+.ai-first .workspace-inspector .workspace-content { padding-block: 24px 32px; scroll-padding-block: 24px; overscroll-behavior: contain; }
 
 @container reference (min-width: 600px) {
   .inspector-object-identity { display: grid; grid-template-columns: minmax(0, 1fr) auto; align-items: baseline; }
   .inspector-object-environment { justify-content: flex-end; }
   .inspector-object-address { grid-column: 1 / -1; }
-  .ai-first .workspace-inspector .server-tabs { grid-template-columns: repeat(6, minmax(0, 88px)); }
+  .ai-first .workspace-inspector .server-tabs { grid-template-columns: repeat(4, minmax(0, 88px)); }
 }

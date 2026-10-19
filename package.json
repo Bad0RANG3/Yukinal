@@ -1,6 +1,6 @@
 {
   "name": "yukinal",
-  "version": "2.0.0-rc.7",
+  "version": "2.0.0",
   "private": true,
   "type": "module",
   "description": "AI-native Remote Development & Infrastructure Workspace",
@@ -10,6 +10,7 @@
   },
   "scripts": {
     "check": "node scripts/check.mjs",
+    "check:ai": "node scripts/check-ai.mjs",
     "package": "node scripts/package.mjs",
     "release:manifest": "node scripts/package.mjs --manifest",
     "typecheck": "pnpm -r --if-present typecheck",

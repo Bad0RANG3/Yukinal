@@ -39,7 +39,7 @@ function ArtifactChart({ content, title }: { content: Extract<ArtifactContent, {
     <line x1={zero} x2={zero} y1={8} y2={height - 6} className="workpage-chart-axis" />
     {content.series.map((item, index) => {
       const valueX = 140 + ((item.value - min) / span) * 360, y = index * 34 + 14;
-      return <g key={index}><text x={130} y={y + 16} textAnchor="end" className="workpage-chart-label">{shortLabel(item.label, 17)}</text><rect x={Math.min(zero, valueX)} y={y} width={Math.max(1, Math.abs(valueX - zero))} height={22} rx={3} className="workpage-chart-bar"><title>{item.label}: {item.value}{content.unit ?? ""}</title></rect><text x={510} y={y + 16} className="workpage-chart-value">{item.value}{content.unit ?? ""}</text></g>;
+      return <g key={index}><text x={130} y={y + 16} textAnchor="end" className="workpage-chart-label">{shortLabel(item.label, 17)}</text><rect x={Math.min(zero, valueX)} y={y} width={Math.max(1, Math.abs(valueX - zero))} height={22} rx={3} className="workpage-chart-bar"><title>{`${item.label}: ${item.value}${content.unit ?? ""}`}</title></rect><text x={510} y={y + 16} className="workpage-chart-value">{item.value}{content.unit ?? ""}</text></g>;
     })}
   </svg><figcaption>{title}</figcaption></figure>;
 }

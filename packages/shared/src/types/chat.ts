@@ -292,6 +292,35 @@ export type AgentPromptPart =
 export const AGENT_REASONING_EFFORTS = ["none", "low", "high", "max"] as const;
 export type AgentReasoningEffort = (typeof AGENT_REASONING_EFFORTS)[number];
 
+/** A foreground turn owns this frozen roster; credentials stay in the host. */
+export interface AgentCoordinationConfig {
+  version: 1;
+  roles: Array<{ id: string; team: "blue" | "red" | "purple" | "white" | "yellow" | "orange" | "green"; label: string; systemPrompt: string; providerId?: string; model?: string }>;
+  servers: Array<{ id: string; name: string; environment: ToolTarget["environment"] }>;
+  preferredRoleId?: string;
+}
+
+export interface AgentTeamTask {
+  id: string;
+  runId: string;
+  sessionId: string;
+  parentRunId: string;
+  roleId: string;
+  team: AgentCoordinationConfig["roles"][number]["team"];
+  title: string;
+  serverId: string | null;
+  access: "read" | "write";
+  state: "queued" | "running" | "waiting_approval" | "completed" | "failed" | "cancelled" | "interrupted";
+  createdAt: string;
+  updatedAt: string;
+  revision: number;
+  lastTool?: string;
+  result?: string;
+  error?: string;
+  usage?: AgentTokenUsage;
+  approval?: ApprovalRequest;
+}
+
 /** What UI sends to start a run: targets are ids, not prose. */
 export interface AgentRunRequest {
   runId: string;
@@ -346,6 +375,7 @@ export interface AgentRunRequest {
   /** Omitted uses the provider default; explicit values require adapter support. */
   reasoningEffort?: AgentReasoningEffort;
   toolAccess?: "none";
+  coordination?: AgentCoordinationConfig;
 }
 
 /** `agent.run.stop` params: stop decouples from the run only by its id. */
@@ -357,6 +387,8 @@ export interface AgentRunStopParams {
 export interface AgentTokenUsage {
   inputTokens: number;
   outputTokens: number;
+  reportedRequests?: number;
+  unreportedRequests?: number;
 }
 
 export interface AgentRunResult {
@@ -434,6 +466,7 @@ export interface ApprovalResponse {
  * apart is not answering the question people actually ask of it (ADR 0014).
  */
 export type AgentStreamEvent =
+  | { type: "agent.team_task"; runId: string; task: AgentTeamTask; at: string }
   | { type: "agent.started"; runId: string; at: string }
   | { type: "agent.thinking"; runId: string; textDelta?: string; at: string }
   | { type: "agent.text"; runId: string; textDelta: string; at: string }

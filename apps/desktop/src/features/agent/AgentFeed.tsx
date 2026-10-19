@@ -6,11 +6,13 @@
  * 事实（sidecar、provider、是不是预览模式）。
  */
 
-import type { RefObject, ReactNode, UIEvent } from "react";
+import { useId, useLayoutEffect, useRef, type RefObject, type ReactNode, type UIEvent } from "react";
 
 import type { ApprovalDecision, ApprovalRequest } from "@yukinal/shared";
 
 import { AgentEntryView } from "./AgentEntryView.js";
+import { ConversationScrollRail } from "./ConversationScrollRail.js";
+import { nextFeedEntryMotion, type FeedEntryMotionState } from "./feed-entry-motion.js";
 import type { Entry } from "./transcript.js";
 
 export function AgentFeed({
@@ -24,7 +26,11 @@ export function AgentFeed({
   pendingApprovalIds,
   approvalStatuses,
   feedRef,
+  frameRef,
   onScroll,
+  showJumpControl,
+  onJumpToLatest,
+  motionScope,
   children,
 }: {
   entries: Entry[];
@@ -37,12 +43,21 @@ export function AgentFeed({
   pendingApprovalIds: string[];
   approvalStatuses: Record<string, string>;
   feedRef: RefObject<HTMLDivElement | null>;
+  frameRef: RefObject<HTMLDivElement | null>;
   onScroll: (event: UIEvent<HTMLDivElement>) => void;
+  showJumpControl: boolean;
+  onJumpToLatest: () => void;
+  motionScope: unknown;
   /** 就绪提示等面板级说明，渲染在动态之后。 */
   children?: ReactNode;
 }) {
+  const feedId = useId();
+  const previousMotion = useRef<FeedEntryMotionState<Entry> | null>(null);
+  const motion = nextFeedEntryMotion(previousMotion.current, entries, running, motionScope);
+  useLayoutEffect(() => { previousMotion.current = motion; }, [motion]);
   return (
-    <div ref={feedRef} className="agent-feed" onScroll={onScroll}>
+    <div ref={frameRef} className="agent-feed-frame">
+    <div id={feedId} ref={feedRef} className="agent-feed" role="region" aria-label="对话内容" tabIndex={0} onScroll={onScroll}>
       {entries.length === 0 ? (
         <div className="agent-empty">
           <div className="agent-empty-copy">
@@ -52,8 +67,9 @@ export function AgentFeed({
       ) : (
         entries.map((entry, index) => (
           <AgentEntryView
-            key={index}
+            key={entry.entryId ?? index}
             entry={entry}
+            isNewEntry={index === motion.index}
             onApproval={onApproval}
             approvalBusy={entry.kind === "approval" && pendingApprovalIds.includes(entry.approval.approvalId)}
             approvalStatus={
@@ -64,7 +80,7 @@ export function AgentFeed({
             // Only the tail of the feed can still be growing, and only a
             // running assistant turn grows at all: everything above it is
             // settled history.
-            streaming={running && index === entries.length - 1 && entry.kind === "assistant"}
+            streaming={running && index === entries.length - 1 && (entry.kind === "assistant" || entry.kind === "reasoning")}
           />
         ))
       )}
@@ -75,6 +91,9 @@ export function AgentFeed({
         </div>
       ) : null}
       {children}
+    </div>
+    <ConversationScrollRail viewportRef={feedRef} viewportId={feedId} contentVersion={entries} />
+    {showJumpControl ? <button type="button" className="agent-feed-jump" aria-controls={feedId} onClick={onJumpToLatest}>回到最新 <span aria-hidden="true">↓</span></button> : null}
     </div>
   );
 }

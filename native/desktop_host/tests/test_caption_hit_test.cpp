@@ -1,4 +1,5 @@
 #include "yukinal/desktop_host/caption_hit_test.hpp"
+#include "yukinal/desktop_host/window_geometry.hpp"
 
 #include <cstdlib>
 #include <iostream>
@@ -46,5 +47,29 @@ int main() {
         "content and points beyond the buttons must not trigger window actions");
   check(hit_test_caption_buttons({0, 0, 0, 0}, 0, 0, 0, 0) == CaptionButton::none,
         "unavailable DWM bounds must not create a hit zone");
+
+  using yukinal::desktop_host::frame_client_bounds;
+  const auto full = frame_client_bounds({-8, -8, 1928, 1160}, {0, 0, 1920, 1152}, 8, 8, true);
+  check(full.left == 0 && full.top == 0 && full.right == 1920 && full.bottom == 1152,
+        "maximized content must stop at the visible work area on every edge");
+  const auto secondary = frame_client_bounds({-2572, -12, 12, 1452}, {-2560, 32, 0, 1440}, 12, 12, true);
+  check(secondary.left == -2560 && secondary.top == 32 && secondary.right == 0 && secondary.bottom == 1440,
+        "scaled secondary displays and top taskbars must use their own work area");
+  const auto normal = frame_client_bounds({200, 100, 1648, 1039}, {0, 0, 1920, 1152}, 8, 8, false);
+  check(normal.left == 208 && normal.top == 100 && normal.right == 1640 && normal.bottom == 1031,
+        "restored bounds must preserve the normal window geometry and caption origin");
+
+  using yukinal::desktop_host::FrameResizeEdge;
+  using yukinal::desktop_host::frame_top_resize_edge;
+  check(frame_top_resize_edge({200, 100, 1648, 1039}, 1645, 102, 8, 8, false) == FrameResizeEdge::top_right &&
+        frame_top_resize_edge({200, 100, 1648, 1039}, 202, 102, 8, 8, false) == FrameResizeEdge::top_left &&
+        frame_top_resize_edge({200, 100, 1648, 1039}, 600, 102, 8, 8, false) == FrameResizeEdge::top,
+        "restored top strip must resize both corners before testing caption buttons");
+  check(frame_top_resize_edge({200, 100, 1648, 1039}, 1645, 120, 8, 8, false) == FrameResizeEdge::none &&
+        frame_top_resize_edge({200, 100, 1648, 1039}, 1645, 102, 8, 8, true) == FrameResizeEdge::none &&
+        frame_top_resize_edge({200, 100, 1648, 1039}, 1648, 102, 8, 8, false) == FrameResizeEdge::none,
+        "buttons below the strip, maximized windows and outside points must retain their normal actions");
+  check(frame_top_resize_edge({-2160, 80, 0, 1460}, -2, 82, 12, 12, false) == FrameResizeEdge::top_right,
+        "scaled negative-origin windows must retain their corner resize zone");
   return 0;
 }

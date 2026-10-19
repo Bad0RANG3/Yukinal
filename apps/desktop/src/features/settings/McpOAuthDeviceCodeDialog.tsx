@@ -67,7 +67,7 @@ export function McpOAuthDeviceCodeView({
   // 就住在 `server-modal` 那张卡片里，卡中卡会多出一圈没有意义的边线（SSH 二次认证弹窗
   // 用的是同一套结构）。
   return (
-    <div className="server-form mcp-device-code" role="dialog" aria-labelledby={titleId}>
+    <div className="server-form mcp-device-code">
       <header className="modal-header">
         <div>
           <p className="eyebrow">MCP OAuth</p>
@@ -87,7 +87,7 @@ export function McpOAuthDeviceCodeView({
           <Icon name="copy" size="sm" /> 复制代码
         </button>
       </div>
-      {copyHint ? <p className="form-hint">{copyHint}</p> : null}
+      {copyHint ? <p className="form-hint" role="status">{copyHint}</p> : null}
 
       <p className="form-hint">
         验证页面：<code>{prompt.verificationUri}</code>
@@ -113,6 +113,7 @@ export function McpOAuthDeviceCodeView({
           还没有收到授权结果；这个窗口会一直等到你完成，或者验证码过期。
         </p>
       ) : null}
+      {waiting && message ? <p className="form-error" role="alert">{message}</p> : null}
       {phase === "succeeded" ? (
         <p className="form-success" role="status">
           {message ?? "授权已完成。"}
@@ -131,11 +132,11 @@ export function McpOAuthDeviceCodeView({
 
       <div className="modal-actions">
         {waiting ? (
-          <button type="button" className="button-secondary" onClick={onCancel}>
+          <button data-device-code-dismiss type="button" className="button-secondary" onClick={onCancel}>
             取消授权
           </button>
         ) : (
-          <button type="button" className="button-primary" onClick={onDismiss}>
+          <button data-device-code-dismiss type="button" className="button-primary" onClick={onDismiss}>
             关闭
           </button>
         )}
@@ -164,15 +165,28 @@ export function McpOAuthDeviceCodeDialog({
   useEffect(() => {
     const dialog = dialogRef.current;
     if (!dialog || !modal) return;
+    const previous = document.activeElement;
     if (!dialog.open) dialog.showModal();
-    return () => dialog.close();
+    return () => {
+      dialog.close();
+      if (previous instanceof HTMLElement && previous.isConnected) previous.focus();
+    };
   }, [modal]);
+
+  useEffect(() => {
+    if (modal) dialogRef.current?.querySelector<HTMLButtonElement>("[data-device-code-dismiss]")?.focus();
+  }, [modal, view.phase]);
 
   return (
     <dialog
       ref={dialogRef}
       className="server-modal mcp-device-code-dialog"
       aria-labelledby="mcp-device-code-title"
+      onCancel={(event) => {
+        event.preventDefault();
+        if (view.phase === "waiting") view.onCancel();
+        else view.onDismiss();
+      }}
     >
       <McpOAuthDeviceCodeView {...view} />
     </dialog>

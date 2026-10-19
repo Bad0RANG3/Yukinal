@@ -59,8 +59,9 @@ test("opening the task workspace from a selected server keeps that server availa
   assert.equal(useWorkspaceStore.getState().selectedServerId, "srv_goal_target");
 });
 
-test("Agent NIST follows the dashboard and navigation preserves the current target and draft", () => {
-  assert.deepEqual(PRIMARY_NAV.slice(0, 2), ["servers", "agents"]);
+test("Activity replaces the dashboard and navigation preserves the current target and draft", () => {
+  assert.deepEqual(PRIMARY_NAV, ["activity", "board", "agents", "tasks", "settings"]);
+  assert.equal(useWorkspaceStore.getInitialState().primary, "activity");
   const workspace = useWorkspaceStore.getState();
   workspace.selectServer("srv_role_target");
   workspace.setServerPage("activity");
@@ -352,14 +353,14 @@ test("transcript caps history without dropping the newest entries", () => {
   const full: Entry[] = Array.from({ length: MAX_TRANSCRIPT_ENTRIES }, (_value, index) => ({ kind: "user", text: `u${index}` }));
   const next = appendEntries(full, [{ kind: "assistant", text: "latest" }]);
   assert.equal(next.length, MAX_TRANSCRIPT_ENTRIES);
-  assert.deepEqual(next.at(-1), { kind: "assistant", text: "latest" });
+  assertEntryContent(next.at(-1), { kind: "assistant", text: "latest" });
   assert.deepEqual(next[0], { kind: "user", text: "u1" });
 });
 
 test("reasoning deltas accumulate separately from the answer", () => {
   const first = appendReasoningDelta([{ kind: "user", text: "hi" }], "think");
   const second = appendReasoningDelta(first, " more");
-  assert.deepEqual(second, [
+  assertEntryContent(second, [
     { kind: "user", text: "hi" },
     { kind: "reasoning", text: "think more" },
   ]);
@@ -369,7 +370,7 @@ test("reasoning deltas accumulate separately from the answer", () => {
 test("streaming deltas accumulate into the trailing assistant line", () => {
   const first = appendAssistantDelta([{ kind: "user", text: "hi" }], "你");
   const second = appendAssistantDelta(first, "好");
-  assert.deepEqual(second, [{ kind: "user", text: "hi" }, { kind: "assistant", text: "你好" }]);
+  assertEntryContent(second, [{ kind: "user", text: "hi" }, { kind: "assistant", text: "你好" }]);
 
   // An empty delta must not open a spurious empty assistant row.
   assert.equal(appendAssistantDelta(second, ""), second);
@@ -383,7 +384,7 @@ test("streaming keeps settled rows immutable and enforces the history limit", ()
     assert.equal(next.length, MAX_TRANSCRIPT_ENTRIES);
     assert.equal(next[0], full[full.length - MAX_TRANSCRIPT_ENTRIES]);
     assert.equal(full.length, MAX_TRANSCRIPT_ENTRIES + 3);
-    assert.deepEqual(next.at(-1), { kind, text: "first second" });
+    assertEntryContent(next.at(-1), { kind, text: "first second" });
     assert.deepEqual(full.at(-1), { kind, text: "first" });
   }
 });
@@ -393,7 +394,7 @@ test("a delta arriving after a tool card opens a fresh assistant line", () => {
     { kind: "assistant", text: "先看一下" },
     { kind: "tool", callId: "c1", toolName: "docker.ps", target: "local", riskLevel: "read", decision: "auto" },
   ];
-  assert.deepEqual(appendAssistantDelta(entries, "继续"), [
+  assertEntryContent(appendAssistantDelta(entries, "继续"), [
     ...entries,
     { kind: "assistant", text: "继续" },
   ]);
@@ -594,17 +595,30 @@ test("the two mode axes stay independent", () => {
   assert.equal(AGENT_PERMISSION_MODES.includes("plan" as never), false);
 });
 
+
+function assertEntryContent(actual: unknown, expected: unknown): void {
+  const content = (value: unknown): unknown => {
+    if (Array.isArray(value)) return value.map(content);
+    if (value && typeof value === "object" && "kind" in value) {
+      const { entryId: _entryId, ...rest } = value as Record<string, unknown>;
+      return rest;
+    }
+    return value;
+  };
+  assert.deepEqual(content(actual), expected);
+}
+
 const dockerCall: ToolCallFacts = {  callId: "call_1", toolName: "docker.ps", target: "local · 本地环境", riskLevel: "read", decision: "auto",
 };
 
 test("a tool call opens a pending card and its result fills in the same card", () => {
   const pending = appendToolCall([{ kind: "user", text: "看看容器" }], dockerCall);
-  assert.deepEqual(pending.at(-1), { kind: "tool", ...dockerCall });
+  assertEntryContent(pending.at(-1), { kind: "tool", ...dockerCall });
 
   const settled = settleToolResult(pending, dockerCall, { status: "success", durationMs: 120, summary: "3 个容器" });
   // One row, not two: the call and its result stay a single card.
   assert.equal(settled.length, pending.length);
-  assert.deepEqual(settled.at(-1), {
+  assertEntryContent(settled.at(-1), {
     kind: "tool", ...dockerCall, result: { status: "success", durationMs: 120, summary: "3 个容器" },
   });
 });
@@ -615,32 +629,32 @@ test("tool results pair by callId, not by position", () => {
   // Two calls are in flight; the FIRST one's result arrives first.
   let entries = appendToolCall(appendToolCall([], a), b);
   entries = settleToolResult(entries, a, { status: "success", durationMs: 10, summary: "A" });
-  assert.deepEqual(entries[0], { kind: "tool", ...a, result: { status: "success", durationMs: 10, summary: "A" } });
+  assertEntryContent(entries[0], { kind: "tool", ...a, result: { status: "success", durationMs: 10, summary: "A" } });
   // B must still be pending — a positional match would have wrongly settled it.
   assert.equal((entries[1] as Extract<Entry, { kind: "tool" }>).result, undefined);
 });
 
 test("a result without its call is never dropped", () => {
   const settled = settleToolResult([], dockerCall, { status: "failed", durationMs: 30, summary: "daemon 未运行" });
-  assert.deepEqual(settled, [
+  assertEntryContent(settled, [
     { kind: "tool", ...dockerCall, result: { status: "failed", durationMs: 30, summary: "daemon 未运行" } },
   ]);
 });
 
 test("final assistant text extends the stream or preserves a divergent streamed prefix", () => {
   const streamed: Entry[] = [{ kind: "user", text: "hi" }, { kind: "assistant", text: "部分" }];
-  assert.deepEqual(settleAssistantText(streamed, "部分回答"), [
+  assertEntryContent(settleAssistantText(streamed, "部分回答"), [
     { kind: "user", text: "hi" },
     { kind: "assistant", text: "部分回答" },
   ]);
-  assert.deepEqual(settleAssistantText(streamed, "完全不同的最终文本"), [
+  assertEntryContent(settleAssistantText(streamed, "完全不同的最终文本"), [
     { kind: "user", text: "hi" },
     { kind: "assistant", text: "部分" },
     { kind: "assistant", text: "完全不同的最终文本" },
   ]);
 
   // With no trailing assistant line, the final text is appended once.
-  assert.deepEqual(settleAssistantText([{ kind: "user", text: "hi" }], "完整回答"), [
+  assertEntryContent(settleAssistantText([{ kind: "user", text: "hi" }], "完整回答"), [
     { kind: "user", text: "hi" },
     { kind: "assistant", text: "完整回答" },
   ]);
@@ -653,7 +667,7 @@ test("restoring a stored conversation keeps only the user and assistant turns", 
     { id: "m3", sessionId: "s1", role: "tool", content: "{\"hidden\":true}", traceId: "tr_1", createdAt: "2026-01-01T00:00:02Z" },
     { id: "m4", sessionId: "s1", role: "system", content: "internal", createdAt: "2026-01-01T00:00:03Z" },
   ]);
-  assert.deepEqual(entries, [
+  assertEntryContent(entries, [
     { kind: "user", text: "部署一下" },
     { kind: "assistant", text: "好的" },
   ]);
@@ -688,7 +702,7 @@ test("stored attachment prompt parts survive transcript restoration", () => {
       createdAt: "2026-01-01T00:00:00Z",
     },
   ]);
-  assert.deepEqual(entries, [
+  assertEntryContent(entries, [
     { kind: "user", text: "", attachments: [image, file, document] },
   ]);
 });

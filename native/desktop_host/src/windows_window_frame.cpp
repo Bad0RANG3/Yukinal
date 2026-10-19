@@ -1,6 +1,7 @@
 #include "yukinal/desktop_host/windows_window_frame.hpp"
 #include "yukinal/desktop_host/window_context.hpp"
 #include "yukinal/desktop_host/caption_hit_test.hpp"
+#include "yukinal/desktop_host/window_geometry.hpp"
 
 #include <windows.h>
 #include <dwmapi.h>
@@ -90,8 +91,9 @@ void paint_caption_surface(HWND window, const RECT& client, int height, unsigned
   const double scale = client.right / surface.viewport_width;
   const double left = surface.left * scale;
   const double right = surface.right * scale;
-  const double radius = (std::min)(surface.radius * scale, (right - left) / 2);
-  const double top = 12 * scale;
+  const bool maximized = IsZoomed(window) != FALSE;
+  const double radius = maximized ? 0 : (std::min)(surface.radius * scale, (right - left) / 2);
+  const double top = maximized ? 0 : 12 * scale;
   const double edge = (std::max)(1.0, scale);
   const double shadow_width = (std::max)(1.0, 5 * scale);
   const int first = (std::max)(0, static_cast<int>(left - shadow_width * 3));
@@ -224,6 +226,19 @@ LRESULT CALLBACK fused_frame_proc(HWND window, UINT message, WPARAM wparam, LPAR
   LRESULT dwm_result = 0;
   const bool dwm_handled = DwmDefWindowProc(window, message, wparam, lparam, &dwm_result) != FALSE;
   if (message == WM_NCHITTEST) {
+    RECT bounds{};
+    GetWindowRect(window, &bounds);
+    const int x = static_cast<short>(LOWORD(lparam));
+    const int y = static_cast<short>(HIWORD(lparam));
+    const int side = frame_metric(window, SM_CXFRAME) + frame_metric(window, SM_CXPADDEDBORDER);
+    const int edge = frame_metric(window, SM_CYFRAME) + frame_metric(window, SM_CXPADDEDBORDER);
+    switch (frame_top_resize_edge({bounds.left, bounds.top, bounds.right, bounds.bottom},
+                                  x, y, side, edge, IsZoomed(window) != FALSE)) {
+      case FrameResizeEdge::top_left: return HTTOPLEFT;
+      case FrameResizeEdge::top_right: return HTTOPRIGHT;
+      case FrameResizeEdge::top: return HTTOP;
+      default: break;
+    }
     if (dwm_handled && (dwm_result == HTMINBUTTON || dwm_result == HTMAXBUTTON ||
                         dwm_result == HTCLOSE)) return dwm_result;
     // A custom client frame can make DWM report HTCLIENT after maximizing.
@@ -234,12 +249,6 @@ LRESULT CALLBACK fused_frame_proc(HWND window, UINT message, WPARAM wparam, LPAR
     if (dwm_handled && dwm_result != HTCLIENT && dwm_result != HTNOWHERE) return dwm_result;
     const auto standard = CallWindowProcW(state->previous, window, message, wparam, lparam);
     if (standard != HTCLIENT) return standard;
-    RECT bounds{};
-    GetWindowRect(window, &bounds);
-    const int x = static_cast<short>(LOWORD(lparam));
-    const int y = static_cast<short>(HIWORD(lparam));
-    const int edge = frame_metric(window, SM_CYFRAME) + frame_metric(window, SM_CXPADDEDBORDER);
-    if (!IsZoomed(window) && y < bounds.top + edge) return HTTOP;
     POINT point{x, y};
     ScreenToClient(window, &point);
     RECT client{};
@@ -254,11 +263,23 @@ LRESULT CALLBACK fused_frame_proc(HWND window, UINT message, WPARAM wparam, LPAR
     auto* params = reinterpret_cast<NCCALCSIZE_PARAMS*>(lparam);
     const int x = frame_metric(window, SM_CXFRAME) + frame_metric(window, SM_CXPADDEDBORDER);
     const int y = frame_metric(window, SM_CYFRAME) + frame_metric(window, SM_CXPADDEDBORDER);
-    // Preserve native resize edges. Only the top caption joins our chrome.
-    params->rgrc[0].left += x;
-    params->rgrc[0].right -= x;
-    params->rgrc[0].bottom -= y;
-    if (IsZoomed(window)) params->rgrc[0].top += y;
+    const bool maximized = IsZoomed(window) != FALSE;
+    const auto& bounds = params->rgrc[0];
+    MONITORINFO monitor{sizeof(MONITORINFO)};
+    RECT work{bounds.left + x, bounds.top + y, bounds.right - x, bounds.bottom - y};
+    if (maximized && GetMonitorInfoW(MonitorFromWindow(window, MONITOR_DEFAULTTONEAREST), &monitor)) work = monitor.rcWork;
+    const auto client = frame_client_bounds(
+        {bounds.left, bounds.top, bounds.right, bounds.bottom},
+        {work.left, work.top, work.right, work.bottom}, x, y, maximized);
+    params->rgrc[0] = {client.left, client.top, client.right, client.bottom};
+    return 0;
+  }
+  if (message == WM_SIZE) {
+    // The library's default WM_SIZE fills the entire client first. Calling it
+    // before our caption inset gives the renderer two different viewport sizes
+    // per resize and can cross its responsive breakpoint twice on restore.
+    // This frame owns the widget bounds; its WM_SIZE still updates WebView2.
+    layout_native_content(window, *state);
     return 0;
   }
   if (message == WM_PAINT) { paint_native_chrome(window); return 0; }
@@ -266,7 +287,7 @@ LRESULT CALLBACK fused_frame_proc(HWND window, UINT message, WPARAM wparam, LPAR
   if (dwm_handled) return dwm_result;
 
   const auto result = CallWindowProcW(state->previous, window, message, wparam, lparam);
-  if (message == WM_SIZE || message == WM_DPICHANGED) {
+  if (message == WM_DPICHANGED) {
     layout_native_content(window, *state);
     if (message == WM_DPICHANGED) {
       // Keep DWM's caption strip at the same DPI-scaled height as its WebView
@@ -389,7 +410,7 @@ IpcReply update_caption_surface(webview_t view, const nlohmann::json& params) {
   GetClientRect(window, &caption);
   caption.bottom = frame_scale(window, kChromeHeight);
   InvalidateRect(window, &caption, FALSE);
-  return {true, nlohmann::json::object()};
+  return {true, {{"maximized", IsZoomed(window) != FALSE}}};
 }
 
 void uninstall_fused_frame(webview_t view) {

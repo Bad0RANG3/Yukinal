@@ -13,6 +13,7 @@
 
 import {
   useCallback,
+  useId,
   useLayoutEffect,
   useRef,
   useState,
@@ -33,10 +34,11 @@ import {
 } from "@yukinal/shared";
 
 import { Icon } from "../../components/Icon.js";
-import { AGENT_TEAMS, type AgentRole } from "../agent-nist/agent-nist.js";
+import type { AgentRole } from "../agent-nist/agent-nist.js";
 import { useDismissOnOutsidePointer } from "../../hooks/useDismissOnOutsidePointer.js";
 import { usePresence } from "../../hooks/usePresence.js";
 import { composerKeyAction } from "./composer-keyboard.js";
+import { ConversationSettings } from "./ConversationSettings.js";
 import { ReasoningPicker } from "./ReasoningPicker.js";
 import {
   audioAttachmentUrl,
@@ -61,7 +63,7 @@ import {
   type Submission,
 } from "./composer-triggers.js";
 import { approvalOptionSpec, runModeSpec } from "./run-mode.js";
-import { RUN_POLICY_ORDER, policyEnvironmentWarning, runPolicySpec, type RunPolicyChoice } from "./run-policy.js";
+import { policyEnvironmentWarning, runPolicySpec, type RunPolicyChoice } from "./run-policy.js";
 
 /** 候选列表里的一项：命令与提及共用同一套渲染与键盘导航。 */
 type Suggestion =
@@ -180,9 +182,10 @@ export function AgentComposer({
   );
   const settingsTriggerRef = useRef<HTMLButtonElement>(null);
   const settingsPanelRef = useRef<HTMLDivElement>(null);
+  const settingsId = useId();
   const hasContent = Boolean(prompt.trim() || attachments.length);
   // Preparing a local draft does not require a connected model or runtime.
-  const canEdit = !running && !commandContext.archived;
+  const canEdit = !commandContext.archived;
 
   /**
    * 输入框随内容长高，封顶由 CSS 的 max-height 决定。
@@ -224,6 +227,11 @@ export function AgentComposer({
   const settingsPresence = usePresence(menuOpen, { exitAnimation: "popover-exit" });
   const sendPresence = usePresence(hasContent && !running, { exitAnimation: "pop-exit" });
   const runningPresence = usePresence(running, { exitAnimation: "pop-exit" });
+  const showSend = hasContent && !running;
+  const closeSettings = useCallback(() => {
+    setMenuOpen(false);
+    settingsTriggerRef.current?.focus({ preventScroll: true });
+  }, []);
 
   /* 面板打开时把焦点送进去。
      这不是锦上添花，是这一处原先真的走不通：面板在 DOM 里排在工具栏**之前**，
@@ -236,13 +244,14 @@ export function AgentComposer({
      这一句就静默地什么也没做 —— 而且 menuOpen 之后不再变化，不会再有机会。
      用 rAF 而不是直接 focus：面板刚挂上时入场动画还没跑完，量不到位置。 */
   useLayoutEffect(() => {
-    if (!settingsPresence.mounted) return;
+    if (!menuOpen || !settingsPresence.mounted) return;
     const frame = requestAnimationFrame(() => {
-      const first = settingsPanelRef.current?.querySelector<HTMLElement>("button:not([disabled])");
+      const first = settingsPanelRef.current?.querySelector<HTMLElement>("select:not([disabled])")
+        ?? settingsPanelRef.current?.querySelector<HTMLElement>("button:not([disabled])");
       (first ?? settingsPanelRef.current)?.focus({ preventScroll: true });
     });
     return () => cancelAnimationFrame(frame);
-  }, [settingsPresence.mounted]);
+  }, [menuOpen, settingsPresence.mounted]);
 
   /* Escape 关掉面板，而不是顺手把整个 Agent 面板收起来。
      useAgentPanelShell 挂了一条 window 级的 Escape（收起整个面板），
@@ -255,8 +264,7 @@ export function AgentComposer({
     if (event.key !== "Escape" || !menuOpen) return;
     event.preventDefault();
     event.stopPropagation();
-    setMenuOpen(false);
-    settingsTriggerRef.current?.focus({ preventScroll: true });
+    closeSettings();
   };
 
   /* 点到面板和「+」之外就收起。
@@ -274,9 +282,10 @@ export function AgentComposer({
      被拍扁了，而不是「收回去」。所以这里缓存最后一次非空的列表与高亮位置。
      这是一份渲染缓存，不是状态：它不参与任何判断，只在 closing 时被读取。 */
   const lastSuggestions = useRef<{ items: Suggestion[]; active: number }>({ items: [], active: 0 });
+  const suggestionsId = useId();
   if (open) lastSuggestions.current = { items: suggestions, active };
-  const visibleSuggestions = suggestionsPresence.closing ? lastSuggestions.current.items : suggestions;
-  const visibleActive = suggestionsPresence.closing ? lastSuggestions.current.active : active;
+  const visibleSuggestions = !open ? lastSuggestions.current.items : suggestions;
+  const visibleActive = !open ? lastSuggestions.current.active : active;
 
   const syncTrigger = (value: string, caret: number | null): void => {
     const next = findActiveTrigger(value, caret ?? value.length);
@@ -380,7 +389,11 @@ export function AgentComposer({
   };
 
   return (
-    <footer className="agent-composer" onKeyDown={handleComposerKeyDown}>
+    <footer className="agent-composer" onKeyDown={handleComposerKeyDown} onBlurCapture={(event) => {
+      if (!menuOpen) return;
+      const next = event.relatedTarget as Node | null;
+      if (!settingsPanelRef.current?.contains(next) && !settingsTriggerRef.current?.contains(next)) setMenuOpen(false);
+    }}>
       <div
         className={`agent-composer-shell${draggingAttachment ? " is-dragging-attachment" : ""}`}
         onDragEnter={(event) => {
@@ -505,6 +518,9 @@ export function AgentComposer({
           ref={inputRef}
           rows={1}
           aria-label="消息输入"
+          aria-autocomplete="list"
+          aria-controls={open ? suggestionsId : undefined}
+          aria-activedescendant={open && suggestions[active] ? `${suggestionsId}-${active}` : undefined}
           title="Enter 换行，Ctrl+Enter 发送"
           value={prompt}
           disabled={!canEdit}
@@ -544,21 +560,25 @@ export function AgentComposer({
           <ul
             className={`composer-suggestions ${suggestionsPresence.closing ? "is-closing" : ""}`}
             role="listbox"
+            id={suggestionsId}
+            inert={!open}
+            aria-hidden={!open}
             aria-label={trigger?.kind === "command" ? "可用命令" : "可提及的队伍与服务器"}
             onAnimationEnd={suggestionsPresence.onAnimationEnd}
           >
             {visibleSuggestions.map((suggestion, index) => {
-              const disabled = suggestion.kind === "command" && suggestion.reason !== null;
+              const disabled = !open || (suggestion.kind === "command" && suggestion.reason !== null);
               return (
                 <li key={suggestion.key}>
                   <button
                     type="button"
                     role="option"
+                    id={`${suggestionsId}-${index}`}
                     aria-selected={index === visibleActive}
                     className={`composer-suggestion ${index === visibleActive ? "is-active" : ""}`}
                     disabled={disabled}
                     onMouseDown={(event) => event.preventDefault()}
-                    onClick={() => applySuggestion(suggestion)}
+                    onClick={() => { if (open && !disabled) applySuggestion(suggestion); }}
                   >
                     <span className="composer-suggestion-name">
                       {suggestion.kind === "command" ? `/${suggestion.spec.name}` : `@${suggestion.candidate.label}`}
@@ -573,166 +593,64 @@ export function AgentComposer({
           </ul>
         ) : null}
 
-        {settingsPresence.mounted ? (
-          <div
-            ref={settingsPanelRef}
-            className={`agent-settings-panel ${settingsPresence.closing ? "is-closing" : ""}`}
-            // 这是一个**非模态**对话框：它不遮挡页面、不拦输入、不需要 aria-modal
-            // （加了反而会让读屏把面板之外的内容整个忽略掉）。它是一个挂在输入区
-            // 上的弹出设置面板，焦点在面板与触发按钮之间自由移动即可。
-            role="dialog"
-            aria-label="附件与对话设置"
-            tabIndex={-1}
-            onAnimationEnd={settingsPresence.onAnimationEnd}
-          >
-            <section className="agent-settings-group">
-              <button type="button" className="agent-settings-upload" disabled={!canEdit} onClick={() => { fileInputRef.current?.click(); setMenuOpen(false); }}><Icon name="file" size="md" /><span>上传图片或文件</span></button>
-            </section>
-            <section className="agent-settings-group">
-              <label className="agent-settings-permission"><span>访问权限</span><select aria-label="访问权限" value={permissionMode} disabled={running} onChange={(event) => onPermissionModeChange(event.target.value as AgentPermissionMode)}><option value="ask">请求批准</option><option value="auto">帮我批准</option></select></label>
-            </section>
-            {roles.length ? <section className="agent-settings-group">
-              <p className="agent-settings-title">回复角色</p>
-              <label className="agent-role-picker" title="自动匹配角色，或使用 @队伍指定本次回复">
-                <span className="sr-only">回复角色</span>
-                <select aria-label="回复角色" value={selectedRoleId ?? ""} disabled={running} onChange={(event) => onSelectRole?.(event.target.value || null)}>
-                  <option value="">自动匹配</option>
-                  {AGENT_TEAMS.map((team) => <optgroup key={team.id} label={team.label}>
-                    {roles.filter((role) => role.team === team.id).map((role) => <option key={role.id} value={role.id}>{team.label} · {role.name}</option>)}
-                  </optgroup>)}
-                </select>
-              </label>
-            </section> : null}
-            <section className="agent-settings-group">
-              <label className="agent-settings-readonly"><input type="checkbox" checked={modeSpec.readOnly} disabled={running} onChange={(event) => onRunModeChange(event.target.checked ? "readonly" : "goal")} />仅只读</label>
-            </section>
-
-            <section className="agent-settings-group">
-              <p className="agent-settings-title">投递方式</p>
-              <ul className="agent-settings-options">
-                {([
-                  ["async", "流式投递"],
-                  ["sync", "等待完成"],
-                ] as const).map(([value, label]) => (
-                  <li key={value}>
-                    <button
-                      type="button"
-                      className={`agent-settings-option ${value === delivery ? "is-selected" : ""}`}
-                      aria-pressed={value === delivery}
-                      disabled={running}
-                      onClick={() => onDeliveryChange(value)}
-                    >
-                      <span className="agent-settings-option-label">{label}</span>
-                    </button>
-                  </li>
-                ))}
-              </ul>
-            </section>
-
-            <section className="agent-settings-group">
-              <p className="agent-settings-title">目标策略</p>
-              {/* 这一整段**不可选**，而不是「可选但发不出去」。原因不是界面还没做完：
-                  这个 Python Agent Node 没有策略引擎（`permissionPolicyIds` 为空），而
-                  `agent_run_start` 只要收到 `policyId` 就以 `-32602` 拒绝整次运行。于是
-                  每一个可点的选项都只对应一个结果——启动失败。把按钮禁用并说明，是把
-                  「失败」换成了「诚实的不可用」；留着能点则是把失败伪装成可选项。 */}
-              <p className="agent-settings-warning" role="status">
-                本节点暂不支持策略选择：它没有策略引擎，请求里带上策略标识会让整次运行被拒绝。
-                本次运行只由「运行模式」与「访问权限」约束。
-              </p>
-              {policyWarning ? <p className="agent-settings-warning" role="status">{policyWarning}</p> : null}
-              <ul className="agent-settings-options">
-                {RUN_POLICY_ORDER.map((key) => {
-                  const spec = runPolicySpec(key);
-                  return (
-                  <li key={spec.value ?? "environment"}>
-                    <button
-                      type="button"
-                      className={`agent-settings-option ${spec.value === runPolicy ? "is-selected" : ""}`}
-                      aria-pressed={spec.value === runPolicy}
-                      aria-disabled={true}
-                      // 不可选：见本节开头的说明。`disabled` 而不是「点了不做事」，
-                      // 是为了让键盘与辅助技术也读得出「现在用不了」。
-                      disabled
-                      onClick={() => onRunPolicyChange(spec.value)}
-                    >
-                      <span className="agent-settings-option-label">{spec.label}</span>
-                    </button>
-                  </li>
-                  );
-                })}
-              </ul>
-            </section>
-            {status ? <div className="agent-composer-status" aria-label="范围与运行状态">{status}</div> : null}
-          </div>
-        ) : null}
+        {settingsPresence.mounted ? <ConversationSettings
+          id={settingsId} panelRef={settingsPanelRef} open={menuOpen} closing={!menuOpen}
+          running={running} onClose={closeSettings} onAnimationEnd={settingsPresence.onAnimationEnd}
+          runMode={runMode} onRunModeChange={onRunModeChange}
+          permissionMode={permissionMode} onPermissionModeChange={onPermissionModeChange}
+          runPolicy={runPolicy} onRunPolicyChange={onRunPolicyChange} targetEnvironment={targetEnvironment}
+          delivery={delivery} onDeliveryChange={onDeliveryChange}
+          roles={roles} selectedRoleId={selectedRoleId} onSelectRole={onSelectRole}
+        /> : null}
 
         <div className="agent-composer-toolbar">
           <div className="agent-composer-toolbar-left">
-            <button
-              type="button"
-              ref={settingsTriggerRef}
-              className={`agent-composer-tool agent-settings-trigger ${menuOpen ? "is-open" : ""}${modeSpec.readOnly ? " is-readonly" : ""}`}
-              aria-label="添加附件与对话设置"
-              aria-expanded={menuOpen}
-              aria-haspopup="dialog"
-              title={`${modeSpec.readOnly ? "只读 · " : ""}${approvalSpec.label} · ${policyWarning ?? policySpec.label}`}
-              onClick={() => {
-                setMenuOpen((open) => !open);
-                setTrigger(null);
-              }}
-            >
+            <button type="button" className="agent-composer-tool agent-attachment-trigger"
+              aria-label="添加附件" title="添加图片、文件或音频" disabled={!canEdit}
+              onClick={() => { if (canEdit) { setMenuOpen(false); setTrigger(null); fileInputRef.current?.click(); } }}>
               <Icon name="plus" size="md" />
             </button>
-
+            {models.length ? <ReasoningPicker
+              choices={models} selectedModelKey={selectedModelKey}
+              selectedModelTitle={selectedModelLabel ? `当前模型：${selectedModelLabel}` : null}
+              onSelectModel={onSelectModel} levels={reasoningLevels} value={reasoningEffort}
+              disabled={running} onChange={(value) => onReasoningEffortChange?.(value)}
+            /> : <span className="agent-model-empty">未配置模型</span>}
+            <button type="button" ref={settingsTriggerRef}
+              className={`agent-composer-tool agent-settings-trigger${menuOpen ? " is-open" : ""}${modeSpec.readOnly ? " is-readonly" : ""}`}
+              aria-label={`对话设置：${modeSpec.label}，${approvalSpec.label}`} aria-expanded={menuOpen}
+              aria-haspopup="dialog" aria-controls={settingsPresence.mounted ? settingsId : undefined}
+              title={`${modeSpec.label} · ${approvalSpec.label} · ${policyWarning ?? policySpec.label}`}
+              onClick={() => { setMenuOpen((current) => !current); setTrigger(null); }}>
+              <Icon name="settings" size="sm" /><span className="agent-control-label">{modeSpec.label}</span>
+            </button>
           </div>
           <div className="agent-composer-toolbar-right">
-            {models.length ? <ReasoningPicker
-              choices={models}
-              selectedModelKey={selectedModelKey}
-              selectedModelTitle={selectedModelLabel ? `当前模型：${selectedModelLabel}` : null}
-              onSelectModel={onSelectModel}
-              levels={reasoningLevels}
-              value={reasoningEffort}
-              disabled={running}
-              onChange={(value) => onReasoningEffortChange?.(value)}
-            /> : <span className="agent-model-empty">未配置模型</span>}
-            {/* 这里原本有一个恒为 disabled 的麦克风按钮，鼠标悬停只显示「禁止」，
-                点不动也说不清原因 —— 一个不存在的能力不该占据位置。已删除。
-                语音若要做，应作为真实能力连同它的权限与降级路径一起加回来。 */}
-            {/* 发送按钮在有内容时才出现；它不再兼任停止。
-                停止单独成一个按钮，只在运行中出现 —— 原来二者共用一个图标按钮，
-                结果是「没有输入」和「等待运行」两种状态都表现为一个禁用的图标。 */}
-            {sendPresence.mounted ? (
-              <button
-                type="button"
-                className={`agent-send-button ${sendPresence.closing ? "is-closing" : ""}`}
-                aria-label="发送消息"
+            <div className="agent-composer-action">
+              {sendPresence.mounted ? <button type="button"
+                className={`agent-send-button${!showSend ? " is-closing" : ""}`}
+                aria-label="发送消息" aria-hidden={!showSend} inert={!showSend}
                 title={canSend ? "发送消息（Ctrl+Enter）" : sendDisabledReason ?? "请连接模型后发送"}
-                aria-keyshortcuts="Control+Enter Meta+Enter"
-                disabled={!canSend}
-                onClick={submit}
-                onAnimationEnd={sendPresence.onAnimationEnd}
-              >
+                aria-keyshortcuts="Control+Enter Meta+Enter" disabled={!showSend || !canSend}
+                onClick={() => { if (showSend && canSend) submit(); }} onAnimationEnd={sendPresence.onAnimationEnd}>
                 <Icon name="arrowUp" size="md" />
-              </button>
-            ) : null}
-            {runningPresence.mounted ? <button
-              type="button"
-              className={`agent-stop-button${runningPresence.closing ? " is-closing" : ""}`}
-              aria-label="停止运行"
-              title={stopping ? "停止中" : "停止运行"}
-              disabled={!canStop}
-              onClick={onStop}
-              onAnimationEnd={runningPresence.onAnimationEnd}
-            >
-              <Icon name="stop" size="sm" />
-              <span>{stopping ? "停止中" : "停止"}</span>
-            </button> : null}
+              </button> : null}
+              {runningPresence.mounted ? <button type="button"
+                className={`agent-stop-button${!running ? " is-closing" : ""}`}
+                aria-label="停止运行" aria-hidden={!running} inert={!running}
+                title={stopping ? "停止中" : "停止运行"} disabled={!running || !canStop}
+                onClick={() => { if (running && canStop) onStop(); }} onAnimationEnd={runningPresence.onAnimationEnd}>
+                <Icon name="stop" size="sm" /><span>{stopping ? "停止中" : "停止"}</span>
+              </button> : null}
+            </div>
           </div>
         </div>
 
       </div>
+      {status || showSend ? <div className="agent-composer-meta">
+        {status ? <div className="agent-composer-status" aria-label="范围与运行状态">{status}</div> : null}
+        {showSend ? <span className="agent-composer-shortcut" aria-hidden="true">Ctrl+Enter 发送</span> : null}
+      </div> : null}
     </footer>
   );
 }

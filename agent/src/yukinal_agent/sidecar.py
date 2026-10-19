@@ -19,6 +19,7 @@ from yukinal_ssh import SshServiceClient
 
 from .audit import JsonlAuditSink
 from .conversation_store import ConversationStore, message_bytes
+from .coordination import CoordinationRuntime, COORDINATOR_TOOLS, parse_coordination
 from .host_rpc import HostRpcClient
 from .host_tools import (
     HOST_APPROVAL_TOOLS,
@@ -70,6 +71,7 @@ METHODS = {
     "system.describe": True,
     "agent.run.start": True,
     "agent.run.stop": True,
+    "agent.teams.list": True,
     "agent.approval.respond": True,
     "agent.context.reset": True,
     "agent.context.resetAll": True,
@@ -146,6 +148,7 @@ class PythonSidecar:
         self._undelivered_terminals: OrderedDict[str, dict[str, Any]] = OrderedDict()
         self._resetting_sessions: set[str] = set()
         self._resetting_all = False
+        self._coordination = CoordinationRuntime(self._registry, self._conversations, self._emit, self._launch_team)
 
     def set_notification_sink(self, sink: Callable[[str, dict[str, Any]], None] | None) -> None:
         self._notification_sink = sink
@@ -221,6 +224,19 @@ class PythonSidecar:
                     "toolNameCollisions": [],
                     "implemented": dict(METHODS),
                 }
+            elif method == "agent.teams.list":
+                parsed = _strict_object(params, {"sessionId", "focusServerId"})
+                session_id = parsed.get("sessionId")
+                if session_id is not None and (not isinstance(session_id, str) or not session_id.strip() or len(session_id) > 256):
+                    raise _RpcFault(RPC_INVALID_PARAMS, "A conversation is required")
+                if parsed.get("focusServerId") is not None and (not session_id or not _valid_server_id(parsed["focusServerId"])):
+                    raise _RpcFault(RPC_INVALID_PARAMS, "Invalid conversation scope")
+                try:
+                    if session_id is not None:
+                        self._conversations.bind_session(session_id, parsed.get("focusServerId"))
+                except ValueError as error:
+                    raise _RpcFault(RPC_INVALID_PARAMS, str(error)) from None
+                result = {"tasks": [self._coordination.public(job) for job in self._coordination.list(session_id)]}
             elif method == "agent.approval.respond":
                 result = self._approval_respond(params)
             elif method == "agent.memory.list":
@@ -645,6 +661,7 @@ class PythonSidecar:
             return await self._admit_run(request, run_id, admission, resumed)
         finally:
             if run_id not in self._active_runs:
+                self._coordination.parents.pop(run_id, None)
                 self._run_sessions.pop(run_id, None)
                 if request["sessionId"] not in self._run_sessions.values():
                     self._session_locks.pop(request["sessionId"], None)
@@ -668,11 +685,14 @@ class PythonSidecar:
                 model = with_reasoning_effort(model, request["reasoningEffort"])
             except ModelFactoryError as error:
                 raise _RpcFault(RPC_INVALID_PARAMS, str(error)) from None
+        if request.get("coordination"):
+            self._coordination.activate(request)
         try:
             agent = ModelDrivenAgent(
                 self._registry,
                 model,
                 request["agentBudget"],
+                tool_names=_allowed_tools_for_run(self._registry, request.get("mode", "goal"), request),
                 event_sink=self._emit,
                 checkpointer=self._checkpointer,
                 transcript_sink=lambda messages: self._conversations.update_messages(run_id, messages),
@@ -738,6 +758,50 @@ class PythonSidecar:
             print(f"Stopped run {run_id} still answered its synchronous caller", file=sys.stderr, flush=True)
             return {"runId": run_id, "state": "cancelled", "text": "", "steps": 0, "toolCalls": 0}
 
+    async def _launch_team(self, job: dict[str, Any], parent: dict[str, Any], role: dict[str, Any]) -> dict[str, Any]:
+        # Child sessions contain only the bounded task brief. They never hydrate
+        # the native user conversation or wait for its foreground session lock.
+        payload: dict[str, Any] = {
+            "runId": job["runId"], "sessionId": job["workerSessionId"], "prompt": job["goal"],
+            "delivery": "sync", "mode": parent.get("mode", "goal") if job["access"] == "write" else "readonly",
+            "permissionMode": parent.get("permissionMode", "ask"),
+            "persona": {"id": role["id"], "label": role["label"], "systemPrompt": role["systemPrompt"] +
+                "\n你是后台团队成员。只完成当前任务，不能再分派团队。给协调助手返回简短结果、证据、失败和待确认事项。没有执行证据不能声称完成。"},
+            "participant": {"id": role["id"], "label": role["label"], "kind": "agent"},
+        }
+        role_provider = role.get("providerId")
+        provider_id = role_provider or parent.get("providerId")
+        if provider_id:
+            payload["providerId"] = provider_id
+        # A separately selected provider owns its default model. Never carry a
+        # model name from the parent's provider into a provider-only binding.
+        model = role.get("model")
+        if not role_provider:
+            model = model or parent.get("model")
+        if model:
+            payload["model"] = model
+        # Reasoning settings belong to the inherited model. A model-only
+        # override can be incompatible with the parent's reasoning settings.
+        inherits_model = not role_provider and (
+            not role.get("model") or role["model"] == parent.get("model")
+        )
+        if inherits_model and parent.get("reasoningEffort"):
+            payload["reasoningEffort"] = parent["reasoningEffort"]
+        for field in ("taskBudget", "toolAccess", "policyId"):
+            if field in parent:
+                payload[field] = parent[field]
+        if job.get("serverId"):
+            payload["focusServerId"] = job["serverId"]
+            server = next(item for item in parent["coordination"]["servers"] if item["id"] == job["serverId"])
+            payload["target"] = {"host": "remote", "serverId": job["serverId"], "environment": server["environment"]}
+        # An existing durable task binding can be inherited only on its exact
+        # original server. Other jobs do not acquire a host action plan by role.
+        if parent.get("taskId") and parent.get("targetId") == job.get("serverId"):
+            payload["taskId"] = parent["taskId"]
+        self._conversations.import_legacy(payload["sessionId"], job.get("serverId"), [])
+        response = await self._run_start(payload)
+        return response.get("result", {"state": "failed", "error": "team_run_not_started"})
+
     async def _hydrate_conversation(self, request: dict[str, Any]) -> None:
         # Concurrent first turns must share one native snapshot, even while its
         # host request is pending. Use the same ordering as conversation runs.
@@ -798,6 +862,8 @@ class PythonSidecar:
         run_id = parsed.get("runId")
         if not isinstance(run_id, str) or not run_id.strip() or len(run_id) > 256:
             raise _RpcFault(RPC_INVALID_PARAMS, "invalid params")
+        if self._coordination.stop(run_id):
+            return {"stopped": True}
         task = self._active_runs.get(run_id)
         if task is None or task.done():
             return {"stopped": False}
@@ -845,7 +911,7 @@ class PythonSidecar:
         server_id = parsed.get("focusServerId")
         if not isinstance(session_id, str) or not session_id.strip() or len(session_id) > 256 or server_id is not None and not _valid_server_id(server_id):
             raise _RpcFault(RPC_INVALID_PARAMS, "invalid context reset scope")
-        if session_id in self._run_sessions.values():
+        if session_id in self._run_sessions.values() or self._coordination.session_active(session_id):
             raise _RpcFault(RPC_INVALID_PARAMS, "Stop the active session run before resetting its context")
         try:
             self._conversations.bind_session(session_id, server_id)
@@ -871,7 +937,7 @@ class PythonSidecar:
 
     async def _context_reset_all(self, params: object) -> dict[str, Any]:
         _strict_object(params, set())
-        if self._run_sessions:
+        if self._run_sessions or self._coordination.active:
             raise _RpcFault(RPC_INVALID_PARAMS, "Stop all active runs before resetting model context")
         if self._resetting_all or self._resetting_sessions:
             raise _RpcFault(RPC_INVALID_PARAMS, "A context reset is already in progress")
@@ -917,8 +983,12 @@ class PythonSidecar:
             # exactly as `_execute_session_run` would have written them; the callback
             # below stays silent because this path already delivered the event.
             result = {"runId": run_id, "state": "cancelled", "text": "", "steps": 0, "toolCalls": 0}
-            self._terminal_accounting(request, run_id, "cancelled")
-            self._emit_terminal({"type": "agent.completed", "runId": run_id, "result": result, "at": _timestamp()})
+            self._finish_run(request, run_id, "cancelled")
+            self._emit_terminal({
+                "type": "agent.completed", "runId": run_id,
+                **({"taskId": request["taskId"]} if request.get("taskId") else {}),
+                "result": result, "at": _timestamp(),
+            })
             return result
         finally:
             self._run_sessions.pop(run_id, None)
@@ -950,7 +1020,7 @@ class PythonSidecar:
         else:
             self._retry_terminal_delivery(run_id)
             return
-        self._terminal_accounting(request, run_id, state)
+        self._finish_run(request, run_id, state)
         if state == "failed":
             self._emit_terminal({
                 "type": "agent.failed",
@@ -971,8 +1041,8 @@ class PythonSidecar:
         """The durable state a finished run must leave behind, whatever ended it."""
         try:
             self._conversations.finish(run_id, status)
-        except Exception as error:
-            print(f"Could not close run {run_id}: {error}", file=sys.stderr, flush=True)
+        except Exception:
+            print("Agent run status could not be saved to conversation history", file=sys.stderr, flush=True)
         for approval_id, pending in list(self._pending_approvals.items()):
             if pending.run_id == run_id:
                 self._pending_approvals.pop(approval_id, None)
@@ -996,18 +1066,21 @@ class PythonSidecar:
     ) -> dict[str, Any]:
         task_id = request.get("taskId")
         final_status = "failed"
-        # Safe defaults, because every statement below can raise and the terminal event
-        # still has to describe this run: `context_usage` is read by both the cancelled
-        # and the failed branch, and the prologue is exactly what fails in practice.
-        context_usage: dict[str, Any] = {
-            "totalTurns": 0, "includedTurns": 0, "compactedTurns": 0, "inputBytes": 0, "maxInputBytes": 1,
-        }
+        # Safe defaults ensure cancellation and failure events describe the run even
+        # when context construction itself fails.
+        context_usage: dict[str, Any] | None = None
         now = _timestamp
         try:
-            available_bytes = agent.conversation_budget_bytes(request["promptText"], request.get("persona"))
+            # Freeze a fresh coordinator projection each turn. Worker results become
+            # visible without adding worker transcripts to the foreground session.
+            persona = request.get("persona")
+            if request.get("coordination"):
+                persona = {"id": "coordinator", "label": "协调助手", "systemPrompt": self._coordination.context(request) +
+                           "\n当前界面参考：\n" + (request.get("persona") or {}).get("systemPrompt", "")[:4000]}
+            available_bytes = agent.conversation_budget_bytes(request["promptText"], persona)
             memory_budget = min(16 * 1024, available_bytes // 8)
             context = self._conversations.context(request["sessionId"], request.get("targetId"), exclude_run=run_id,
-                                                  max_bytes=available_bytes - memory_budget)
+                                                  max_bytes=available_bytes - memory_budget, query_text=request["promptText"])
             memories, sources = self._conversations.memory_context(request.get("targetId"), request["promptText"], max_bytes=memory_budget)
             context_usage = {**context.usage, "memorySources": sources}
             context_usage["inputBytes"] = message_bytes([*memories, *context.messages]) if memories or context.messages else 0
@@ -1038,7 +1111,7 @@ class PythonSidecar:
                 trace_id=_safe_context_id("trace", run_id),
                 checkpoint_binding=_run_checkpoint_binding(request),
                 require_checkpoint=request["requireCheckpoint"],
-                persona=request.get("persona"),
+                persona=persona,
                 conversation_messages=[*memories, *context.messages],
             )
             while result.status == "awaiting_approval":
@@ -1054,8 +1127,8 @@ class PythonSidecar:
             }
             final_status = result.status
             if result.status == "succeeded":
-                for offset in range(0, len(text), 20_000):
-                    self._emit({"type": "agent.text", "runId": run_id, "textDelta": text[offset:offset + 20_000], "at": now()})
+                # Model text already streamed. The full terminal answer is a
+                # reconciliation snapshot, not another append-only delta.
                 self._emit_terminal({
                     "type": "agent.completed",
                     "runId": run_id,
@@ -1076,7 +1149,8 @@ class PythonSidecar:
             return base_result
         except asyncio.CancelledError:
             final_status = "cancelled"
-            result = {"runId": run_id, "state": "cancelled", "text": "", "steps": 0, "toolCalls": 0, "context": context_usage}
+            result = {"runId": run_id, "state": "cancelled", "text": "", "steps": 0, "toolCalls": 0,
+                      **({"context": context_usage} if context_usage is not None else {})}
             self._emit_terminal({
                 "type": "agent.completed",
                 "runId": run_id,
@@ -1086,8 +1160,10 @@ class PythonSidecar:
             })
             return result
         except Exception:
+            final_status = "failed"
             message = "agent_run_failed"
-            result = {"runId": run_id, "state": "failed", "text": "", "steps": 0, "toolCalls": 0, "error": message, "context": context_usage}
+            result = {"runId": run_id, "state": "failed", "text": "", "steps": 0, "toolCalls": 0, "error": message,
+                      **({"context": context_usage} if context_usage is not None else {})}
             self._emit_terminal({
                 "type": "agent.failed",
                 "runId": run_id,
@@ -1097,7 +1173,46 @@ class PythonSidecar:
             })
             return result
         finally:
-            self._terminal_accounting(request, run_id, final_status)
+            self._finish_run(request, run_id, final_status)
+
+    def _finish_run(self, request: dict[str, Any], run_id: str, status: str) -> None:
+        self._coordination.parents.pop(run_id, None)
+        self._terminal_accounting(request, run_id, status)
+
+    def _emit_terminal(self, event: dict[str, Any]) -> None:
+        run_id = event.get("runId")
+        if isinstance(run_id, str) and run_id in self._terminal_emitted:
+            return
+        try:
+            self._coordination.observe(event)
+        except Exception:
+            print("Agent terminal coordinator status could not be saved", file=sys.stderr, flush=True)
+        if isinstance(run_id, str):
+            try:
+                self._record_run_event(run_id, event)
+            except Exception:
+                print("Agent terminal event could not be saved to conversation history", file=sys.stderr, flush=True)
+        if self._notification_sink is not None:
+            try:
+                self._notification_sink("agent.stream", event)
+            except Exception:
+                print("Agent terminal notification could not be delivered", file=sys.stderr, flush=True)
+                if isinstance(run_id, str):
+                    self._undelivered_terminals[run_id] = event
+                    self._undelivered_terminals.move_to_end(run_id)
+                    while len(self._undelivered_terminals) > 256:
+                        self._undelivered_terminals.popitem(last=False)
+                return
+        if isinstance(run_id, str):
+            self._terminal_emitted.add(run_id)
+            self._undelivered_terminals.pop(run_id, None)
+            if len(self._terminal_emitted) > 512:
+                self._terminal_emitted = set(sorted(self._terminal_emitted)[-256:])
+
+    def _retry_terminal_delivery(self, run_id: str) -> None:
+        event = self._undelivered_terminals.pop(run_id, None)
+        if event is not None:
+            self._emit_terminal(event)
 
     def _prune_admissions(self) -> None:
         # Admissions are insertion ordered and the cap is a memory bound, not a
@@ -1114,52 +1229,32 @@ class PythonSidecar:
             else:
                 self._admissions.popitem(last=False)
 
-    def _record_run_event(self, run_id: str, event: dict[str, Any]) -> None:
-        """Persist a durable-only run event; a broken store must not abort the run."""
+    def _record_run_event(self, run_id: str, event: dict[str, Any], *, required: bool = False) -> bool:
+        """Persist a run event; only required transcript writes can stop a run."""
         try:
             self._conversations.record_event(run_id, event)
-        except Exception as error:
-            print(f"Audit record for {event.get('type')} on {run_id} failed: {error}", file=sys.stderr, flush=True)
+            return True
+        except Exception:
+            event_type = event.get("type")
+            safe_type = event_type if isinstance(event_type, str) and re.fullmatch(r"[A-Za-z0-9_.-]{1,80}", event_type) else "unknown"
+            print(f"Agent run event {safe_type} could not be saved to conversation history", file=sys.stderr, flush=True)
+            if required:
+                raise
+            return False
 
     def _emit(self, event: dict[str, Any]) -> None:
+        if event.get("type") != "agent.team_task" and hasattr(self, "_coordination"):
+            self._coordination.observe(event)
         if isinstance(event.get("runId"), str):
             # The audit row is the durable trace, not the delivery. The UI only leaves
             # `running` on `agent.completed` / `agent.failed`, so a failing conversation
             # store must never be allowed to consume the event.
-            self._record_run_event(event["runId"], event)
+            # A streamed text delta is part of the transcript itself; fail that run
+            # rather than complete with text that could not be recorded. Other events
+            # are best-effort audit rows and must not block the run or its approval.
+            self._record_run_event(event["runId"], event, required=event.get("type") == "agent.text")
         if self._notification_sink is not None:
             self._notification_sink("agent.stream", event)
-
-    def _emit_terminal(self, event: dict[str, Any]) -> None:
-        """Deliver a run's terminal event at most once, whatever else has failed."""
-        run_id = event.get("runId")
-        if isinstance(run_id, str) and run_id in self._terminal_emitted:
-            return
-        try:
-            self._emit(event)
-        except Exception as error:
-            # The UI only leaves `running` when one of these events arrives, so the run
-            # stays unmarked and the event is kept for the done-callback — the one hook
-            # that runs for every run — to hand over again.
-            print(f"Terminal event for run {run_id} was not delivered: {error}", file=sys.stderr, flush=True)
-            if isinstance(run_id, str):
-                self._undelivered_terminals[run_id] = event
-                self._undelivered_terminals.move_to_end(run_id)
-                while len(self._undelivered_terminals) > 256:
-                    self._undelivered_terminals.popitem(last=False)
-            return
-        if isinstance(run_id, str):
-            # Remembered only after delivery, so a failed attempt can be retried while a
-            # delivered event is never sent twice for the same run.
-            self._terminal_emitted.add(run_id)
-            self._undelivered_terminals.pop(run_id, None)
-            if len(self._terminal_emitted) > 512:
-                self._terminal_emitted = set(sorted(self._terminal_emitted)[-256:])
-
-    def _retry_terminal_delivery(self, run_id: str) -> None:
-        event = self._undelivered_terminals.pop(run_id, None)
-        if event is not None:
-            self._emit_terminal(event)
 
     async def _await_approval(
         self,
@@ -1249,6 +1344,7 @@ class PythonSidecar:
         )
 
     async def shutdown(self) -> None:
+        await self._coordination.shutdown()
         active = list(self._active_runs.values())
         for task in active:
             task.cancel()
@@ -1273,7 +1369,7 @@ class PythonSidecar:
             "protocolVersion": RPC_VERSION,
             "agentVersion": self._agent_version,
             "capabilities": {
-                "streaming": False,
+                "streaming": True,
                 "toolCalling": bool(self._registry.list()),
                 "cancellation": True,
                 "mcp": self._mcp_loaded,
@@ -1694,9 +1790,14 @@ def _parse_run_request(value: object) -> dict[str, Any]:
         "runId", "sessionId", "taskId", "taskBudget", "prompt", "messageId", "parts", "delivery",
         "resume", "workspaceId", "focusServerId", "target", "policyId", "permissionMode", "mode",
         "providerId", "model", "reasoningEffort", "toolAccess", "requireCheckpoint", "planBinding",
-        "persona", "participant",
+        "persona", "participant", "coordination",
     }
     parsed = _strict_object(value, fields)
+    if "coordination" in parsed:
+        try:
+            parsed["coordination"] = parse_coordination(parsed["coordination"])
+        except ValueError as error:
+            raise _RpcFault(RPC_INVALID_PARAMS, str(error)) from None
     if "persona" in parsed:
         persona = _strict_object(parsed["persona"], {"id", "label", "systemPrompt"})
         for field, limit in (("id", 256), ("label", 200), ("systemPrompt", 20_000)):
@@ -1870,7 +1971,9 @@ def _allowed_tools_for_run(
 ) -> frozenset[str]:
     if request.get("toolAccess") == "none":
         return frozenset()
-    allowed = set(_allowed_tool_names(registry, mode))
+    if request.get("coordination"):
+        return COORDINATOR_TOOLS
+    allowed = set(_allowed_tool_names(registry, mode)) - COORDINATOR_TOOLS
     if not _host_action_has_plan_binding(request):
         allowed.difference_update(PLAN_BOUND_HOST_ACTION_TOOLS)
     return frozenset(allowed)
@@ -1952,6 +2055,7 @@ def _run_fingerprint(request: dict[str, Any]) -> str:
             "targetId": request.get("targetId"),
             "persona": request.get("persona"),
             "participant": request.get("participant"),
+            **({"coordination": request["coordination"]} if "coordination" in request else {}),
             "providerId": request.get("providerId"),
             "model": request.get("model"),
             "reasoningEffort": request.get("reasoningEffort"),
@@ -1974,7 +2078,7 @@ def _run_checkpoint_binding(request: dict[str, Any]) -> str:
         "sessionId", "taskId", "taskBudget", "prompt", "parts", "workspaceId",
         "focusServerId", "target", "policyId", "permissionMode", "mode",
         "planBinding",
-        "persona", "participant", "reasoningEffort", "toolAccess",
+        "persona", "participant", "reasoningEffort", "toolAccess", "coordination",
     )
     binding = {field: request[field] for field in fields if field in request}
     budget = request.get("agentBudget")

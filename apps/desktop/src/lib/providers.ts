@@ -13,12 +13,22 @@ import { callDesktop, isDesktopShell } from "./ipc.js";
 export const PROVIDERS_QUERY_KEY = ["providers"] as const;
 
 /** Durable provider list shared by Settings and Agent runs. */
-export function useProviders() {
+export function useProviders({ enabled = true }: { enabled?: boolean } = {}) {
   return useQuery({
     queryKey: PROVIDERS_QUERY_KEY,
-    enabled: isDesktopShell(),
+    enabled: enabled && isDesktopShell(),
     queryFn: async () => (await callDesktop(IPC_COMMANDS.providerList, {})).providers,
   });
+}
+
+/** Catalog observers follow the editor visibility; cached choices remain available. */
+export function providerModelsQueryOptions(providerId: string | undefined, { enabled = true }: { enabled?: boolean } = {}) {
+  return {
+    queryKey: [...PROVIDERS_QUERY_KEY, "models", providerId],
+    enabled: enabled && isDesktopShell() && Boolean(providerId),
+    queryFn: async () => (await callDesktop(IPC_COMMANDS.providerModels, { providerId: providerId! })).models,
+    retry: 0,
+  };
 }
 
 /**

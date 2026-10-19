@@ -3,6 +3,7 @@ import { IPC_COMMANDS, type Environment, type Server } from "@yukinal/shared";
 import { useEffect, useRef, useState } from "react";
 
 import { Icon } from "../../components/Icon.js";
+import { HOST_KEY_QUERY_KEY } from "../../lib/host-key.js";
 import { callDesktop, isDesktopShell } from "../../lib/ipc.js";
 import { ENVIRONMENTS, ENVIRONMENT_LABEL_SHORT } from "../../lib/labels.js";
 import { SERVERS_QUERY_KEY } from "../../lib/servers.js";
@@ -97,6 +98,7 @@ export function AddServerModal({ onClose, server }: { onClose: () => void; serve
     },
     onSuccess: (response) => {
       void queryClient.invalidateQueries({ queryKey: SERVERS_QUERY_KEY });
+      void queryClient.invalidateQueries({ queryKey: HOST_KEY_QUERY_KEY(response.server.id) });
       selectServer(response.server.id);
       onClose();
     },

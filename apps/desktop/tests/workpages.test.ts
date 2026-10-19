@@ -1,9 +1,8 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import { artifactFromContent, sandboxedArtifactDocument } from "../src/features/workpages/workpage-model.js";
-import { nextTabIndex } from "../src/features/workpages/tab-navigation.js";
 import { useWorkpagesStore } from "../src/features/workpages/workpages-store.js";
-import { DEFAULT_UI_PREFERENCES, sanitizePreferences } from "../src/stores/preferences-store.js";
+import { centerConversationFrame, fitConversationFrame, moveConversationFrame, resizeConversationFrame } from "../src/features/workpages/conversation-frame.js";
 
 test("artifact output requires an explicit bounded visual envelope", () => {
   const rawHtml = artifactFromContent("a", "Reply", "<script>window.parent.postMessage('x','*')</script>");
@@ -33,7 +32,7 @@ test("interactive document applies a restrictive policy before untrusted content
 test("workpages lock server targets and closing a terminal preserves its mounted session", () => {
   useWorkpagesStore.setState({ pages: [], retainedTerminals: [], recent: [], activeId: null, expandedId: null });
   const store = useWorkpagesStore.getState();
-  store.openTool("terminal", { serverId: "server-a", dock: "left" });
+  store.openTool("terminal", { serverId: "server-a", dock: "left", additional: true });
   store.openTool("logs", { serverId: "server-b", dock: "right" });
   const terminal = useWorkpagesStore.getState().pages.find((page) => page.kind === "terminal")!;
   assert.equal(terminal.serverId, "server-a");
@@ -43,7 +42,6 @@ test("workpages lock server targets and closing a terminal preserves its mounted
   const recent = useWorkpagesStore.getState().recent[0]!;
   store.reopen(recent);
   assert.equal(useWorkpagesStore.getState().pages.at(-1)?.serverId, "server-a");
-  assert.equal(useWorkpagesStore.getState().recent.some((page) => page.id === terminal.id), false);
   assert.equal(useWorkpagesStore.getState().retainedTerminals.length, 1);
   store.toggleExpanded(terminal.id);
   store.close(terminal.id);
@@ -51,46 +49,96 @@ test("workpages lock server targets and closing a terminal preserves its mounted
   assert.equal(useWorkpagesStore.getState().activeId, "tool:logs:server-b");
 });
 
-test("the strip keeps at most eight tabs and moves the dropped one to recents", () => {
-  useWorkpagesStore.setState({ pages: [], retainedTerminals: [], recent: [], activeId: null, expandedId: null });
+test("returning to conversation preserves tools and reopening reveals the same terminal", () => {
+  useWorkpagesStore.setState({ pages: [], retainedTerminals: [], recent: [], activeId: null, expandedId: null, operationsOpen: false, collapsed: false });
   const store = useWorkpagesStore.getState();
-  for (let index = 1; index <= 10; index += 1) store.openTool("logs", { serverId: `server-${index}` });
+  store.openTool("terminal", { serverId: "server-a" });
+  store.openTool("files", { serverId: "server-b" });
+  const pages = useWorkpagesStore.getState().pages;
+  const terminal = useWorkpagesStore.getState().retainedTerminals[0];
+  store.setCollapsed(true);
+  assert.equal(useWorkpagesStore.getState().pages, pages);
+  assert.equal(useWorkpagesStore.getState().retainedTerminals[0], terminal);
+  assert.equal(useWorkpagesStore.getState().recent.length, 0);
+  store.openTool("terminal", { serverId: "server-a" });
+  assert.equal(useWorkpagesStore.getState().collapsed, false);
+  assert.equal(useWorkpagesStore.getState().pages.length, 2);
+  assert.equal(useWorkpagesStore.getState().retainedTerminals[0], terminal);
+  assert.equal(useWorkpagesStore.getState().activeId, terminal?.id);
+  store.setCollapsed(true);
+  store.setOperationsOpen(true);
+  assert.equal(useWorkpagesStore.getState().collapsed, false);
+  assert.equal(useWorkpagesStore.getState().operationsOpen, true);
+});
+
+test("permanent tools cannot be closed or displaced by additional tabs", () => {
+  useWorkpagesStore.setState({ pages: [], retainedTerminals: [], recent: [], activeId: null, expandedId: null, operationsOpen: false, collapsed: false });
+  const store = useWorkpagesStore.getState();
+  for (const kind of ["files", "terminal", "logs", "services"] as const) store.openTool(kind, { serverId: "server-a" });
+  const fixed = useWorkpagesStore.getState().pages;
+  for (const page of fixed) store.close(page.id);
+  assert.deepEqual(useWorkpagesStore.getState().pages, fixed);
+  for (let i = 0; i < 10; i++) store.openArtifact({ id: `result-${i}`, title: `Result ${i}`, content: { format: "markdown", text: "Done" } });
   const state = useWorkpagesStore.getState();
   assert.equal(state.pages.length, 8);
-  // 最早的两个被挤到「最近关闭」，且顺序是旧在前，方便直接重开。
-  assert.deepEqual(state.recent.slice(0, 2).map((page) => page.serverId), ["server-2", "server-1"]);
-  assert.equal(state.activeId, "tool:logs:server-10");
+  assert.deepEqual(state.pages.filter((page) => page.pinned), fixed);
+  assert.ok(state.recent.every((page) => !page.pinned));
 });
 
-test("the orientation axis decides the arrow keys, and never the layout identity", () => {
-  // 横向只认左右：上下键必须交还给浏览器（滚标签行 / 滚对话）。
-  assert.equal(nextTabIndex("ArrowRight", 0, 3, "horizontal"), 1);
-  assert.equal(nextTabIndex("ArrowRight", 2, 3, "horizontal"), 0);
-  assert.equal(nextTabIndex("ArrowLeft", 0, 3, "horizontal"), 2);
-  assert.equal(nextTabIndex("ArrowDown", 0, 3, "horizontal"), null);
-  assert.equal(nextTabIndex("ArrowUp", 0, 3, "horizontal"), null);
-  // 纵向反过来。
-  assert.equal(nextTabIndex("ArrowDown", 1, 3, "vertical"), 2);
-  assert.equal(nextTabIndex("ArrowUp", 0, 3, "vertical"), 2);
-  assert.equal(nextTabIndex("ArrowRight", 1, 3, "vertical"), null);
-  assert.equal(nextTabIndex("ArrowLeft", 1, 3, "vertical"), null);
-  // Home/End 与越界输入。
-  assert.equal(nextTabIndex("Home", 2, 5, "horizontal"), 0);
-  assert.equal(nextTabIndex("End", 0, 5, "vertical"), 4);
-  assert.equal(nextTabIndex("ArrowRight", -1, 3, "horizontal"), null);
-  assert.equal(nextTabIndex("ArrowRight", 3, 3, "horizontal"), null);
-  assert.equal(nextTabIndex("ArrowRight", 0, 0, "horizontal"), null);
+test("new terminal tabs have separate sessions and switching a fixed target retains the old target", () => {
+  useWorkpagesStore.setState({ pages: [], retainedTerminals: [], recent: [], activeId: null, expandedId: null, operationsOpen: false, collapsed: false });
+  const store = useWorkpagesStore.getState();
+  store.openTool("terminal", { serverId: "server-a" });
+  const original = useWorkpagesStore.getState().pages[0]!;
+  store.openTool("terminal", { serverId: "server-a", additional: true });
+  const additional = useWorkpagesStore.getState().pages[1]!;
+  assert.notEqual(additional.id, original.id);
+  assert.equal(additional.pinned, false);
+  store.close(additional.id);
+  assert.equal(useWorkpagesStore.getState().retainedTerminals.length, 2);
+  store.openTool("terminal", { serverId: "server-b" });
+  const state = useWorkpagesStore.getState();
+  assert.equal(state.pages.find((page) => page.id === original.id)?.serverId, "server-a");
+  assert.equal(state.pages.find((page) => page.id === original.id)?.pinned, false);
+  assert.equal(state.pages.find((page) => page.pinned)?.serverId, "server-b");
+  store.openTool("terminal", { serverId: "server-a" });
+  assert.equal(useWorkpagesStore.getState().activeId, original.id);
+  assert.equal(useWorkpagesStore.getState().pages.filter((page) => page.pinned).length, 1);
+  assert.equal(useWorkpagesStore.getState().retainedTerminals.length, 3);
 });
 
-test("orientation is persisted and cannot be smuggled in as anything else", () => {
-  assert.equal(DEFAULT_UI_PREFERENCES.workpagesOrientation, "horizontal");
-  assert.equal(sanitizePreferences({ workpagesOrientation: "vertical" }).workpagesOrientation, "vertical");
-  // 老版本存档没有这个键，读出来必须是默认值而不是 undefined。
-  assert.equal(sanitizePreferences({ terminalFontSize: 14 }).workpagesOrientation, "horizontal");
-  assert.equal(sanitizePreferences({ workpagesOrientation: "diagonal" }).workpagesOrientation, "horizontal");
-  assert.equal(sanitizePreferences(null).workpagesOrientation, "horizontal");
-  // 方向只是标签栏的性质：它不出现在工作页对象里。
+test("a team board is bound to its scope and opening it preserves existing terminal sessions", () => {
   useWorkpagesStore.setState({ pages: [], retainedTerminals: [], recent: [], activeId: null, expandedId: null });
-  useWorkpagesStore.getState().openTool("files", { serverId: "server-a" });
-  assert.deepEqual(Object.keys(useWorkpagesStore.getState().pages[0]!).sort(), ["dock", "id", "kind", "serverId", "title"]);
+  const store = useWorkpagesStore.getState();
+  store.openTool("terminal", { serverId: "srv_a" });
+  const terminal = useWorkpagesStore.getState().retainedTerminals[0];
+  store.openTeamBoard("srv_a");
+  store.openTeamBoard("srv_a");
+  assert.equal(useWorkpagesStore.getState().pages.length, 2);
+  assert.equal(useWorkpagesStore.getState().expandedId, "board:srv_a");
+  store.openTeamBoard(null);
+  assert.equal(useWorkpagesStore.getState().pages.at(-1)?.serverId, null);
+  store.close("board:all");
+  assert.equal(useWorkpagesStore.getState().retainedTerminals[0], terminal);
+  assert.equal(useWorkpagesStore.getState().retainedTerminals.length, 1);
+});
+
+test("floating conversation starts centered and dragging stays inside the borrowed area", () => {
+  const bounds = { left: 800, top: 16, width: 300, height: 800 };
+  const frame = fitConversationFrame(bounds);
+  assert.deepEqual(frame, { width: 300, height: 512, top: 160 });
+  assert.equal(moveConversationFrame(bounds, frame, -2000).top, 16);
+  assert.equal(moveConversationFrame(bounds, frame, 2000).top + frame.height, 816);
+  assert.deepEqual(frame, { width: 300, height: 512, top: 160 });
+  assert.equal(bounds.width, 300);
+});
+
+test("resizing preserves the top edge, respects readable minimums and fits smaller windows", () => {
+  const bounds = { left: 800, top: 16, width: 300, height: 800 };
+  const frame = fitConversationFrame(bounds);
+  assert.deepEqual(resizeConversationFrame(bounds, frame, 2000, 2000), { width: 300, height: 656, top: 160 });
+  const reduced = resizeConversationFrame(bounds, frame, -2000, -2000);
+  assert.deepEqual(reduced, { width: 220, height: 260, top: 160 });
+  assert.deepEqual(centerConversationFrame(bounds, reduced), { width: 220, height: 260, top: 286 });
+  assert.deepEqual(fitConversationFrame({ left: 400, top: 16, width: 180, height: 210 }, frame), { width: 180, height: 210, top: 16 });
 });

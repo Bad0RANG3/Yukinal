@@ -32,7 +32,9 @@ from .tools import (
 )
 
 _ASCII_LOWER = str.maketrans("ABCDEFGHIJKLMNOPQRSTUVWXYZ", "abcdefghijklmnopqrstuvwxyz")
-_MAX_SERVER_LOG_LINES = 500
+_MAX_SERVER_LOG_LINES = 100
+_MAX_SERVICE_INVENTORY_LINES = 200
+_MAX_INVENTORY_OUTPUT_BYTES = 60 * 1024
 _MAX_DOCKER_PS_CONTAINERS = 200
 _MAX_DOCKER_LOG_LINE_CHARS = 4_000
 _MAX_AGENT_EDIT_BYTES = 512 * 1024
@@ -2179,17 +2181,43 @@ def _parse_disk_usage(raw: str) -> dict[str, object]:
     }
 
 
+def _bounded_inventory_lines(raw: str, maximum_lines: int) -> tuple[list[str], bool]:
+    lines: list[str] = []
+    total_bytes = 0
+    partial = False
+    for line in raw.splitlines():
+        stripped = line.strip()
+        if stripped.startswith("__YUKINAL_SOURCE__="):
+            continue
+        if stripped.startswith("__YUKINAL_TRUNCATED__="):
+            partial = partial or stripped == "__YUKINAL_TRUNCATED__=1"
+            continue
+        if stripped.startswith("__YUKINAL_STATUS__="):
+            partial = True
+            continue
+        if not stripped:
+            continue
+        size = len(line.encode("utf-8")) + 1
+        if len(lines) >= maximum_lines or total_bytes + size > _MAX_INVENTORY_OUTPUT_BYTES:
+            partial = True
+            continue
+        lines.append(line)
+        total_bytes += size
+    return lines, partial
+
+
 def _parse_service_inventory(raw: str, arguments: dict[str, Any]) -> dict[str, object]:
     source_marker = "__YUKINAL_SOURCE__="
     source_value = next(
-        (line.strip()[len(source_marker):] for line in raw.splitlines() if line.strip().startswith(source_marker)),
+        (line.strip()[len(source_marker):] for line in reversed(raw.splitlines()) if line.strip().startswith(source_marker)),
         None,
     )
     if source_value not in {"systemd", "docker", "unavailable"}:
         raise ToolCallError("execution_failed", "The C++ SSH service returned an invalid service inventory")
 
+    inventory_lines, partial = _bounded_inventory_lines(raw, _MAX_SERVICE_INVENTORY_LINES)
     services: list[dict[str, str]] = []
-    for raw_line in raw.splitlines():
+    for raw_line in inventory_lines:
         line = raw_line.strip()
         if not line or line.startswith(source_marker):
             continue
@@ -2218,8 +2246,6 @@ def _parse_service_inventory(raw: str, arguments: dict[str, Any]) -> dict[str, o
         if description:
             service["description"] = description
         services.append(service)
-        if len(services) == 200:
-            break
 
     name_filter = arguments.get("name")
     if name_filter is not None and (
@@ -2243,6 +2269,8 @@ def _parse_service_inventory(raw: str, arguments: dict[str, Any]) -> dict[str, o
     result: dict[str, object] = {"source": source_value, "services": services}
     if source_value == "unavailable":
         result["message"] = "未检测到可读取的 systemd 或 Docker 服务管理器"
+    elif partial:
+        result["message"] = "仅显示部分服务（最多 200 项、60 KiB）；超出限制或过长的完整条目已省略。"
     return result
 
 
@@ -2251,7 +2279,7 @@ def _parse_server_logs(raw: str, arguments: dict[str, Any]) -> dict[str, object]
     source = next(
         (
             line.strip()[len(source_marker):]
-            for line in raw.splitlines()
+            for line in reversed(raw.splitlines())
             if line.strip().startswith(source_marker)
         ),
         None,
@@ -2275,8 +2303,9 @@ def _parse_server_logs(raw: str, arguments: dict[str, Any]) -> dict[str, object]
             "message": "未检测到可读取的 journalctl 或系统日志文件",
         }
 
+    inventory_lines, partial = _bounded_inventory_lines(raw, _MAX_SERVER_LOG_LINES)
     lines: list[dict[str, str]] = []
-    for raw_line in raw.splitlines():
+    for raw_line in inventory_lines:
         line = raw_line.rstrip()
         if not line.strip() or line.strip().startswith(source_marker):
             continue
@@ -2291,9 +2320,10 @@ def _parse_server_logs(raw: str, arguments: dict[str, Any]) -> dict[str, object]
         else:
             level = "info"
         lines.append({"text": line, "level": level})
-        if len(lines) == _MAX_SERVER_LOG_LINES:
-            break
-    return {"source": source, "lines": lines}
+    result: dict[str, object] = {"source": source, "lines": lines}
+    if partial:
+        result["message"] = "仅显示部分日志（最多 100 行、60 KiB）；超出限制或过长的完整行已省略。"
+    return result
 
 
 def _parse_docker_ps(raw: str) -> list[dict[str, object]]:

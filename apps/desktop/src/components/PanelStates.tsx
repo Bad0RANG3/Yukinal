@@ -15,9 +15,8 @@
  *   但动态页写的是 `正在读取动态` / `无法读取动态`。统一成 `正在读取X` / `无法读取X`
  *   之后，`LoadingPanel` 与 `ErrorPanel` 就常常成对出现，读起来是一件事的两个时刻。
  *
- * 这里不碰 ARIA，是刻意的：`ServerList.tsx:55` 的载入失败没有 `role="alert"`，而
- * 同一个文件 `:56` 的操作失败有。给「首屏就渲染出来的错误面板」加 `role="alert"`
- * 对读屏用户是行为变化（可能被立刻播报），该由无障碍那一轮决定，不该顺手加。
+ * 最初的纯重构保留了旧 ARIA 行为。本次界面流程质检补齐共享语义：加载面板
+ * 用 status，错误面板用 alert；只在最外层声明，避免同一提示重复播报。
  *
  * 组件本身是纯展示：不读 store、不发 IPC，因此只依赖 `Icon`。
  */
@@ -27,8 +26,8 @@ import { Icon, type IconName } from "./Icon.js";
 /** 首屏或切页时的「正在读取」。结构与 `.loading-panel` 的 CSS 一一对应。 */
 export function LoadingPanel({ title, hint }: { title: string; hint?: string }) {
   return (
-    <div className="loading-panel">
-      <div className="loading-spinner" />
+    <div className="loading-panel" role="status">
+      <div className="loading-spinner" aria-hidden="true" />
       <strong>{title}</strong>
       {hint ? <span>{hint}</span> : null}
     </div>
@@ -67,7 +66,7 @@ export function ErrorPanel({
   // 这不是笔误，是现状；统一它属于设计决定，`style-snapshot.mjs` 会守住。
   if (showIcon) {
     return (
-      <div className="error-panel">
+      <div className="error-panel" role="alert">
         <div className="error-panel-icon"><Icon name="warning" size="md" /></div>
         <div>
           <strong>{title}</strong>
@@ -79,7 +78,7 @@ export function ErrorPanel({
   }
 
   return (
-    <div className="error-panel">
+    <div className="error-panel" role="alert">
       <div>
         <strong>{title}</strong>
         <p>{message}</p>

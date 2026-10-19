@@ -1,7 +1,7 @@
 /**
- * Terminal pane: xterm.js over the real native PTY chain.
+ * Terminal pane: xterm.js over the real C++ host and SSH PTY chain.
  *
- * Flow: xterm onData → `terminal_write` → native PTY manager → SSH channel → remote PTY;
+ * Flow: xterm onData → `terminal_write` → C++ host → SSH channel → remote PTY;
  * remote bytes → `terminal.data` event → xterm.write. Nothing is faked; if there is
  * no server yet (no SQLite row), the pane shows the honest empty state instead of a
  * pretend terminal.
@@ -19,6 +19,13 @@ import { Icon } from "../../components/Icon.js";
 import { callDesktop, isDesktopShell, subscribeDesktop } from "../../lib/ipc.js";
 import { usePreferencesStore, type TerminalFont } from "../../stores/preferences-store.js";
 import { useWorkspaceStore } from "../../stores/workspace-store.js";
+import { pasteFromClipboard, TerminalPasteError } from "./terminal-paste.js";
+
+interface PasteSession {
+  terminal: Terminal;
+  serverId: string;
+  sessionId: string;
+}
 
 const TERMINAL_THEME = {
   background: "#080808",
@@ -51,8 +58,16 @@ export function TerminalPane({ active, serverId }: { active: boolean; serverId?:
   const containerRef = useRef<HTMLDivElement>(null);
   const terminalRef = useRef<Terminal | null>(null);
   const fitRef = useRef<FitAddon | null>(null);
+  const pasteSessionRef = useRef<PasteSession | null>(null);
+  const pasteAttemptRef = useRef(0);
+  const pasteReadingRef = useRef(false);
+  const selectedServerRef = useRef(selectedServerId);
+  selectedServerRef.current = selectedServerId;
   const preferences = usePreferencesStore();
   const [opened, setOpened] = useState(active);
+  const [pasteSession, setPasteSession] = useState<PasteSession | null>(null);
+  const [pasteReading, setPasteReading] = useState(false);
+  const [pasteError, setPasteError] = useState<string | null>(null);
   /**
    * First write/resize failure for the current session, or null.
    *
@@ -86,9 +101,13 @@ export function TerminalPane({ active, serverId }: { active: boolean; serverId?:
     if (!container) return;
 
     setIoError(null);
+    setPasteSession(null);
+    setPasteError(null);
+    setPasteReading(false);
     /** Keep the first failure only; a functional update is a no-op once set. */
     const reportIoError = (error: unknown): void => {
       if (disposed) return;
+      invalidatePasteSession();
       setIoError((current) => current ?? (errorMessage(error)));
     };
 
@@ -113,6 +132,14 @@ export function TerminalPane({ active, serverId }: { active: boolean; serverId?:
     const unlisteners: Array<() => void> = [];
     let sessionId: string | null = null;
     let disposed = false;
+    const invalidatePasteSession = () => {
+      if (pasteSessionRef.current?.terminal !== term) return;
+      pasteSessionRef.current = null;
+      pasteAttemptRef.current++;
+      pasteReadingRef.current = false;
+      setPasteSession(null);
+      setPasteReading(false);
+    };
     const pendingData: Array<{ terminalSessionId: string; data: string }> = [];
     let pendingDataChars = 0;
     const MAX_PENDING_DATA_CHARS = 256_000;
@@ -158,6 +185,7 @@ export function TerminalPane({ active, serverId }: { active: boolean; serverId?:
     unlisteners.push(
       subscribeDesktop("terminal.closed", (payload) => {
         if (disposed || payload.terminalSessionId !== sessionId) return;
+        invalidatePasteSession();
         const suffix = payload.exitCode === null ? "" : ` (exit ${payload.exitCode})`;
         term.write(`\r\n\x1b[1;31m[会话已关闭${suffix}]\x1b[0m\r\n`);
       }).stop,
@@ -193,7 +221,7 @@ export function TerminalPane({ active, serverId }: { active: boolean; serverId?:
         // Terminal emits its current size after open; bidirectional wiring starts
         // from here so a resize before this point is not lost.
         const io = term.onData((data) => {
-          if (sessionId !== null && isDesktopShell()) {
+          if (!disposed && sessionId !== null && isDesktopShell()) {
             void callDesktop(IPC_COMMANDS.terminalWrite, {
               terminalSessionId: sessionId,
               data,
@@ -201,7 +229,7 @@ export function TerminalPane({ active, serverId }: { active: boolean; serverId?:
           }
         });
         const resize = term.onResize(({ cols, rows: nextRows }) => {
-          if (sessionId !== null && isDesktopShell()) {
+          if (!disposed && sessionId !== null && isDesktopShell()) {
             void callDesktop(IPC_COMMANDS.terminalResize, {
               terminalSessionId: sessionId,
               cols,
@@ -213,14 +241,20 @@ export function TerminalPane({ active, serverId }: { active: boolean; serverId?:
           io.dispose();
           resize.dispose();
         });
+        const readySession = { terminal: term, serverId: selectedServerId, sessionId: terminalSessionId };
+        pasteSessionRef.current = readySession;
+        setPasteSession(readySession);
       })
-      .catch((error) => {
-        if (!disposed) term.write(`\r\n\x1b[1;31m终端打开失败：\x1b[0m${String(error)}\r\n`);
-      });
+      .catch(reportIoError);
     if (activeRef.current) term.focus();
 
     return () => {
       disposed = true;
+      if (pasteSessionRef.current?.terminal === term) {
+        pasteSessionRef.current = null;
+        pasteAttemptRef.current++;
+        pasteReadingRef.current = false;
+      }
       resizeObserver.disconnect();
       unlisteners.splice(0).forEach((unlisten) => unlisten());
       if (sessionId !== null) {
@@ -237,6 +271,30 @@ export function TerminalPane({ active, serverId }: { active: boolean; serverId?:
     fitRef.current?.fit();
     terminalRef.current?.focus();
   }, [active, opened]);
+
+  const pasteClipboard = () => {
+    const session = pasteSessionRef.current;
+    if (!session || session.serverId !== selectedServerId || !activeRef.current || pasteReadingRef.current || ioError !== null) return;
+    const attempt = ++pasteAttemptRef.current;
+    const isCurrent = () => pasteAttemptRef.current === attempt && pasteSessionRef.current === session
+      && terminalRef.current === session.terminal && selectedServerRef.current === session.serverId && activeRef.current;
+    pasteReadingRef.current = true;
+    setPasteReading(true);
+    setPasteError(null);
+    void pasteFromClipboard(session.terminal, () => {
+      if (!navigator.clipboard?.readText) return Promise.reject(new Error("Clipboard unavailable"));
+      return navigator.clipboard.readText();
+    }, isCurrent)
+      .catch((error: unknown) => {
+        if (isCurrent()) setPasteError(error instanceof TerminalPasteError ? error.message : "终端暂时无法粘贴，请再次尝试。");
+      })
+      .finally(() => {
+        if (pasteAttemptRef.current !== attempt) return;
+        pasteReadingRef.current = false;
+        setPasteReading(false);
+      });
+  };
+  const pasteEnabled = active && pasteSession?.serverId === selectedServerId && ioError === null && !pasteReading;
 
   if (!opened) return null;
 
@@ -255,11 +313,19 @@ export function TerminalPane({ active, serverId }: { active: boolean; serverId?:
       <div className="terminal-toolbar">
         <div className="section-heading-inline"><Icon name="terminal" size="md" /><span>SSH</span></div>
         <span className="terminal-toolbar-note">{TERMINAL_FONT_LABEL[preferences.terminalFont]} · {preferences.terminalFontSize}px</span>
+        <button type="button" className="button-secondary terminal-paste-button" disabled={!pasteEnabled} onClick={pasteClipboard} aria-label="粘贴到终端" aria-busy={pasteReading} title="粘贴剪贴板文字，不补回车">
+          <Icon name="copy" size="sm" />{pasteReading ? "正在读取…" : "粘贴到终端"}
+        </button>
       </div>
+      {pasteError !== null ? <div className="terminal-paste-error" role="alert">
+        <Icon name="warning" size="sm" /><span>{pasteError}</span>
+        <button type="button" className="button-secondary" onClick={pasteClipboard} disabled={!pasteEnabled}>重试粘贴</button>
+        <button type="button" className="icon-button" onClick={() => setPasteError(null)} aria-label="关闭粘贴提示"><Icon name="close" size="sm" /></button>
+      </div> : null}
       {ioError !== null && (
         <div className="terminal-io-error" role="alert">
           <Icon name="warning" size="sm" />
-          <span>终端输入发送失败：{ioError}</span>
+          <span>终端连接或数据传输失败：{ioError}</span>
           <button
             type="button"
             className="button-secondary"

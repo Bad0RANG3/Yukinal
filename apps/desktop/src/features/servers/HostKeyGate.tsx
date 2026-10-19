@@ -102,9 +102,10 @@ export function HostKeyGate({
   }
   if (decision === "error") {
     return (
-      <p className="form-error" role="alert">
-        {errorMessage(status.error)}
-      </p>
+      <div role="alert">
+        <p className="form-error">{errorMessage(status.error)}</p>
+        <button type="button" className="button-secondary" disabled={status.isFetching} onClick={() => void status.refetch()}>重新读取主机指纹</button>
+      </div>
     );
   }
 

@@ -75,3 +75,16 @@ test("older native hosts retain a complete renderer surface", async () => {
   assert.equal(supportsNativeTitlebarControls(), false);
   await updateNativeCaptionSurface(null);
 });
+
+test("caption presentation reports native maximize and restore without business commands", async () => {
+  let maximized = true;
+  installHost({
+    invoke: async () => { assert.fail("window presentation must not execute business commands"); },
+    windowShell: { updateContext: async () => {}, updateSurface: async () => ({ maximized }) },
+  });
+  assert.deepEqual(await updateNativeCaptionSurface(null), { maximized: true });
+  maximized = false;
+  assert.deepEqual(await updateNativeCaptionSurface(null), { maximized: false });
+  installHost({ windowShell: { updateContext: async () => {}, updateSurface: async () => {} } });
+  assert.equal(await updateNativeCaptionSurface(null), undefined);
+});

@@ -17,6 +17,7 @@ export type PendingAdmission = {
   parts: AgentPromptPart[];
   taskId?: string | null;
   routingKey: string;
+  uiContext?: string;
 };
 
 export type AdmissionRef = { current: PendingAdmission | null };

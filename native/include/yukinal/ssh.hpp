@@ -2,12 +2,31 @@
 
 #include <cstdint>
 #include <string>
+#include <utility>
 #include <vector>
 
 #include "yukinal/config.hpp"
 #include "yukinal/policy.hpp"
 
 namespace yukinal::ssh_service {
+
+// Thread-affine lexical scope for one host operation. Does not modify the
+// process environment or pass secrets to spawned processes. Nested scopes fully
+// replace credentials and restore the previous scope on exit; an empty scope
+// blocks CLI environment fallback. Calls without any scope retain CLI behavior.
+class ScopedCredentialOverride {
+ public:
+  using Values = std::vector<std::pair<std::string, std::string>>;
+  explicit ScopedCredentialOverride(Values values);
+  ~ScopedCredentialOverride();
+  ScopedCredentialOverride(const ScopedCredentialOverride&) = delete;
+  ScopedCredentialOverride& operator=(const ScopedCredentialOverride&) = delete;
+  ScopedCredentialOverride(ScopedCredentialOverride&&) = delete;
+  ScopedCredentialOverride& operator=(ScopedCredentialOverride&&) = delete;
+ private:
+  Values values_;
+  const Values* previous_ = nullptr;
+};
 
 struct ExecResult {
   bool completed = false;
@@ -65,6 +84,9 @@ int run_terminal_session(const TargetConfig& target, std::uint16_t columns,
                          std::uint16_t rows);
 /// Stream one SFTP download or exclusive staging upload over JSON-lines stdin/stdout.
 int run_sftp_stream(const TargetConfig& target, const std::string& path, bool upload);
+// Metadata operations include a fresh SSH connection. timeout_seconds is an
+// overall limit (1..30), with bounded connection/authentication/SFTP phases.
+inline constexpr int kSftpMetadataTimeoutSeconds = 30;
 ExecResult sftp_list(const TargetConfig& target, const std::string& path, int timeout_seconds);
 ExecResult sftp_stat(const TargetConfig& target, const std::string& path, int timeout_seconds);
 ExecResult sftp_lstat_optional(const TargetConfig& target, const std::string& path,

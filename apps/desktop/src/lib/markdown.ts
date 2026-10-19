@@ -36,4 +36,4 @@
 
 export { parseMarkdown } from "./markdown/block.js";
 export { parseInline } from "./markdown/inline.js";
-export type { Block, ColumnAlign, Inline, ListItem } from "./markdown/types.js";
+export type { Block, ColumnAlign, Inline, ListItem, MarkdownParseOptions } from "./markdown/types.js";

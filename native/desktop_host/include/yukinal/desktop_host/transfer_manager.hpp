@@ -22,15 +22,22 @@ struct TransferManagerImpl;
 // is published at most ten times a second per transfer while lifecycle changes
 // publish immediately. The manager is copyable and shares one implementation; all
 // blocking I/O happens on per-transfer worker threads, so `get`/`list`/`cancel`
-// stay responsive.
+// stay responsive. Admission is bounded before persistence and thread creation:
+// at most three running operations plus sixteen waiting transfers.
 class TransferManager {
  public:
   static constexpr std::size_t kMaxParallelTransfers = 3;
+  static constexpr std::size_t kMaxPendingTransfers = 16;
   static constexpr std::size_t kCopyBufferBytes = 64 * 1024;
+
+  // Starts one admitted job. A launcher must either take ownership and arrange
+  // asynchronous execution, or throw before starting it. The default creates a
+  // detached thread; this narrow seam also makes allocation failures testable.
+  using WorkerLauncher = std::function<void(std::function<void()>)>;
 
   explicit TransferManager(std::shared_ptr<TransferBackend> backend);
   TransferManager(std::shared_ptr<TransferBackend> backend,
-                  std::size_t max_parallel_transfers);
+                  std::size_t max_parallel_transfers, WorkerLauncher launcher = {});
 
   // Create a manager backed by durable host history. Startup recovery is
   // synchronous and fail-closed: active rows become `interrupted` before the
@@ -39,7 +46,7 @@ class TransferManager {
   // startup never auto-connects. Throws `TransferError` on a recovery failure.
   [[nodiscard]] static TransferManager with_history(
       std::shared_ptr<TransferBackend> backend,
-      std::shared_ptr<TransferHistoryStore> history);
+      std::shared_ptr<TransferHistoryStore> history, WorkerLauncher launcher = {});
 
   // Queue local files/directories for upload into one remote directory. Local
   // paths stay inside the host; the worker opens regular files with no-follow
@@ -87,8 +94,8 @@ class TransferManager {
   std::size_t subscribe(SnapshotListener listener);
   void unsubscribe(std::size_t subscription);
 
-  // Test/observability hook: the number of transfers currently holding a worker
-  // permit.
+  // Test/observability hook: admitted starts, running jobs and waiting jobs.
+  // Includes persistence in progress; never exceeds the configured limit + 16.
   [[nodiscard]] std::size_t active_worker_count() const;
 
  private:

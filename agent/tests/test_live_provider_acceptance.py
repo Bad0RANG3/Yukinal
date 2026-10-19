@@ -82,7 +82,7 @@ class LiveProviderAcceptanceHarnessTests(unittest.TestCase):
                     if tool_messages:
                         tool_content = tool_messages[-1]["content"]
                         token = json.loads(tool_content)["verificationToken"]
-                        response_message = {"role": "assistant", "content": token}
+                        response_delta = {"content": token}
                         finish_reason = "stop"
                     else:
                         tools = request.get("tools", [])
@@ -91,11 +91,11 @@ class LiveProviderAcceptanceHarnessTests(unittest.TestCase):
                             for tool in tools
                         ):
                             self.protocol_errors.append("acceptance tool was absent from the provider request")
-                        response_message = {
+                        response_delta = {
                             "role": "assistant",
-                            "content": None,
                             "tool_calls": [{
                                 "id": "call_acceptance_probe",
+                                "index": 0,
                                 "type": "function",
                                 "function": {"name": "acceptance__probe", "arguments": "{}"},
                             }],
@@ -103,14 +103,14 @@ class LiveProviderAcceptanceHarnessTests(unittest.TestCase):
                         finish_reason = "tool_calls"
                     response = {
                         "id": "chatcmpl-local-acceptance",
-                        "object": "chat.completion",
+                        "object": "chat.completion.chunk",
                         "created": 0,
                         "model": "local-tool-model",
-                        "choices": [{"index": 0, "message": response_message, "finish_reason": finish_reason}],
+                        "choices": [{"index": 0, "delta": response_delta, "finish_reason": finish_reason}],
                     }
-                    body = json.dumps(response).encode("utf-8")
+                    body = f"data: {json.dumps(response)}\n\ndata: [DONE]\n\n".encode("utf-8")
                     self.send_response(200)
-                    self.send_header("Content-Type", "application/json")
+                    self.send_header("Content-Type", "text/event-stream")
                     self.send_header("Content-Length", str(len(body)))
                     self.end_headers()
                     self.wfile.write(body)

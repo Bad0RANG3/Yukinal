@@ -1,5 +1,6 @@
 import type { AgentPersona, AiProviderConfig } from "@yukinal/shared";
 
+import { isWatchRequest } from "./team-operations.js";
 import { resolveAgentModels } from "../agent/useAgentModels.js";
 import { useWorkspaceStore, type WorkspaceState } from "../../stores/workspace-store.js";
 
@@ -152,7 +153,6 @@ export function handoffAgentRole(role: AgentRole, providers: readonly AiProvider
   if (!role.name.trim() || !role.responsibility.trim()) return { ok: false, reason: "角色名称与职责不能为空。" };
   useWorkspaceStore.setState({
     agentRoleId: role.id,
-    ...(binding.provider && binding.choice ? { selectedProviderId: binding.provider.id, selectedModel: binding.choice.model } : {}),
     agentOpen: true,
     agentHistoryOpen: false,
   });
@@ -164,8 +164,8 @@ const TEAM_ROUTES: ReadonlyArray<{ team: AgentTeam; pattern: RegExp }> = [
   { team: "purple", pattern: /红蓝|防护复测|检测覆盖|purple|retest/gi },
   { team: "orange", pattern: /漏洞修复|安全编码|攻击成因|安全开发|orange/gi },
   { team: "green", pattern: /可观测|日志设计|指标设计|审计设计|取证设计|告警设计|observability/gi },
-  { team: "red", pattern: /渗透|攻击|漏洞|暴露面|利用链|pentest|exploit|red team/gi },
-  { team: "yellow", pattern: /实现|开发|编码|架构|修复|接口|设计|implement|code|architecture/gi },
+  { team: "red", pattern: /授权攻击|授权渗透|渗透测试|攻击验证|pentest|exploit validation|red team/gi },
+  { team: "yellow", pattern: /部署|安装|环境搭建|配置环境|实现|开发|编码|架构|修复|接口|设计|deploy|install|setup|implement|code|architecture/gi },
   { team: "blue", pattern: /日志|故障|异常|排查|防守|加固|入侵|服务|响应|运维|logs|incident|defen/gi },
 ];
 
@@ -182,9 +182,9 @@ export function resolveAgentRole(prompt: string, roles: readonly AgentRole[], se
   const selected = roles.find((role) => role.id === selectedRoleId);
   if (selected) return { role: selected, source: "selected" };
   const ranked = TEAM_ROUTES.map((route) => ({ ...route, score: [...prompt.matchAll(route.pattern)].length })).sort((left, right) => right.score - left.score);
-  const team = ranked[0]?.score ? ranked[0].team : "blue";
+  const team = isWatchRequest(prompt) ? "blue" : ranked[0]?.score ? ranked[0].team : "blue";
   const preferred = team === "blue" && /日志|logs/i.test(prompt) ? "blue-logs"
-    : team === "yellow" && /实现|开发|编码|修复|implement|code/i.test(prompt) ? "yellow-engineering"
+    : team === "yellow" && /部署|安装|环境搭建|配置环境|实现|开发|编码|修复|deploy|install|setup|implement|code/i.test(prompt) ? "yellow-engineering"
       : team === "white" && /评分|裁判/i.test(prompt) ? "white-control" : null;
   return { role: roles.find((role) => role.id === preferred) ?? roles.find((role) => role.team === team) ?? roles[0] ?? defaultAgentRoles()[0]!, source: "auto" };
 }

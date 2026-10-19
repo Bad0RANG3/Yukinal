@@ -165,9 +165,25 @@ class DesktopDatabase {
   void create_investigation_run(const nlohmann::json& run) const;
   [[nodiscard]] std::optional<nlohmann::json> update_investigation_run(
       const nlohmann::json& run) const;
+  // Applies a sidecar run event only while this task still owns that active run.
+  // Run and task progress are committed together; terminal runs are immutable.
+  [[nodiscard]] std::optional<nlohmann::json> apply_investigation_run_progress(
+      const std::string& task_id, const std::string& run_id, const std::string& status,
+      const std::optional<nlohmann::json>& failure, const std::string& updated_at) const;
+  // Conservatively blocks an unchanged running step after its bound run failed
+  // or was cancelled. This never increments attempts or claims remote execution.
+  // The terminal run/session/checkpoint, latest revision and absence of a newer
+  // run are rechecked under one transaction; old or duplicate events are no-ops.
+  [[nodiscard]] bool block_interrupted_investigation_plan(
+      const std::string& task_id, const std::string& run_id,
+      const std::string& accepted_at) const;
+  // A conflicting recovery waits for plan review without claiming an active
+  // run. The prechecked plan fingerprint is repeated inside the transaction;
+  // a changed plan also waits instead of publishing an inadmissible start.
   [[nodiscard]] std::optional<nlohmann::json> recover_investigation_task(
       const std::string& task_id, const std::string& updated_at,
-      const nlohmann::json& failure) const;
+      const nlohmann::json& failure, bool wait_for_plan_review,
+      const std::optional<std::string>& expected_plan_fingerprint) const;
   // ── Filesystem backup ledger (host-owned remote recovery copies) ─────────────
   // The backup bytes stay on the remote server; only bounded metadata lives here.
   // Not-found is reported with `std::nullopt`; validation failures throw
@@ -208,6 +224,11 @@ class DesktopDatabase {
       bool filter_server = false) const;
   [[nodiscard]] nlohmann::json get_chat_session(const std::string& session_id) const;
   [[nodiscard]] nlohmann::json create_chat_session(
+      const std::string& id, const std::optional<std::string>& workspace_id,
+      const std::optional<std::string>& server_id, const std::string& title,
+      const std::string& timestamp) const;
+  /** Creates a missing conversation or verifies its existing scope, preserving history. */
+  [[nodiscard]] nlohmann::json ensure_chat_session(
       const std::string& id, const std::optional<std::string>& workspace_id,
       const std::optional<std::string>& server_id, const std::string& title,
       const std::string& timestamp) const;

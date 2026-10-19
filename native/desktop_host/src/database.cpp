@@ -4536,9 +4536,165 @@ std::optional<nlohmann::json> DesktopDatabase::update_investigation_run(
   return load_investigation_run_row(connection_, id);
 }
 
+std::optional<nlohmann::json> DesktopDatabase::apply_investigation_run_progress(
+    const std::string& task_id, const std::string& run_id, const std::string& status,
+    const std::optional<nlohmann::json>& failure, const std::string& updated_at) const {
+  if (!is_one_of(status, {"running", "waiting_user", "completed", "failed", "cancelled"})) {
+    throw std::invalid_argument("unsupported investigation run progress status");
+  }
+  if ((status == "failed" || status == "cancelled") && !failure.has_value()) {
+    throw std::invalid_argument("failed investigation run progress requires a failure");
+  }
+  std::lock_guard lock(mutex_);
+  if (connection_ == nullptr) return std::nullopt;
+  Transaction transaction(connection_);
+  auto task = load_investigation_task_row(connection_, task_id);
+  auto run = load_investigation_run_row(connection_, run_id);
+  if (!task.has_value() || !run.has_value() ||
+      run->value("taskId", std::string()) != task_id ||
+      task->value("activeRunId", std::string()) != run_id) {
+    return std::nullopt;
+  }
+  const auto previous = run->value("status", std::string());
+  if (!is_one_of(previous, {"admitted", "running", "waiting_user"}) || previous == status ||
+      (status == "running" && previous != "admitted")) {
+    return std::nullopt;
+  }
+  const bool finished = is_one_of(status, {"completed", "failed", "cancelled"});
+  auto task_status = task->value("status", std::string());
+  auto phase = task->value("phase", std::string("investigating"));
+  const bool task_terminal = is_one_of(task_status, {"completed", "failed", "stopped", "expired"});
+  if (task_terminal && !finished) return std::nullopt;
+  std::optional<nlohmann::json> task_failure;
+  if (task->contains("lastFailure")) task_failure = task->at("lastFailure");
+  std::optional<std::string> completed_at;
+  if (task->contains("completedAt")) completed_at = task->at("completedAt").get<std::string>();
+
+  (*run)["status"] = status;
+  (*run)["phase"] = phase;
+  (*run)["updatedAt"] = updated_at;
+  if (finished) (*run)["endedAt"] = updated_at;
+  if (failure.has_value()) (*run)["failure"] = *failure;
+  else run->erase("failure");
+
+  if (!task_terminal) {
+    completed_at.reset();
+    if (status == "waiting_user") {
+      task_status = "waiting_user";
+    } else if (status == "completed") {
+      // Completing one Agent attempt does not prove the objective or a saved
+      // plan succeeded. Only the host's verified plan path completes a task.
+      task_status = "waiting_user";
+      phase = "decision";
+    } else if (status == "failed" || status == "cancelled") {
+      task_status = status == "cancelled" ? "stopped" : "failed";
+      phase = "recovery";
+      task_failure = failure;
+      completed_at = updated_at;
+    }
+  }
+  if (!update_investigation_run(*run).has_value()) {
+    throw std::runtime_error("investigation run disappeared during progress update");
+  }
+  auto updated = update_investigation_task_progress(
+      task_id, task_status, phase,
+      finished ? std::nullopt : std::optional<std::string>(run_id), task_failure,
+      updated_at, completed_at);
+  if (!updated.has_value()) {
+    throw std::runtime_error("investigation task disappeared during progress update");
+  }
+  transaction.commit();
+  return updated;
+}
+
+bool DesktopDatabase::block_interrupted_investigation_plan(
+    const std::string& task_id, const std::string& run_id,
+    const std::string& accepted_at) const {
+  std::lock_guard lock(mutex_);
+  if (connection_ == nullptr) throw std::runtime_error("The local database is unavailable");
+  Transaction transaction(connection_);
+  const auto task = load_investigation_task_row(connection_, task_id);
+  const auto run = load_investigation_run_row(connection_, run_id);
+  if (!task.has_value() || !run.has_value() ||
+      run->value("taskId", std::string()) != task_id ||
+      !is_one_of(run->value("status", std::string()), {"failed", "cancelled"}) ||
+      run->value("endedAt", std::string()) != accepted_at || accepted_at.empty() ||
+      run->value("updatedAt", std::string()) != accepted_at ||
+      task->contains("activeRunId") || task->value("status", std::string()) == "completed") return false;
+  const auto session_id = run->value("sessionId", std::string());
+  const auto checkpoint = run->value("checkpoint", nlohmann::json::object());
+  if (session_id != "session_task_" + task_id || !checkpoint.is_object() ||
+      !checkpoint.contains("hostPlanStep") || !checkpoint.at("hostPlanStep").is_object()) return false;
+  const auto& bound = checkpoint.at("hostPlanStep");
+  if (bound.value("taskId", std::string()) != task_id ||
+      bound.value("runId", std::string()) != run_id ||
+      bound.value("sessionId", std::string()) != session_id) return false;
+  // The run's durable session must still belong to this exact task scope.
+  Statement session(connection_, "SELECT workspace_id, server_id FROM chat_sessions WHERE id = ?1");
+  bind_text(connection_, session.get(), 1, session_id);
+  const auto session_result = sqlite3_step(session.get());
+  if (session_result == SQLITE_DONE) return false;
+  if (session_result != SQLITE_ROW) throw std::runtime_error(sqlite3_errmsg(connection_));
+  if (std::string(column_text(session.get(), 0)) != optional_record_text(*task, "workspaceId").value_or("") ||
+      std::string(column_text(session.get(), 1)) != optional_record_text(*task, "serverId").value_or("")) return false;
+  // A replacement may already have finished between run termination and this
+  // transaction, so checking only activeRunId would not be sufficient.
+  Statement newer(connection_,
+      "SELECT 1 FROM investigation_runs WHERE task_id = ?1 AND attempt > ?2 LIMIT 1");
+  bind_text(connection_, newer.get(), 1, task_id);
+  sqlite3_bind_int64(newer.get(), 2, run->value("attempt", std::int64_t{0}));
+  const auto newer_result = sqlite3_step(newer.get());
+  if (newer_result == SQLITE_ROW) return false;
+  if (newer_result != SQLITE_DONE) throw std::runtime_error(sqlite3_errmsg(connection_));
+  auto plan = latest_investigation_plan(task_id);
+  if (!plan.has_value() || plan->value("status", std::string()) != "active" ||
+      plan->value("id", std::string()) != bound.value("planId", std::string()) ||
+      plan->value("revision", std::int64_t{0}) != bound.value("revision", std::int64_t{-1}) ||
+      plan->value("currentStepId", std::string()) != bound.value("stepId", std::string())) return false;
+  auto& steps = (*plan)["steps"];
+  if (!steps.is_array()) return false;
+  bool matched = false;
+  for (auto& step : steps) {
+    if (step.value("id", std::string()) != bound.value("stepId", std::string())) continue;
+    if (step.value("status", std::string()) != "running" ||
+        content_revision_hex(step.dump()) != bound.value("stepFingerprint", std::string())) return false;
+    // This is a run interruption marker, never an execution result. Keep the
+    // real failure on the run and leave attempts/output/evidence untouched.
+    const auto failure = run->value("failure", nlohmann::json::object());
+    const auto error = failure.is_object() ? failure.value("message", std::string()) : std::string();
+    std::string message = "本轮运行已结束，当前步骤没有已确认的工具终结结果，现暂停等待审阅；"
+                          "这不表示命令已执行或成功。";
+    if (!error.empty()) message += "实际运行错误：" + error;
+    step["status"] = "blocked";
+    step["endedAt"] = accepted_at;
+    step["lastDeviation"] = {{"code", "no_active_step"}, {"action", "wait_user"},
+        {"message", message}, {"toolName", "agent.run"}, {"at", accepted_at},
+        {"planId", plan->at("id")}, {"stepId", step.at("id")}};
+    matched = true;
+    break;
+  }
+  if (!matched) return false;
+  Statement update(connection_, R"SQL(
+      UPDATE investigation_plans SET steps = ?1, updated_at = ?2
+       WHERE id = ?3 AND task_id = ?4 AND revision = ?5
+         AND current_step_id = ?6 AND status = 'active'
+    )SQL");
+  bind_text(connection_, update.get(), 1, steps.dump());
+  bind_text(connection_, update.get(), 2, accepted_at);
+  bind_text(connection_, update.get(), 3, plan->at("id").get<std::string>());
+  bind_text(connection_, update.get(), 4, task_id);
+  sqlite3_bind_int64(update.get(), 5, plan->at("revision").get<std::int64_t>());
+  bind_text(connection_, update.get(), 6, bound.at("stepId").get<std::string>());
+  if (sqlite3_step(update.get()) != SQLITE_DONE) throw std::runtime_error(sqlite3_errmsg(connection_));
+  const bool changed = sqlite3_changes(connection_) == 1;
+  transaction.commit();
+  return changed;
+}
+
 std::optional<nlohmann::json> DesktopDatabase::recover_investigation_task(
     const std::string& task_id, const std::string& updated_at,
-    const nlohmann::json& failure) const {
+    const nlohmann::json& failure, bool wait_for_plan_review,
+    const std::optional<std::string>& expected_plan_fingerprint) const {
   std::lock_guard lock(mutex_);
   if (connection_ == nullptr) return std::nullopt;
   Transaction transaction(connection_);
@@ -4566,7 +4722,21 @@ std::optional<nlohmann::json> DesktopDatabase::recover_investigation_task(
     // the broad task grant so the next run needs fresh per-call approval.
     guardrails.erase("commandGrant");
   }
+  const auto current_plan = latest_investigation_plan(task_id);
+  const auto current_fingerprint = current_plan.has_value()
+      ? std::optional<std::string>(content_revision_hex(current_plan->dump())) : std::nullopt;
+  const bool plan_changed = current_fingerprint != expected_plan_fingerprint;
+  const bool awaiting_review = wait_for_plan_review || plan_changed;
+  auto recovery_failure = failure;
+  if (awaiting_review) {
+    recovery_failure["message"] = wait_for_plan_review
+        ? "恢复已暂停：当前计划步骤缺少重新采集基线所需的只读权限，或已不可运行。请先审阅新的计划；尚未启动新运行。"
+        : "恢复已暂停：恢复期间当前计划发生变化，原预检结果已失效。请先审阅新的计划和基线权限；尚未启动新运行。";
+  }
+  // Only the task's current recovery explanation changes. Historic terminal
+  // run errors stay intact; interruption of an open run retains the real error.
   const auto failure_json = failure.dump();
+  const auto recovery_failure_json = recovery_failure.dump();
   const auto guardrails_dump = guardrails.dump();
   {
     Statement steps(connection_, R"SQL(
@@ -4610,15 +4780,16 @@ std::optional<nlohmann::json> DesktopDatabase::recover_investigation_task(
   {
     Statement task(connection_, R"SQL(
         UPDATE investigation_tasks
-           SET status = 'investigating', phase = 'recovery', active_run_id = NULL,
+           SET status = ?5, phase = 'recovery', active_run_id = NULL,
                last_failure = ?2, updated_at = ?3, completed_at = NULL,
                guardrails = ?4
          WHERE id = ?1 AND status NOT IN ('completed','expired')
       )SQL");
     bind_text(connection_, task.get(), 1, task_id);
-    bind_text(connection_, task.get(), 2, failure_json);
+    bind_text(connection_, task.get(), 2, recovery_failure_json);
     bind_text(connection_, task.get(), 3, updated_at);
     bind_text(connection_, task.get(), 4, guardrails_dump);
+    bind_text(connection_, task.get(), 5, awaiting_review ? "waiting_user" : "investigating");
     if (sqlite3_step(task.get()) != SQLITE_DONE) {
       throw std::runtime_error(sqlite3_errmsg(connection_));
     }
@@ -4732,6 +4903,37 @@ nlohmann::json DesktopDatabase::create_chat_session(
   transaction.commit();
   const auto detail = query_chat_session(connection_, id);
   return {{"session", detail.at("session")}};
+}
+
+nlohmann::json DesktopDatabase::ensure_chat_session(
+    const std::string& id, const std::optional<std::string>& workspace_id,
+    const std::optional<std::string>& server_id, const std::string& title,
+    const std::string& timestamp) const {
+  std::lock_guard lock(mutex_);
+  if (connection_ == nullptr) throw std::runtime_error("The local chat database is unavailable");
+  Transaction transaction(connection_);
+  Statement insert(connection_, R"SQL(
+    INSERT INTO chat_sessions (
+      id, workspace_id, server_id, title, created_at, updated_at, archived_at
+    ) VALUES (?1, ?2, ?3, ?4, ?5, ?5, NULL)
+    ON CONFLICT(id) DO NOTHING
+  )SQL");
+  bind_text(connection_, insert.get(), 1, id);
+  bind_optional_text(connection_, insert.get(), 2, workspace_id);
+  bind_optional_text(connection_, insert.get(), 3, server_id);
+  bind_text(connection_, insert.get(), 4, title);
+  bind_text(connection_, insert.get(), 5, timestamp);
+  if (sqlite3_step(insert.get()) != SQLITE_DONE) throw std::runtime_error(sqlite3_errmsg(connection_));
+  auto detail = query_chat_session(connection_, id);
+  const auto& session = detail.at("session");
+  if (session.value("workspaceId", nlohmann::json(nullptr)) !=
+          (workspace_id ? nlohmann::json(*workspace_id) : nlohmann::json(nullptr)) ||
+      session.value("serverId", nlohmann::json(nullptr)) !=
+          (server_id ? nlohmann::json(*server_id) : nlohmann::json(nullptr))) {
+    throw std::invalid_argument("Conversation belongs to another task scope");
+  }
+  transaction.commit();
+  return detail;
 }
 
 nlohmann::json DesktopDatabase::append_chat_message(

@@ -10,6 +10,7 @@ import type { IconName } from "../../components/Icon.js";
 import type { Workpage } from "./workpage-model.js";
 
 export const PAGE_ICON: Record<Workpage["kind"], IconName> = {
+  board: "board",
   files: "folder",
   terminal: "terminal",
   logs: "logs",

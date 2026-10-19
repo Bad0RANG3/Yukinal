@@ -168,6 +168,75 @@ select.form-input {
   appearance: auto;
 }
 
+/* Keep native selection, keyboard and form semantics while theming the popup
+   too. Older WebViews retain a dark native picker rather than a broken clone. */
+select { color-scheme: dark; }
+select option { color: var(--text); background: var(--surface-2); }
+@supports (appearance: base-select) {
+  select:not([multiple]):not([size]),
+  select:not([multiple]):not([size])::picker(select) { appearance: base-select; }
+  select:not([multiple]):not([size]) {
+    position: relative;
+    display: block;
+    padding-inline-end: 30px;
+    overflow: hidden;
+    text-align: start;
+    white-space: nowrap;
+    text-overflow: ellipsis;
+    background: var(--surface-2);
+    cursor: pointer;
+  }
+  select:not([multiple]):not([size])::picker-icon {
+    position: absolute;
+    inset-inline-end: 1px;
+    top: 50%;
+    transform: translateY(-50%);
+    z-index: 1;
+    box-sizing: border-box;
+    inline-size: 28px;
+    min-inline-size: 0;
+    padding-inline: 4px;
+    text-align: center;
+    background: var(--surface-2);
+    box-shadow: -5px 0 4px 2px var(--surface-2);
+    color: var(--faint);
+    font-size: 10px;
+  }
+  select:not([multiple]):not([size])::picker(select) {
+    inline-size: anchor-size(width);
+    max-inline-size: calc(100vw - 24px);
+    max-block-size: min(360px, 50vh);
+    margin-block: 4px;
+    padding: 4px;
+    border: 1px solid var(--edge-normal);
+    border-radius: var(--radius-control);
+    background: var(--surface-2);
+    color: var(--text);
+    box-shadow: var(--shadow-popover, var(--shadow-frame));
+    font: inherit;
+    overflow-y: auto;
+    overscroll-behavior: contain;
+  }
+  select:not([multiple]):not([size]) option {
+    align-items: center;
+    gap: 8px;
+    min-block-size: 32px;
+    padding: 6px 8px;
+    border-radius: 3px;
+    color: var(--text);
+    background: transparent;
+    font: inherit;
+    line-height: 1.5;
+    white-space: normal;
+    overflow-wrap: anywhere;
+  }
+  select:not([multiple]):not([size]) option:checked { background: var(--material-active); }
+  select:not([multiple]):not([size]) option:is(:hover, :focus-visible) { background: var(--material-hover); outline: 1px solid var(--focus-line); outline-offset: -1px; }
+  select:not([multiple]):not([size]) option:disabled { color: var(--faint); opacity: .55; }
+  select:not([multiple]):not([size]) option::checkmark { color: var(--muted); }
+  select:not([multiple]):not([size]):disabled { cursor: default; }
+}
+
 .form-input-mono,
 .form-textarea {
   font-family: var(--font-ui);
@@ -517,6 +586,10 @@ select.form-input {
 
 .terminal-toolbar { min-width: 0; flex-wrap: wrap; }
 .terminal-toolbar > * { min-width: 0; }
+.terminal-paste-button { flex: 0 0 auto; margin-left: auto; }
+.terminal-paste-error { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; min-width: 0; padding: 8px 10px; border: 1px solid var(--edge-normal); border-radius: var(--radius-control); color: var(--warning); font-size: var(--text-caption); }
+.terminal-paste-error > span { flex: 1 1 200px; min-width: 0; overflow-wrap: anywhere; }
+.terminal-paste-error > button { max-width: 100%; }
 .terminal-page .terminal-io-error { min-width: 0; flex-wrap: wrap; align-items: flex-start; }
 .terminal-page .terminal-io-error > span { min-width: 0; flex: 1 1 140px; overflow-wrap: anywhere; }
 .terminal-page .terminal-io-error > button { max-width: 100%; margin-left: auto; white-space: normal; }

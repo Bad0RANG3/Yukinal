@@ -251,7 +251,7 @@ SshCommandResult run_server_logs(const DesktopDatabase& database,
   }
   const auto payload = resolve_ssh_service_target(database, credentials, server_id);
   const auto target = build_target_config(payload);
-  ScopedEnvironment environment(credential_values(payload));
+  yukinal::ssh_service::ScopedCredentialOverride credentials_scope(credential_values(payload));
   return to_result(
       yukinal::ssh_service::server_logs(target, since_seconds, unit, timeout_seconds));
 #else
@@ -274,7 +274,7 @@ SshCommandResult run_host_key_probe(const DesktopDatabase& database,
   }
   const auto payload = resolve_ssh_service_probe_target(database, credentials, server_id);
   const auto target = build_target_config(payload);
-  ScopedEnvironment environment(credential_values(payload));
+  yukinal::ssh_service::ScopedCredentialOverride credentials_scope(credential_values(payload));
   return to_result(yukinal::ssh_service::host_key_probe(target, timeout_seconds));
 #else
   (void)database;
@@ -294,7 +294,7 @@ SshCommandResult run_service_inventory(const DesktopDatabase& database,
   }
   const auto payload = resolve_ssh_service_target(database, credentials, server_id);
   const auto target = build_target_config(payload);
-  ScopedEnvironment environment(credential_values(payload));
+  yukinal::ssh_service::ScopedCredentialOverride credentials_scope(credential_values(payload));
   return to_result(yukinal::ssh_service::service_inventory(target, timeout_seconds));
 #else
   (void)database;
@@ -319,7 +319,7 @@ SshCommandResult run_docker_ps(const DesktopDatabase& database,
   }
   const auto payload = resolve_ssh_service_target(database, credentials, server_id);
   const auto target = build_target_config(payload);
-  ScopedEnvironment environment(credential_values(payload));
+  yukinal::ssh_service::ScopedCredentialOverride credentials_scope(credential_values(payload));
   return to_result(yukinal::ssh_service::docker_ps(target, all, timeout_seconds));
 #else
   (void)database;
@@ -341,7 +341,7 @@ SshCommandResult run_docker_logs(const DesktopDatabase& database,
   }
   const auto payload = resolve_ssh_service_target(database, credentials, server_id);
   const auto target = build_target_config(payload);
-  ScopedEnvironment environment(credential_values(payload));
+  yukinal::ssh_service::ScopedCredentialOverride credentials_scope(credential_values(payload));
   return to_result(
       yukinal::ssh_service::docker_logs(target, container, tail, timeout_seconds));
 #else
@@ -365,7 +365,7 @@ SshCommandResult run_docker_inspect(const DesktopDatabase& database,
   }
   const auto payload = resolve_ssh_service_target(database, credentials, server_id);
   const auto target = build_target_config(payload);
-  ScopedEnvironment environment(credential_values(payload));
+  yukinal::ssh_service::ScopedCredentialOverride credentials_scope(credential_values(payload));
   return to_result(yukinal::ssh_service::docker_inspect(target, container, timeout_seconds));
 #else
   (void)database;
@@ -387,7 +387,7 @@ SshCommandResult run_systemd_inspect(const DesktopDatabase& database,
   }
   const auto payload = resolve_ssh_service_target(database, credentials, server_id);
   const auto target = build_target_config(payload);
-  ScopedEnvironment environment(credential_values(payload));
+  yukinal::ssh_service::ScopedCredentialOverride credentials_scope(credential_values(payload));
   return to_result(yukinal::ssh_service::systemd_inspect(target, service, timeout_seconds));
 #else
   (void)database;
@@ -409,7 +409,7 @@ SshCommandResult run_package_inspect(const DesktopDatabase& database,
   }
   const auto payload = resolve_ssh_service_target(database, credentials, server_id);
   const auto target = build_target_config(payload);
-  ScopedEnvironment environment(credential_values(payload));
+  yukinal::ssh_service::ScopedCredentialOverride credentials_scope(credential_values(payload));
   return to_result(
       yukinal::ssh_service::package_inspect(target, manager, package, timeout_seconds));
 #else
@@ -435,7 +435,7 @@ nlohmann::json run_agent_filesystem_read(const DesktopDatabase& database,
       database, credentials,
       {{"serverId", server_id}, {"path", path}, {"maxBytes", max_bytes}});
   const auto target = build_target_config(payload);
-  ScopedEnvironment environment(credential_values(payload));
+  yukinal::ssh_service::ScopedCredentialOverride credentials_scope(credential_values(payload));
   const auto bounded = payload.at("filesystemRead").at("maxBytes").get<std::uint32_t>();
   const auto result = yukinal::ssh_service::sftp_read(target, path, bounded, timeout_seconds);
   if (!result.error_code.empty() || !result.completed) {
@@ -470,7 +470,7 @@ SshCommandResult run_connection_check(const DesktopDatabase& database,
   }
   const auto payload = resolve_ssh_service_target(database, credentials, server_id);
   const auto target = build_target_config(payload);
-  ScopedEnvironment environment(credential_values(payload));
+  yukinal::ssh_service::ScopedCredentialOverride credentials_scope(credential_values(payload));
   return to_result(yukinal::ssh_service::connection_check(target, timeout_seconds));
 #else
   (void)database;
@@ -490,7 +490,7 @@ nlohmann::json run_system_snapshot(const DesktopDatabase& database,
   }
   const auto payload = resolve_ssh_service_target(database, credentials, server_id);
   const auto target = build_target_config(payload);
-  ScopedEnvironment environment(credential_values(payload));
+  yukinal::ssh_service::ScopedCredentialOverride credentials_scope(credential_values(payload));
   const auto nonce = new_snapshot_nonce();
   const auto result = yukinal::ssh_service::system_snapshot(target, nonce, timeout_seconds);
   if (!result.error_code.empty() || !result.completed) {
@@ -519,7 +519,7 @@ nlohmann::json run_remote_file_list(const DesktopDatabase& database,
   }
   const auto payload = resolve_ssh_service_target(database, credentials, server_id);
   const auto target = build_target_config(payload);
-  ScopedEnvironment environment(credential_values(payload));
+  yukinal::ssh_service::ScopedCredentialOverride credentials_scope(credential_values(payload));
   const auto result = yukinal::ssh_service::sftp_list(target, path, timeout_seconds);
   if (!result.error_code.empty() || !result.completed) {
     throw std::runtime_error(result.error_message.empty() ? result.error_code
@@ -573,7 +573,7 @@ nlohmann::json run_remote_file_read(const DesktopDatabase& database,
   constexpr std::uint32_t kBrowserReadBytes = 1024 * 1024;
   const auto payload = resolve_ssh_service_target(database, credentials, server_id);
   const auto target = build_target_config(payload);
-  ScopedEnvironment environment(credential_values(payload));
+  yukinal::ssh_service::ScopedCredentialOverride credentials_scope(credential_values(payload));
   const auto result = yukinal::ssh_service::sftp_read(target, path, kBrowserReadBytes, timeout_seconds);
   if (!result.error_code.empty() || !result.completed) {
     throw std::runtime_error(result.error_message.empty() ? result.error_code
@@ -605,7 +605,7 @@ nlohmann::json run_remote_file_preview(const DesktopDatabase& database,
   constexpr std::uint32_t kBrowserReadBytes = 1024 * 1024;
   const auto payload = resolve_ssh_service_target(database, credentials, server_id);
   const auto target = build_target_config(payload);
-  ScopedEnvironment environment(credential_values(payload));
+  yukinal::ssh_service::ScopedCredentialOverride credentials_scope(credential_values(payload));
   const auto stat = yukinal::ssh_service::sftp_stat(target, path, timeout_seconds);
   if (!stat.error_code.empty() || !stat.completed) {
     throw std::runtime_error(stat.error_message.empty() ? stat.error_code : stat.error_message);

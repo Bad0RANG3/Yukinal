@@ -81,6 +81,7 @@ export function Icon({ name, size = "md", strokeWidth }: IconProps) {
 export type IconName =
   | "check"
   | "activity"
+  | "board"
   | "agent"
   | "archive"
   | "arrowUp"
@@ -118,6 +119,8 @@ function iconBody(name: IconName): ReactNode {
       return <><rect x="4" y="4" width="6" height="6" rx="1" /><rect x="14" y="4" width="6" height="6" rx="1" /><rect x="4" y="14" width="6" height="6" rx="1" /><rect x="14" y="14" width="6" height="6" rx="1" /></>;
     case "projects":
       return <><path d="M5 6h5a3 3 0 0 1 3 3v6a3 3 0 0 0 3 3h3" /><path d="M7 4 5 6l2 2M17 16l2 2-2 2" /></>;
+    case "board":
+      return <><rect x="3" y="4" width="18" height="16" rx="2" /><path d="M9 4v16M15 4v16M6 8h.01M12 8h.01M18 8h.01" /></>;
     case "activity":
       return <><circle cx="12" cy="12" r="8" /><path d="M12 8v4l3 2" /></>;
     case "settings":

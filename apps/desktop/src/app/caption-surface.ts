@@ -1,5 +1,15 @@
 import type { WindowShellSurface } from "@yukinal/shared";
 
+/** Adjacent fractional grid tracks can differ by a subpixel after layout. */
+export function captionEdges(left: number, right: number, inspectorLeft: number, viewportWidth: number) {
+  if (![left, right, inspectorLeft, viewportWidth].every(Number.isFinite) ||
+      viewportWidth <= 0 || left < 0 || left >= right ||
+      right - inspectorLeft > 1 || inspectorLeft - viewportWidth > 1) return null;
+  const edge = Math.min(inspectorLeft, viewportWidth);
+  const fittedRight = Math.min(right, edge);
+  return left < fittedRight ? { left, right: fittedRight, inspectorLeft: edge, viewportWidth } : null;
+}
+
 /** Flatten the translucent CSS edge onto its opaque content surface for GDI. */
 function opaqueColor(value: string, background: readonly number[] = [0, 0, 0]): string {
   const parts = value.match(/[\d.]+/gu)?.map(Number) ?? [];
@@ -17,15 +27,14 @@ export function readCaptionSurface(root: HTMLElement): WindowShellSurface {
   const bounds = panel?.getBoundingClientRect();
   const inspector = root.querySelector<HTMLElement>(".workspace-inspector")?.getBoundingClientRect();
   if (!panel || !bounds || !inspector || bounds.width === 0 || bounds.height === 0) return null;
+  const edges = captionEdges(bounds.left, bounds.right, inspector.left, document.documentElement.clientWidth);
+  if (!edges) return null;
   const style = getComputedStyle(panel);
   const background = opaqueColor(style.backgroundColor);
   const channels = [1, 3, 5].map((offset) => Number.parseInt(background.slice(offset, offset + 2), 16));
   return {
-    viewportWidth: document.documentElement.clientWidth,
-    left: bounds.left,
-    right: bounds.right,
+    ...edges,
     radius: Number.parseFloat(style.borderBottomLeftRadius) || 0,
-    inspectorLeft: inspector.left,
     background,
     border: opaqueColor(style.borderLeftColor, channels),
   };

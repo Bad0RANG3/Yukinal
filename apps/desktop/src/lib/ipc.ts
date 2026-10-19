@@ -34,7 +34,7 @@ type NativeDesktopHost = {
   windowShell?: {
     titlebarOverlay?: boolean;
     updateContext: (context: WindowShellContext) => Promise<void>;
-    updateSurface?: (surface: WindowShellSurface) => Promise<void>;
+    updateSurface?: (surface: WindowShellSurface) => Promise<{ maximized: boolean } | void>;
     openWorkpage?: (page: { kind: "terminal" | "files" | "logs" | "services"; serverId: string }) => Promise<unknown>;
   };
   workpageWindow?: { setPinned: (pinned: boolean) => Promise<{ pinned: boolean }>; hide: () => Promise<unknown> };
@@ -84,8 +84,9 @@ export async function hideNativeWorkpage(): Promise<void> {
   await window.__YUKINAL_HOST__?.workpageWindow?.hide();
 }
 
-export async function updateNativeCaptionSurface(surface: WindowShellSurface): Promise<void> {
-  await window.__YUKINAL_HOST__?.windowShell?.updateSurface?.(WindowShellSurfaceSchema.parse(surface));
+export async function updateNativeCaptionSurface(surface: WindowShellSurface): Promise<{ maximized: boolean } | undefined> {
+  const presentation = await window.__YUKINAL_HOST__?.windowShell?.updateSurface?.(WindowShellSurfaceSchema.parse(surface));
+  return presentation && typeof presentation.maximized === "boolean" ? { maximized: presentation.maximized } : undefined;
 }
 
 /**
