@@ -22,7 +22,7 @@ controlled AI Agent with a hardened, structured SSH service.
 
 ---
 
-> **Status:** Yukinal 2.0.0 was published on 2026-10-20 with Windows NSIS, macOS
+> **Status:** Yukinal `2.0.0` was published on 2026-10-20 with Windows NSIS, macOS
 > DMG, and Debian Linux installers. The published build has a first-run provider
 > loading defect; [PR #11](https://github.com/Bad0RANG3/Yukinal/pull/11) contains
 > the fix. It is not in the public 2.0.0

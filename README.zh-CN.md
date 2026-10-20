@@ -22,7 +22,7 @@
 
 ---
 
-> **状态：** Yukinal 2.0.0 于 2026-10-20 发布，包含 Windows NSIS、macOS DMG
+> **状态：** Yukinal `2.0.0` 于 2026-10-20 发布，包含 Windows NSIS、macOS DMG
 > 和 Debian Linux 安装包。已发布版本存在首次启动时读取模型配置失败的问题；
 > 修复在 [PR #11](https://github.com/Bad0RANG3/Yukinal/pull/11) 中，尚未进入公开的
 > 2.0.0 安装包。真实 Provider/MCP/SSH 任务、三平台安装版
