@@ -8,21 +8,24 @@
 
 ---
 
-## 1. 已验证检查点（RC.7，2026-10-20）
+## 1. 当前验收检查点（main，2026-10-20）
 
 | 项 | 值 |
 | --- | --- |
-| 分支 / RC 源提交 | `feat/workspace-tab-strip` / `170a30b` |
-| RC 标签 | `v2.0.0-rc.7` 指向 `170a30b` |
-| 跨平台安装 CI | [Run 39319681035](https://github.com/Bad0RANG3/Yukinal/actions/runs/39319681035)：Windows、Ubuntu、macOS jobs 全部成功 |
-| OpenSSH 容器集成 | Ubuntu 24.04 CTest **9/9** 通过；`openssh_container_integration` 11.86 秒通过，覆盖认证、只读调用、超时、输出上限、未知/变更 host key、SFTP hardlink no-replace |
-| 安装包 smoke | Windows NSIS、Ubuntu DEB、macOS DMG 均构建并安装/启动/移除 smoke 成功；用户数据保留检查通过 |
-| 本地 Provider 探针回归 | loopback stub 与配置安全测试 **6/6** 通过；未发起云端计费请求 |
-| Live Provider 凭据 | 未配置；Actions repository secrets 列表检查未发现可用 secret 名称（未读取任何秘密值） |
-| 稳定版状态 | 未发布；真实 Provider/MCP/目标机任务、三平台安装版 GUI 与签名/公证仍未验收 |
-| 工作树 | 验收记录提交后干净 |
+| 分支 / 当前源码 | `main` / `a30ed3952dcc560995f265001bf403748fac8c69` |
+| Provider 冷启动修复 | [PR #11](https://github.com/Bad0RANG3/Yukinal/pull/11) 已合并；Provider RPC 会先启动 Python Agent sidecar |
+| 主分支跨平台 CI | [Run 39361586532](https://github.com/Bad0RANG3/Yukinal/actions/runs/39361586532)：Windows、Ubuntu、macOS 和依赖审计全部成功 |
+| 候选安装包 workflow | [Run 39363920255，attempt 2](https://github.com/Bad0RANG3/Yukinal/actions/runs/39363920255)：Windows NSIS、Ubuntu DEB、macOS DMG 构建与平台安装 smoke 全部成功；首次 Windows NSIS 依赖安装遇 Chocolatey HTTP 504，重跑后通过 |
+| 候选工件 | [Windows](https://github.com/Bad0RANG3/Yukinal/actions/runs/39363920255/artifacts/12240505218)（95,467,198 bytes）、[Ubuntu](https://github.com/Bad0RANG3/Yukinal/actions/runs/39363920255/artifacts/12239280971)（212,564,859 bytes）、[macOS](https://github.com/Bad0RANG3/Yukinal/actions/runs/39363920255/artifacts/12238453827)（126,038,000 bytes）；保留 30 天。它们来自 `a30ed39`，尚不是稳定版 release 资产 |
+| Windows 候选包本地复核 | `package.mjs --verify` 校验 **716/716** 个随包文件；NSIS 安装版 Agent **0.1.0** provider/MCP imports 与 JSON-RPC stdio smoke 通过；安装、host self-check、卸载和用户数据保留通过。安装器 SHA-256：`BA0B94087B57F823DE83045713B284CC1C39CF100271020761A9D89CCC683EA8` |
+| Windows 安装版 GUI | 2026-10-20 将上述 NSIS 安装器安装到默认 `%LOCALAPPDATA%\Programs\Yukinal`（退出码 0），通过随包 `yukinal.cmd` 启动；WebView2 Runtime 为 `155.0.4283.62`。可见窗口 `Yukinal | 动态` 正常打开，首次连接设置与空服务器列表加载，未出现配置读取错误；界面状态为“已就绪”。Alt+F4 关闭后宿主退出，NSIS 卸载退出码 0；安装目录、卸载注册项、开始菜单和桌面快捷方式均已清理。安装器 SHA-256 见上一行。 |
+| D 盘隔离路径诊断 | 早先将 `WEBVIEW2_USER_DATA_FOLDER` 放在 `D:\yukinal\target\...` 时宿主退出码 3。Chromium 日志确认 profile 单实例锁创建返回 Win32 `ERROR_ACCESS_DENIED`（5）；同一候选载荷在 LocalAppData 的一次性 profile 下能启动。Windows GUI 通过结论以上述默认 LocalAppData 安装路径的真实安装、启动和卸载复验为准。 |
+| Live Provider 凭据 | `YUKINAL_LIVE_API_KEY` 未配置；仅检查了 Actions secret 名称，没有读取秘密值 |
+| MCP / SSH 真实目标 | 未提供可用 MCP endpoint/tool、可重置 SSH 主机、凭据 secret 或 host-key 指纹 |
+| 交互式安装验收 | Windows 候选包在默认 per-user 安装路径已完成安装、首次 GUI 启动、关闭和卸载验收；仍未测试真实 Provider、MCP、SSH 工作流或完整文件传输。当前没有可用 macOS/Linux 交互安装环境。CI smoke 不代替这些手动操作 |
+| 稳定版状态 | `v2.0.0` 仍公开，但其安装包没有包含 PR #11 修复；候选工件未发布。真实 A/O/F/R 业务链路、三平台安装版 GUI/文件传输、签名与公证仍待验收 |
 
-RC.7 三平台作业均在 [Run 39319681035](https://github.com/Bad0RANG3/Yukinal/actions/runs/39319681035) 首次完成并成功。artifact 名称为 `yukinal-release-windows-latest-X64`（94,948,723 bytes）、`yukinal-release-ubuntu-24.04-X64`（210,264,275 bytes）和 `yukinal-release-macos-15-intel-X64`（125,290,431 bytes），可从 run 页面下载（保留 30 天）。RC.6 第一次 macOS job 在 DMG 创建步骤失败，同一提交的 attempt 2 重新构建并通过 DMG 安装 smoke；该历史重试不影响 RC.7 结果。
+Run 39363920255 的 attempt 1 仅 Windows job 因 Chocolatey 社区源返回 HTTP 504 而失败；attempt 2 重跑该 job 后三平台全部成功。`publish stable GitHub release` 在此 `workflow_dispatch` 运行中按设计跳过，因此此次结果只生成候选工件。
 
 ## 2. 历史任务书检查点（2026-10-18）
 

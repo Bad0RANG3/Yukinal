@@ -10286,6 +10286,10 @@ IpcReply IpcRouter::provider_command(const std::string& method, const nlohmann::
   }
   try {
     auto& client = ensure_sidecar();
+    // Provider settings are owned by the Agent sidecar. The desktop reads them
+    // during first-run onboarding, before the user has pressed "Start service",
+    // so the first provider request must bring the sidecar up itself.
+    (void)client.ensure_started(std::chrono::milliseconds(60000));
     return {true, client.request(found->second, params, std::chrono::milliseconds(60000))};
   } catch (const SidecarRpcError& error) {
     return failure(sidecar_error_code(error.code()), error.what());

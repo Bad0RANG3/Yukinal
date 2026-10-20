@@ -284,6 +284,16 @@ int run_tests(int argc, char** argv) {
   check(idle.ok && idle.value.value("running", true) == false,
         "agent_status should report an idle sidecar");
 
+  // The packaged UI reads provider settings during first-run onboarding, before
+  // an explicit Start service action. That cold read must start the sidecar.
+  const auto cold_provider_list = router.invoke("provider_list", json::object());
+  check(cold_provider_list.ok && cold_provider_list.value.at("providers").empty(),
+        "provider_list should start the idle sidecar and return an empty provider list");
+  const auto running_after_provider_list = router.invoke("agent_status", json::object());
+  check(running_after_provider_list.ok &&
+            running_after_provider_list.value.value("running", false),
+        "provider_list should leave the sidecar running after a cold start");
+
   const auto spawned = router.invoke("agent_spawn", json::object());
   check(spawned.ok && spawned.value.value("toolCount", 0) > 0,
         "agent_spawn should start the sidecar through the router");

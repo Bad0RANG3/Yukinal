@@ -16,18 +16,20 @@ controlled AI Agent with a hardened, structured SSH service.
 [![Platform](https://img.shields.io/badge/platform-Windows%20%7C%20macOS%20%7C%20Linux-6f42c1.svg)](#build-and-run)
 [![Python](https://img.shields.io/badge/python-3.11%2B-3776ab.svg)](./agent/README.md)
 [![Node](https://img.shields.io/badge/node-%3E%3D24-339933.svg)](package.json)
-[![Dependencies](https://img.shields.io/badge/status-rewrite%20in%20progress-orange.svg)](./docs/rewrite-cpp-python.md)
+[![Acceptance](https://img.shields.io/badge/status-acceptance%20pending-orange.svg)](./docs/release.md)
 
 </div>
 
 ---
 
-> **Status:** Yukinal `2.0.0-preview.2` is a preview build based on the stable
-> `2.0.0` desktop release: the C++ WebView host and structured SSH service work
-> with the Python Agent and React interface. Windows NSIS, macOS DMG, and Debian Linux installers
-> are being validated. Signing, notarization, and live provider/SSH/file-transfer
-> acceptance remain separate release limitations. See
-> [rewrite status](./docs/rewrite-cpp-python.md) and
+> **Status:** Yukinal `2.0.0` was published on 2026-10-20 with Windows NSIS, macOS
+> DMG, and Debian Linux installers. `2.0.0-preview.2` is the current preview of the
+> C++ WebView host, structured SSH service, Python Agent, and React interface. The
+> public stable installers have a first-run Provider loading defect; the [PR #11
+> fix](https://github.com/Bad0RANG3/Yukinal/pull/11) is included in this preview.
+> Preview installers are being validated. Real Provider/MCP/SSH tasks, installed
+> GUI and file-transfer acceptance, signing, and notarization remain release
+> limitations. See [rewrite status](./docs/rewrite-cpp-python.md) and
 > [release status](./docs/release.md).
 
 ## Contents
