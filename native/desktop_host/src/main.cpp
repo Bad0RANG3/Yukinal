@@ -573,6 +573,9 @@ int run(const std::vector<std::string>& arguments) {
     #ifdef _WIN32
     install_workpage_lifecycle(context);
     #endif
+    // Warm the local Agent once per app session, without blocking the window.
+    // Use the same serialized lane as explicit startup and subsequent queries.
+    (void)context.dispatcher->submit("agent_spawn", nlohmann::json::object(), {});
     const auto result = webview_run(context.view);
     cleanup.close();
     return result == WEBVIEW_ERROR_OK ? 0 : 3;
