@@ -330,7 +330,10 @@ class HostActionToolTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(len(host.calls), 1)
         _, request, _ = host.calls[0]
         self.assertEqual(request["approvalId"], "apr-host-ticket")
-        self.assertEqual(request["input"], arguments)
+        self.assertEqual(
+            request["input"],
+            {**arguments, "command": "set -e\n" + arguments["command"]},
+        )
         self.assertEqual(request["planId"], "plan-current-1")
         self.assertEqual(request["planStepId"], "step-action-1")
         self.assertEqual(request["evidenceIds"], ["ev-1", "ev-2"])
