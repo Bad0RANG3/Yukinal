@@ -18,9 +18,10 @@
 | 候选安装包 workflow | [Run 39363920255，attempt 2](https://github.com/Bad0RANG3/Yukinal/actions/runs/39363920255)：Windows NSIS、Ubuntu DEB、macOS DMG 构建与平台安装 smoke 全部成功；首次 Windows NSIS 依赖安装遇 Chocolatey HTTP 504，重跑后通过 |
 | 候选工件 | [Windows](https://github.com/Bad0RANG3/Yukinal/actions/runs/39363920255/artifacts/12240505218)（95,467,198 bytes）、[Ubuntu](https://github.com/Bad0RANG3/Yukinal/actions/runs/39363920255/artifacts/12239280971)（212,564,859 bytes）、[macOS](https://github.com/Bad0RANG3/Yukinal/actions/runs/39363920255/artifacts/12238453827)（126,038,000 bytes）；保留 30 天。它们来自 `a30ed39`，尚不是稳定版 release 资产 |
 | Windows 候选包本地复核 | `package.mjs --verify` 校验 **716/716** 个随包文件；NSIS 安装版 Agent **0.1.0** provider/MCP imports 与 JSON-RPC stdio smoke 通过；安装、host self-check、卸载和用户数据保留通过。安装器 SHA-256：`BA0B94087B57F823DE83045713B284CC1C39CF100271020761A9D89CCC683EA8` |
+| Windows 安装版 GUI 尝试 | 2026-10-20 对上述安装器执行静默安装后，通过随包 `yukinal.cmd` 启动（它传入 `--ui-dir`；另外显式指定了隔离 `--data-dir`）；本机 WebView2 Runtime 为 `155.0.4283.62`。桌面宿主立即退出，退出码 **3**，没有可见窗口，因此 GUI 验收**失败/未通过**，原因尚未定位。随后 NSIS 卸载退出码 0；安装目录、卸载注册项、开始菜单和桌面快捷方式均已清理。复现安装目录为 `target/release/gui-acceptance/windows-main-a30ed39-candidate`。 |
 | Live Provider 凭据 | `YUKINAL_LIVE_API_KEY` 未配置；仅检查了 Actions secret 名称，没有读取秘密值 |
 | MCP / SSH 真实目标 | 未提供可用 MCP endpoint/tool、可重置 SSH 主机、凭据 secret 或 host-key 指纹 |
-| 交互式安装验收 | Windows 候选包可在本机继续做可视 GUI 验收；当前没有可用 macOS/Linux 交互安装环境。CI smoke 不代替这些手动操作 |
+| 交互式安装验收 | Windows 候选包的可视 GUI 尝试未通过：安装后的宿主退出码 3 且未出现窗口；需要定位后重试。当前没有可用 macOS/Linux 交互安装环境。CI smoke 不代替这些手动操作 |
 | 稳定版状态 | `v2.0.0` 仍公开，但其安装包没有包含 PR #11 修复；候选工件未发布。真实 A/O/F/R 业务链路、三平台安装版 GUI/文件传输、签名与公证仍待验收 |
 
 Run 39363920255 的 attempt 1 仅 Windows job 因 Chocolatey 社区源返回 HTTP 504 而失败；attempt 2 重跑该 job 后三平台全部成功。`publish stable GitHub release` 在此 `workflow_dispatch` 运行中按设计跳过，因此此次结果只生成候选工件。
