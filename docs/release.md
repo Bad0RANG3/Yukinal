@@ -1,6 +1,8 @@
 # 交付与发布
 
-**重写后首个发行目标（2026-10-20）：`2.0.0`。** 版本源为 `packages/shared/src/version.ts`；JavaScript workspace 清单、IPC fixture、原生 sidecar 版本和 README 由版本测试对齐。[release-candidate workflow](../.github/workflows/release-candidate.yml) 会在 Windows、Ubuntu 24.04、macOS 15 Intel 运行完整门禁，生成冻结 Agent 与 C++ 载荷，构建 NSIS/DEB/DMG，安装并 smoke 启动/卸载后校验并发布安装包。此前 RC.6 的 [Run 39309839659 attempt 2](https://github.com/Bad0RANG3/Yukinal/actions/runs/39309839659) 和 RC.7 的 [Run 39319681035](https://github.com/Bad0RANG3/Yukinal/actions/runs/39319681035) 在三平台构建与安装 smoke 全绿；这些证据只适用于相应 RC 源码。当前 2.0.0 提交的三平台门禁和安装包 smoke 尚待完成。安装包未签名、macOS 未公证；真实 Provider/MCP 目标任务、用户指定 SSH 主机和安装版 GUI 文件传输仍需实际环境验收。
+**重写后首个稳定版 `2.0.0` 已于 2026-10-20 发布**（[GitHub Release](https://github.com/Bad0RANG3/Yukinal/releases/tag/v2.0.0)），包含 Windows NSIS、macOS DMG、Debian Linux 安装包、平台清单和校验和。版本源为 `packages/shared/src/version.ts`；JavaScript workspace 清单、IPC fixture、原生 sidecar 版本和 README 由版本测试对齐。此前 RC.6 的 [Run 39309839659 attempt 2](https://github.com/Bad0RANG3/Yukinal/actions/runs/39309839659) 和 RC.7 的 [Run 39319681035](https://github.com/Bad0RANG3/Yukinal/actions/runs/39319681035) 在三平台构建与安装 smoke 全绿；这些证据只适用于相应 RC 源码。
+
+**已发布包的已知问题：** Windows 隔离安装启动时，首次读取 Provider 列表失败，因为桌面宿主没有在冷启动时启动 Python Agent。修复和回归覆盖在 [PR #11](https://github.com/Bad0RANG3/Yukinal/pull/11)；本机 Windows CTest 16/16 通过，替换为修复宿主后的安装副本不再显示配置读取错误。修复尚未进入已发布的 2.0.0 安装包。安装包未签名、macOS 未公证；真实 Provider/MCP 目标任务、用户指定 SSH 主机和三平台安装版 GUI 文件传输仍需实际环境验收。
 
 > **历史记录（截至 2026-10-17）：** Rust/Tauri 宿主移除和 C++ 分发布局的早期状态。下方旧 Tauri/MSI/Node runtime 的 run、哈希与验收只适用于当时源码；本页当前状态以 2026-10-20 更新为准。
 
@@ -10,13 +12,13 @@
 
 2026-10-15 源码迁移移除了旧 Rust SSH crate、桌面测试专用 Rust SSH 连接器以及 Rust `server.exec` 测试回退。下方旧交付记录中的 `yukinal-ssh` 测试命令仅作历史证据，不再适用于当前源码；现在通过 CTest 验证 C++ SSH 与 Python caller。
 
-## 当前状态：C++ 宿主与平台安装器候选（2026-10-20）
+## 当前状态：2.0.0 平台安装包已发布，A/O/F/R 验收待完成（2026-10-20）
 
 C++ 宿主已接替旧的 Tauri 打包路径：`scripts/package.mjs` 把 C++ 桌面宿主、已构建的桌面 UI（默认 `apps/desktop/dist`，可用 `--ui-dir` 或 `YUKINAL_DESKTOP_UI_DIR` 覆盖）、冻结 Python Agent（PyInstaller onedir）和 C++ SSH 服务暂存到 `target/release/bundle/yukinal-<version>-<platform>-<arch>/`，并写出 `SHA256SUMS.txt` 与 `release-manifest.json`（应用版本、Agent 版本、平台/架构、源码修订、工作区是否脏、每个文件的 SHA-256 与字节数、每件可执行产物的来源与构建时间（`inputs` 段）、启动所需的 `--ui-dir <payload>/ui` 与 `YUKINAL_AGENT_ENTRY`/`YUKINAL_SSH_SERVICE_BINARY` 约定）。`pnpm release:manifest` 重建清单，`pnpm package -- --verify` 逐字节复核，任何不一致都非零退出；缺少宿主/UI/Agent/SSH 服务产物时一律 fail-closed，不会产出部分载荷。**打包输入要够新**：三件可执行产物中任何一件的修改时间早于「最后一次改动其源码目录的提交」时，`pnpm package` 默认拒绝暂存（旧清单只会把整份载荷归因于 `HEAD`，`dirty: true` 并不能说明二进制陈旧）；确需暂存旧产物时用 `--allow-stale-inputs`，该豁免会连同每件输入的 sha256/构建时间写进 `manifest.notes`。**UI 目录必须存在 `index.html`**，否则打包失败——C++ 宿主在不含可读入口文档时以退出码 2 静默拒绝启动，所以“清单全绿却起不来”的载荷不再是可能状态。
 
 **候选 CI 新增**：Windows NSIS、macOS DMG、Ubuntu 24.04 DEB 生成；每个平台 smoke 检查安装文件、host `--self-check`、冻结 Agent 的 JSON-RPC 握手、卸载/移除和独立数据目录保留。NSIS 安装为当前用户；所有卸载器只清理安装文件，不删除应用数据。RC.6 的 Windows、Ubuntu 和 macOS 自动安装 smoke 已在 [Run 39309839659 attempt 2](https://github.com/Bad0RANG3/Yukinal/actions/runs/39309839659) 通过。
 
-**仍未验收**：代码签名/公证、稳定版本远端 CI 成功记录、真实 Provider/MCP/SSH 任务、三平台 GUI 和系统文件拖放、安装后重启/升级/恢复。完整性清单验证字节未变，不证明发布者身份。只有签名配置与目标架构的 A/O/F/R 条件完成后，才应推送稳定 `vX.Y.Z` 标签；release workflow 会在所有平台安装作业通过后公开对应资产。
+**仍未验收**：签名/公证、真实 Provider/MCP/SSH 目标任务、Windows/macOS/Linux 三平台安装版 GUI 和系统文件拖放、安装后重启/升级/恢复。`v2.0.0` 已公开，但这不代表 A/O/F/R 验收完成；完成这些条件并修复上述问题后，才应发布包含修复的新版本。完整性清单验证字节未变，不证明发布者身份。
 
 ## 当前状态
 
