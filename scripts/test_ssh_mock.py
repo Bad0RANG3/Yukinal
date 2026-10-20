@@ -24,6 +24,7 @@ import tempfile
 import threading
 import time
 from pathlib import Path
+from typing import Any
 
 from cryptography.hazmat.primitives import serialization
 from cryptography.hazmat.primitives.asymmetric import ed25519, rsa
@@ -42,6 +43,43 @@ except ImportError as error:
 
 from yukinal_ssh import SshServiceClient, SshServiceError
 from yukinal_ssh.client import _SYSTEM_SNAPSHOT_COMMAND_IDS
+
+
+class ParamikoMockSshServiceClient(SshServiceClient):
+    """Retry only the mock server's transient Windows key-exchange failure.
+
+    The service reports this exact failure before SSH authentication or a remote
+    operation can begin. Keep the retry confined to this loopback test fixture;
+    all other SSH errors, including persistent key-exchange failures, still fail.
+    """
+
+    def _request(
+        self,
+        method: str,
+        path: str,
+        payload: dict[str, Any] | None,
+        *,
+        timeout: int,
+        authorized: bool,
+    ) -> dict[str, Any]:
+        for attempt in range(3):
+            try:
+                return super()._request(
+                    method, path, payload, timeout=timeout, authorized=authorized
+                )
+            except SshServiceError as error:
+                transient_mock_kex_failure = (
+                    error.code == "ssh_handshake_failed"
+                    and "Unable to exchange encryption keys" in str(error)
+                )
+                if not transient_mock_kex_failure or attempt == 2:
+                    raise
+                print(
+                    "Transient Paramiko mock key-exchange failure; "
+                    f"retrying before authentication ({attempt + 1}/2).",
+                    file=sys.stderr,
+                )
+                time.sleep(0.05 * (2**attempt))
 
 
 TOKEN = "paramiko-live-ssh-test-token-long-enough-for-service"
@@ -1576,7 +1614,7 @@ def run_test(service_binary: Path, *, agent_runtime_only: bool = False) -> None:
             stderr=subprocess.DEVNULL,
             env=environment,
         )
-        client = SshServiceClient(TOKEN, f"http://127.0.0.1:{service_port}")
+        client = ParamikoMockSshServiceClient(TOKEN, f"http://127.0.0.1:{service_port}")
         try:
             deadline = time.monotonic() + 10
             while time.monotonic() < deadline:
