@@ -116,9 +116,10 @@ test("native shutdown skips queued RPC/events while destruction drains without i
   // Compile the real entry gate without depending on the dispatcher body or its local variables.
   const rpcGuard = nativeSource.match(/void rpc_handler\(const char\* id, const char\* request, void\* context_pointer\) \{[\s\S]*?(auto& context = \*static_cast<BridgeContext\*>\(context_pointer\);\s*if \([^\n]+\) return;)/u)?.[1];
   const active = nativeSource.match(/  bool active\(\) const \{[^\n]+\}/u)?.[0];
+  const stopScheduleClock = nativeSource.match(/  void stop_schedule_clock\(\) \{[\s\S]*?\n  \}/u)?.[0];
   const destroy = nativeSource.match(/void destroy_bridge_window\(BridgeContext& context\) \{[\s\S]*?\n\}/u)?.[0];
   const retire = nativeSource.match(/std::vector<std::unique_ptr<BridgeContext>> retire_auxiliary_windows\([\s\S]*?\n\}/u)?.[0];
-  assert.ok(lifetime && pendingEvent && queuedEvent && rpcGuard && active && destroy && retire,
+  assert.ok(lifetime && pendingEvent && queuedEvent && rpcGuard && active && stopScheduleClock && destroy && retire,
     "native lifecycle must expose its actual queued callback guards and retirement helpers");
   const harness = `
 #include <atomic>
@@ -136,11 +137,14 @@ using webview_t = Window*;
 struct Router { void set_event_sink(std::nullptr_t) {} };
 struct Replies { bool closed = false; void close() { closed = true; } };
 struct Dispatcher { bool closed = false; void close() { closed = true; } };
-struct ScheduleClock {
-  bool stopped = false, joined = false;
+struct ScheduleClockControl {
+  bool stopped = false;
   void request_stop() { stopped = true; }
+};
+struct ScheduleClock {
+  bool joined = false;
   bool joinable() const { return !joined; }
-  void join() { assert(stopped); joined = true; }
+  void join() { joined = true; }
 };
 struct BridgeContext {
   webview_t view = nullptr;
@@ -148,9 +152,11 @@ struct BridgeContext {
   std::shared_ptr<std::atomic_bool> window_alive = std::make_shared<std::atomic_bool>(true);
   std::shared_ptr<Replies> replies = std::make_shared<Replies>();
   std::shared_ptr<Dispatcher> dispatcher = std::make_shared<Dispatcher>();
+  std::shared_ptr<ScheduleClockControl> schedule_clock_control = std::make_shared<ScheduleClockControl>();
   ScheduleClock schedule_clock;
   Router router;
   ${active}
+  ${stopScheduleClock}
 };
 ${pendingEvent}
 std::deque<std::function<void()>> callbacks;
@@ -216,6 +222,7 @@ int main() {
   queue_event(main); queue_event(*child_context);
   auto retired = retire_auxiliary_windows(main, children);
   assert(children.empty() && retired.size() == 1 && !main.active());
+  assert(main.schedule_clock_control->stopped && !main.schedule_clock.joinable());
   for (auto& current : retired) destroy_bridge_window(*current);
   assert(invoked == 1 && evaluated == 1 && destroyed == 1);
   // A late queued callback from an already destroyed child owns its gate.
