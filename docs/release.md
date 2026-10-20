@@ -1,6 +1,6 @@
 # 交付与发布
 
-**重写后首个发行目标（2026-10-20）：`2.0.0`。** 版本源为 `packages/shared/src/version.ts`；JavaScript workspace 清单、IPC fixture、原生 sidecar 版本和 README 由版本测试对齐。[release-candidate workflow](../.github/workflows/release-candidate.yml) 会在 Windows、Ubuntu 24.04、macOS 15 Intel 运行完整门禁，生成冻结 Agent 与 C++ 载荷，构建 NSIS/DEB/DMG，安装并 smoke 启动/卸载后校验并发布安装包。此前 RC.6 的 [Run 39309839659 attempt 2](https://github.com/Bad0RANG3/Yukinal/actions/runs/39309839659) 和 RC.7 的 [Run 39319681035](https://github.com/Bad0RANG3/Yukinal/actions/runs/39319681035) 在三平台构建与安装 smoke 全绿；这些证据只适用于相应 RC 源码。当前 2.0.0 提交的三平台门禁和安装包 smoke 尚待完成。安装包未签名、macOS 未公证；真实 Provider/MCP 目标任务、用户指定 SSH 主机和安装版 GUI 文件传输仍需实际环境验收。
+**当前预览程序版本（2026-10-20）：`2.0.0-preview.2`，基于已发布的稳定版 `2.0.0`。** 版本源为 `packages/shared/src/version.ts`；JavaScript workspace 清单、IPC fixture、原生 sidecar 版本和 README 由版本测试对齐。[release-candidate workflow](../.github/workflows/release-candidate.yml) 会在 Windows、Ubuntu 24.04、macOS 15 Intel 运行完整门禁，生成冻结 Agent 与 C++ 载荷，构建 NSIS/DEB/DMG，安装并 smoke 启动/卸载后校验并发布安装包。此前 RC.6 的 [Run 39309839659 attempt 2](https://github.com/Bad0RANG3/Yukinal/actions/runs/39309839659) 和 RC.7 的 [Run 39319681035](https://github.com/Bad0RANG3/Yukinal/actions/runs/39319681035) 在三平台构建与安装 smoke 全绿；这些证据只适用于相应 RC 源码。当前预览提交的三平台门禁和安装包 smoke 尚待完成。安装包未签名、macOS 未公证；真实 Provider/MCP 目标任务、用户指定 SSH 主机和安装版 GUI 文件传输仍需实际环境验收。
 
 > **历史记录（截至 2026-10-17）：** Rust/Tauri 宿主移除和 C++ 分发布局的早期状态。下方旧 Tauri/MSI/Node runtime 的 run、哈希与验收只适用于当时源码；本页当前状态以 2026-10-20 更新为准。
 
@@ -24,7 +24,7 @@ C++ 宿主已接替旧的 Tauri 打包路径：`scripts/package.mjs` 把 C++ 桌
 
 2026-10-15 起的当前源码配置已把安装包资源切换为冻结 Python Agent、C++ SSH 服务和 `NOTICE`，移除了 Node Agent 与 Node runtime 的发行资源及下载步骤。安装版 smoke 会从 Tauri 资源映射暂存文件，在受限 PATH 下启动 Python Agent 并完成协议检查。当前工作树尚未生成或安装这一新布局的 Tauri 安装器；下表、历史快照和旧产物哈希记录的是先前携带 Node runtime 的版本，不能当作新布局的验收证据。
 
-当前源码版本为 `2.0.0`。旧版 Tauri 的包运行记录不覆盖当前 C++ 宿主载荷。版本号以 `packages/shared/src/version.ts` 为源，测试检查 JavaScript 清单、IPC fixture 与 README；原生 Python Agent 客户端版本也必须同步。
+当前源码版本为 `2.0.0-preview.2`。旧版 Tauri 的包运行记录不覆盖当前 C++ 宿主载荷。版本号以 `packages/shared/src/version.ts` 为源，测试检查 JavaScript 清单、IPC fixture 与 README；原生 Python Agent 客户端版本也必须同步。
 
 | 项目 | 已有证据 | 发布前仍需完成 |
 | --- | --- | --- |
