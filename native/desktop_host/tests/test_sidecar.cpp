@@ -221,7 +221,17 @@ int run_tests(int argc, char** argv) {
     check(!broken.status().running, "stop() after a failed spawn must report stopped");
   }
 
-  const auto started = client.start(std::chrono::milliseconds(60000));
+  const auto started = [&] {
+    try {
+      return client.start(std::chrono::milliseconds(60000));
+    } catch (const std::exception& error) {
+      std::cerr << "[sidecar-test] direct Agent sidecar start failed: " << error.what() << '\n';
+      for (const auto& line : client.log_lines()) {
+        std::cerr << "[sidecar-test] Agent stderr: " << line << '\n';
+      }
+      throw;
+    }
+  }();
   check(started.pid != 0, "the sidecar should report a process id");
   check(started.tool_count > 0, "the sidecar should expose at least one tool");
   check(!started.agent_version.empty(), "the sidecar should report its agent version");
