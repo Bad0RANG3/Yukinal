@@ -49,7 +49,7 @@ from .ssh_tools import (
 )
 from .ssh_service_process import SshServiceProcess, SshServiceProcessError
 from .system_snapshot import SYSTEM_SNAPSHOT_COMMAND_IDS, normalize_system_snapshot
-from .network_snapshot import NETWORK_SNAPSHOT_COMMAND_IDS
+from yukinal_ssh.toolkit_catalog import OPTIONAL_SNAPSHOT_COMMAND_IDS
 from .tools import ToolCallError, ToolRegistry
 
 RPC_VERSION = "1.0"
@@ -1404,7 +1404,7 @@ class PythonSidecar:
         if (
             not isinstance(outputs, dict)
             or not set(SYSTEM_SNAPSHOT_COMMAND_IDS) <= set(outputs)
-            or not set(outputs) <= set(SYSTEM_SNAPSHOT_COMMAND_IDS + NETWORK_SNAPSHOT_COMMAND_IDS)
+            or not set(outputs) <= set(SYSTEM_SNAPSHOT_COMMAND_IDS + OPTIONAL_SNAPSHOT_COMMAND_IDS)
         ):
             raise _RpcFault(RPC_INVALID_PARAMS, "invalid snapshot command set")
         normalized_outputs: dict[str, tuple[int, str]] = {}

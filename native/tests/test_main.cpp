@@ -1,7 +1,12 @@
 #include "test_support.hpp"
 #include <cstdlib>
+#include "yukinal/snapshot_toolkit.hpp"
 
 int main(int argc, char** argv) {
+  if (argc == 2 && std::string(argv[1]) == "--snapshot-toolkit-command") {
+    std::cout << yukinal::ssh_service::build_system_snapshot_command(std::string(32, 'a'));
+    return 0;
+  }
   if (argc == 2 && std::string(argv[1]) == "--credential-inheritance-check") {
     const char* value = std::getenv("YUKINAL_SSH_OVERRIDE_TEST_PASSWORD");
     return value != nullptr && std::string(value) == "local-test-process-baseline" ? 0 : 2;

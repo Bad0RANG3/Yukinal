@@ -1,0 +1,157 @@
+{
+  "capabilities": {
+    "linux": true,
+    "docker": true
+  },
+  "collectors": [
+    {
+      "collectorId": "os",
+      "ok": true,
+      "collectedAt": "2026-10-20T08:00:00Z"
+    },
+    {
+      "collectorId": "cpu",
+      "ok": true,
+      "collectedAt": "2026-10-20T08:00:00Z"
+    },
+    {
+      "collectorId": "memory",
+      "ok": true,
+      "collectedAt": "2026-10-20T08:00:00Z"
+    },
+    {
+      "collectorId": "uptime",
+      "ok": true,
+      "collectedAt": "2026-10-20T08:00:00Z"
+    },
+    {
+      "collectorId": "disk",
+      "ok": true,
+      "collectedAt": "2026-10-20T08:00:00Z"
+    },
+    {
+      "collectorId": "network",
+      "ok": true,
+      "collectedAt": "2026-10-20T08:00:00Z"
+    },
+    {
+      "collectorId": "docker",
+      "ok": true,
+      "collectedAt": "2026-10-20T08:00:00Z"
+    },
+    {
+      "collectorId": "gpu",
+      "ok": true,
+      "collectedAt": "2026-10-20T08:00:00Z"
+    },
+    {
+      "collectorId": "security",
+      "ok": true,
+      "collectedAt": "2026-10-20T08:00:00Z"
+    }
+  ],
+  "os": {
+    "distribution": "Test Linux",
+    "version": "1",
+    "hostname": "mock-host",
+    "kernel": "6.1.0",
+    "arch": "x86_64"
+  },
+  "cpu": {
+    "model": "Mock CPU",
+    "cores": 4,
+    "usagePercent": 50.0,
+    "loadAverage": [
+      0.1,
+      0.2,
+      0.3
+    ]
+  },
+  "memory": {
+    "totalBytes": 1048576,
+    "usedBytes": 524288,
+    "availableBytes": 524288,
+    "usagePercent": 50.0
+  },
+  "uptimeSeconds": 120,
+  "disks": [
+    {
+      "device": "/dev/vda1",
+      "mountPoint": "/",
+      "totalBytes": 1000,
+      "usedBytes": 250,
+      "usagePercent": 25.0
+    }
+  ],
+  "network": [
+    {
+      "name": "eth0",
+      "rxBytes": 100,
+      "txBytes": 200
+    }
+  ],
+  "docker": {
+    "available": true,
+    "containers": [
+      {
+        "name": "api",
+        "image": "example/api",
+        "state": "running",
+        "status": "Up",
+        "restartCount": 0
+      }
+    ]
+  },
+  "health": "healthy",
+  "gpu": {
+    "status": "available",
+    "devices": [
+      {
+        "index": 0,
+        "name": "NVIDIA T4",
+        "usagePercent": 73.0,
+        "memoryUsedBytes": 2147483648,
+        "memoryTotalBytes": 17179869184,
+        "temperatureCelsius": 62.0
+      }
+    ]
+  },
+  "security": {
+    "checks": [
+      {
+        "id": "identity",
+        "label": "连接身份",
+        "status": "warning",
+        "detail": "当前以 root 连接"
+      },
+      {
+        "id": "sshd",
+        "label": "SSH 登录",
+        "status": "info",
+        "detail": "root: prohibit-password · 密码登录关闭（默认配置）"
+      },
+      {
+        "id": "firewall",
+        "label": "防火墙",
+        "status": "unknown",
+        "detail": "检测工具不可用"
+      },
+      {
+        "id": "listeners",
+        "label": "监听端口",
+        "status": "info",
+        "detail": "0 个通配地址监听"
+      }
+    ]
+  },
+  "toolkit": {
+    "version": "1",
+    "modules": [
+      "gpu",
+      "security"
+    ]
+  },
+  "id": "snap_toolkit_fixture",
+  "serverId": "srv_toolkit",
+  "collectedAt": "2026-10-20T08:00:00Z"
+}

@@ -5,6 +5,12 @@ set(CMAKE_CXX_STANDARD 20)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(CMAKE_CXX_EXTENSIONS OFF)
 
+# One checked-in read-only probe catalog is shared with the Python runtime.
+set(YUKINAL_TOOLKIT_CATALOG "${CMAKE_CURRENT_SOURCE_DIR}/../agent/src/yukinal_ssh/toolkit_catalog.json")
+set_property(DIRECTORY APPEND PROPERTY CMAKE_CONFIGURE_DEPENDS "${YUKINAL_TOOLKIT_CATALOG}")
+file(READ "${YUKINAL_TOOLKIT_CATALOG}" YUKINAL_SNAPSHOT_TOOLKIT_CATALOG)
+configure_file(cmake/snapshot_toolkit_data.hpp.in generated/yukinal/snapshot_toolkit_data.hpp @ONLY)
+
 if(MSVC)
   # The desktop installer must run on machines without a separately installed
   # Visual C++ Redistributable; keep the standalone service self-contained.
@@ -177,7 +183,7 @@ add_library(yukinal_ssh_core
   src/ssh_credentials.cpp
   src/http_service.cpp
 )
-target_include_directories(yukinal_ssh_core PUBLIC include)
+target_include_directories(yukinal_ssh_core PUBLIC include "${CMAKE_CURRENT_BINARY_DIR}/generated")
 if(YUKINAL_FETCH_DEPS)
   target_include_directories(yukinal_ssh_core PRIVATE ${cpp_httplib_SOURCE_DIR})
 else()
@@ -211,6 +217,7 @@ if(YUKINAL_BUILD_TESTS)
     tests/test_config.cpp
     tests/test_host_key.cpp
     tests/test_policy.cpp
+    tests/test_snapshot_toolkit.cpp
     tests/test_network.cpp
     tests/test_credentials.cpp
   )

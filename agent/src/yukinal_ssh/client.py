@@ -14,6 +14,11 @@ from dataclasses import dataclass
 from typing import Any
 
 from .errors import SshServiceError, SshServiceTransportError
+from .toolkit_catalog import (
+    SYSTEM_SNAPSHOT_COMMAND_IDS as _SYSTEM_SNAPSHOT_COMMAND_IDS,
+    OPTIONAL_SNAPSHOT_COMMAND_IDS as _OPTIONAL_SNAPSHOT_COMMAND_IDS,
+    NETWORK_SNAPSHOT_COMMAND_IDS as _NETWORK_SNAPSHOT_COMMAND_IDS,
+)
 
 _TARGET_ID = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.-]{0,63}$")
 _SERVICE_NAME = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.@:-]{0,127}$")
@@ -25,34 +30,6 @@ _TOKEN = re.compile(r"^[A-Za-z0-9._~-]{32,256}$")
 _MAX_SFTP_WRITE_BYTES = 512 * 1024
 _MAX_SFTP_EXCLUSIVE_BYTES = 1024 * 1024
 _MAX_SFTP_READ_BYTES = 1024 * 1024
-_SYSTEM_SNAPSHOT_COMMAND_IDS = (
-    "os_detect",
-    "os_release",
-    "os_kernel",
-    "os_arch",
-    "os_hostname",
-    "cpu_detect",
-    "cpu_ticks_a",
-    "cpu_ticks_b",
-    "cpu_cores",
-    "cpu_model",
-    "cpu_load",
-    "memory_detect",
-    "memory_info",
-    "uptime_detect",
-    "uptime_info",
-    "disk_detect",
-    "disk_usage",
-    "network_detect",
-    "network_info",
-    "docker_detect",
-    "docker_info",
-    "docker_ps",
-)
-
-_NETWORK_SNAPSHOT_COMMAND_IDS = (
-    "network_addresses", "network_routes4", "network_routes6", "network_dns",
-)
 
 
 @dataclass(frozen=True)
@@ -96,11 +73,11 @@ def _parse_system_snapshot_output(output: str, nonce: str) -> dict[str, tuple[in
         )
 
     results: dict[str, tuple[int, str]] = {}
-    for command_id in _SYSTEM_SNAPSHOT_COMMAND_IDS + _NETWORK_SNAPSHOT_COMMAND_IDS:
+    for command_id in _SYSTEM_SNAPSHOT_COMMAND_IDS + _OPTIONAL_SNAPSHOT_COMMAND_IDS:
         start_marker = f"__YK_SNAPSHOT_{nonce}_{command_id}_BEGIN__\n"
-        if (command_id in _NETWORK_SNAPSHOT_COMMAND_IDS and start_marker not in output
+        if (command_id in _OPTIONAL_SNAPSHOT_COMMAND_IDS and start_marker not in output
                 and f"__YK_SNAPSHOT_{nonce}_{command_id}_END_" not in output):
-            continue  # Legacy services omit optional network probes altogether.
+            continue  # Legacy services omit optional toolkit probes altogether.
         if output.count(start_marker) != 1:
             raise SshServiceTransportError(
                 "invalid_response", "SSH service returned an incomplete system snapshot"

@@ -20,6 +20,7 @@
 
 #include "yukinal/config.hpp"
 #include "yukinal/ssh.hpp"
+#include "yukinal/snapshot_toolkit.hpp"
 #endif
 
 namespace yukinal::desktop_host {
@@ -59,15 +60,6 @@ SshCommandResult to_result(const yukinal::ssh_service::ExecResult& result) {
   return converted;
 }
 
-// The fixed collector order the Python normalizer expects. The order is part of
-// the contract: it is how the parser knows which section each marker delimits.
-constexpr std::array<const char*, 22> kSnapshotCommandIds = {
-    "os_detect",   "os_release",   "os_kernel",    "os_arch",     "os_hostname",
-    "cpu_detect",  "cpu_ticks_a",  "cpu_ticks_b",  "cpu_cores",   "cpu_model",
-    "cpu_load",    "memory_detect", "memory_info", "uptime_detect", "uptime_info",
-    "disk_detect", "disk_usage",   "network_detect", "network_info", "docker_detect",
-    "docker_info", "docker_ps"};
-
 std::string new_snapshot_nonce() {
   std::random_device device;
   static constexpr char kHex[] = "0123456789abcdef";
@@ -81,47 +73,7 @@ std::string new_snapshot_nonce() {
   return nonce;
 }
 
-nlohmann::json parse_system_snapshot_outputs(const std::string& output,
-                                            const std::string& nonce) {
-  nlohmann::json results = nlohmann::json::object();
-  for (const auto* id : kSnapshotCommandIds) {
-    const std::string start_marker =
-        std::string("__YK_SNAPSHOT_") + nonce + "_" + id + "_BEGIN__\n";
-    const auto start = output.find(start_marker);
-    if (start == std::string::npos) {
-      throw std::runtime_error("the C++ SSH service returned an incomplete system snapshot");
-    }
-    const auto data_start = start + start_marker.size();
-    if (output.find(start_marker, data_start) != std::string::npos) {
-      throw std::runtime_error("the C++ SSH service returned an ambiguous system snapshot");
-    }
-    const std::string end_prefix =
-        std::string("\n__YK_SNAPSHOT_") + nonce + "_" + id + "_END_";
-    const auto end = output.find(end_prefix, data_start);
-    if (end == std::string::npos) {
-      throw std::runtime_error("the C++ SSH service returned an incomplete system snapshot");
-    }
-    const auto status_start = end + end_prefix.size();
-    const auto status_end = output.find("__\n", status_start);
-    if (status_end == std::string::npos) {
-      throw std::runtime_error("the C++ SSH service returned an invalid system snapshot");
-    }
-    int exit_code = -1;
-    try {
-      exit_code = std::stoi(output.substr(status_start, status_end - status_start));
-    } catch (const std::exception&) {
-      throw std::runtime_error(
-          "the C++ SSH service returned an invalid system snapshot status");
-    }
-    if (exit_code < 0 || exit_code > 255) {
-      throw std::runtime_error(
-          "the C++ SSH service returned an invalid system snapshot status");
-    }
-    results[id] = {{"exitCode", exit_code},
-                   {"stdout", output.substr(data_start, end - data_start)}};
-  }
-  return results;
-}
+using yukinal::ssh_service::parse_system_snapshot_outputs;
 
 int base64_value(char character) {
   if (character >= 'A' && character <= 'Z') return character - 'A';

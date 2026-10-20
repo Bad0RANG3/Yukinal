@@ -41,6 +41,7 @@ const args = [
   "--workpath", work,
   "--specpath", join(work, "spec"),
   "--paths", join(root, "agent", "src"),
+  "--collect-data", "yukinal_ssh",
   "--collect-all", "jsonschema",
   "--collect-all", "langchain_core",
   "--collect-all", "langchain_openai",

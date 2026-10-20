@@ -250,7 +250,7 @@ test("server overview keeps selection, connection, loading and mismatched-target
   client.setQueryData(["servers"], servers.map((server) => server.id === serverId ? { ...server, status: "connecting" } : server));
   assert.match(render(<ServerOverview />), /disabled=""[^>]*>[^<]*(?:<[^>]*>[^<]*<\/[^>]*>)*正在连接|正在连接…/);
   client.setQueryData(["servers"], servers.map((server) => server.id === serverId ? { ...server, status: "connected" } : server));
-  pending(["serverSnapshot", serverId]); assert.match(render(<ServerOverview />), /正在连接并采集/);
+  pending(["serverSnapshot", serverId]); assert.match(render(<ServerOverview />), /已连接，正在检测/);
   client.setQueryData(["serverSnapshot", serverId], { ...snapshot(), serverId: "srv_foreign" });
   const mismatch = render(<ServerOverview />); assertAlert(mismatch, "收到的快照属于另一台服务器"); assert.doesNotMatch(mismatch, /overview-metric-grid/);
 });
@@ -261,7 +261,9 @@ test("overview refresh failure preserves marked cached data and displays collect
   client.setQueryData(["serverSnapshot", serverId], { ...data, collectors: data.collectors?.map((collector, i) => i ? collector : { ...collector, ok: false, error: "collector fixture failure" }) });
   failed(["serverSnapshot", serverId]);
   const markup = render(<ServerOverview active={false} />);
-  assertAlert(markup); assert.match(markup, /当前仍显示上次成功采集的快照/); assert.match(markup, /collector fixture failure/); assert.match(markup, /1 项失败/);
+  assert.match(markup, /role="status"/); assert.match(markup, /OFFLINE_FIXTURE_FAILURE/);
+  assert.match(markup, /资源更新失败，正在保留上次采集结果/); assert.match(markup, /<details><summary>查看错误详情/);
+  assert.match(markup, /collector fixture failure/); assert.match(markup, /1 项失败/);
 });
 test("host-key loading and errors fail closed; only an actual pinned status renders remote children", () => {
   let rendered = 0;

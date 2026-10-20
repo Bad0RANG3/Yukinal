@@ -7,33 +7,10 @@ import math
 from collections.abc import Mapping
 from typing import Any
 
-from .network_snapshot import NETWORK_SNAPSHOT_COMMAND_IDS, normalize_network_details
+from yukinal_ssh.toolkit_catalog import SYSTEM_SNAPSHOT_COMMAND_IDS, OPTIONAL_SNAPSHOT_COMMAND_IDS
 
-
-SYSTEM_SNAPSHOT_COMMAND_IDS = (
-    "os_detect",
-    "os_release",
-    "os_kernel",
-    "os_arch",
-    "os_hostname",
-    "cpu_detect",
-    "cpu_ticks_a",
-    "cpu_ticks_b",
-    "cpu_cores",
-    "cpu_model",
-    "cpu_load",
-    "memory_detect",
-    "memory_info",
-    "uptime_detect",
-    "uptime_info",
-    "disk_detect",
-    "disk_usage",
-    "network_detect",
-    "network_info",
-    "docker_detect",
-    "docker_info",
-    "docker_ps",
-)
+from .network_snapshot import normalize_network_details
+from .server_toolkit import extend_snapshot
 
 _MAX_OUTPUT_BYTES = 64 * 1024
 _U64_MAX = (1 << 64) - 1
@@ -55,7 +32,7 @@ def normalize_system_snapshot(
     """Return UI-shaped snapshot data, leaving host identity and timestamps to the desktop host."""
     if (not isinstance(outputs, Mapping)
             or not set(SYSTEM_SNAPSHOT_COMMAND_IDS) <= set(outputs)
-            or not set(outputs) <= set(SYSTEM_SNAPSHOT_COMMAND_IDS + NETWORK_SNAPSHOT_COMMAND_IDS)):
+            or not set(outputs) <= set(SYSTEM_SNAPSHOT_COMMAND_IDS + OPTIONAL_SNAPSHOT_COMMAND_IDS)):
         raise ValueError("the desktop SSH service returned an invalid snapshot command set")
 
     checked: dict[str, tuple[int, str]] = {}
@@ -79,8 +56,7 @@ def normalize_system_snapshot(
     snapshot: dict[str, Any] = {
         "capabilities": {
             "linux": bool(checked["os_detect"][1].strip()),
-            "docker": "0" in checked["docker_detect"][1]
-            and "1" not in checked["docker_detect"][1],
+            "docker": checked["docker_info"][0] == 0,
         },
         "collectors": [],
     }
@@ -128,6 +104,7 @@ def normalize_system_snapshot(
         _usage(parsed.get("memory")),
         max((_usage(row) or 0.0 for row in parsed.get("disk", [])), default=None),
     )
+    extend_snapshot(snapshot, checked)
     return snapshot
 
 
@@ -158,8 +135,10 @@ def _parse_cpu(outputs: Mapping[str, tuple[int, str]]) -> dict[str, Any]:
     ticks_a = _cpu_ticks(outputs["cpu_ticks_a"][1])
     ticks_b = _cpu_ticks(outputs["cpu_ticks_b"][1])
     total_a, total_b = sum(ticks_a), sum(ticks_b)
-    delta_total = max(0, total_b - total_a)
-    delta_idle = max(0, ticks_b[3] - ticks_a[3])
+    delta_total = total_b - total_a
+    if delta_total <= 0 or any(b < a for a, b in zip(ticks_a, ticks_b)):
+        raise _CollectorParseError("CPU counters did not advance")
+    delta_idle = ticks_b[3] + ticks_b[4] - ticks_a[3] - ticks_a[4]
     usage = (
         0.0
         if delta_total == 0
@@ -175,10 +154,10 @@ def _parse_cpu(outputs: Mapping[str, tuple[int, str]]) -> dict[str, Any]:
     core_text = outputs["cpu_cores"][1].strip()
     try:
         cores = int(core_text)
-        if not 0 <= cores <= _U32_MAX:
-            cores = 1
-    except ValueError:
-        cores = 1
+        if not 1 <= cores <= _U32_MAX:
+            raise ValueError
+    except ValueError as error:
+        raise _CollectorParseError("CPU core count unavailable") from error
     load = [0.0, 0.0, 0.0]
     for index, field in enumerate(outputs["cpu_load"][1].split()[:3]):
         try:
@@ -194,18 +173,22 @@ def _parse_cpu(outputs: Mapping[str, tuple[int, str]]) -> dict[str, Any]:
     }
 
 
-def _cpu_ticks(line: str) -> tuple[int, int, int, int]:
-    fields = line.split()[1:5]
+def _cpu_ticks(line: str) -> tuple[int, ...]:
+    # First eight counters include iowait/irq/softirq/steal. Guest is already
+    # included in user/nice and must not be counted a second time.
+    fields = line.split()[1:9]
     if len(fields) < 4:
         raise _CollectorParseError(f"unexpected /proc/stat line: {line}")
     values: list[int] = []
     for field in fields:
         try:
             value = int(field)
-            values.append(value if 0 <= value <= _U64_MAX else 0)
-        except ValueError:
-            values.append(0)
-    return values[0], values[1], values[2], values[3]
+            if not 0 <= value <= _U64_MAX:
+                raise ValueError
+            values.append(value)
+        except ValueError as error:
+            raise _CollectorParseError("invalid CPU counter") from error
+    return tuple(values + [0] * (8 - len(values)))
 
 
 def _parse_memory(outputs: Mapping[str, tuple[int, str]]) -> dict[str, Any]:
@@ -215,7 +198,7 @@ def _parse_memory(outputs: Mapping[str, tuple[int, str]]) -> dict[str, Any]:
         raise _CollectorParseError("MemTotal missing")
     available = _meminfo_kb(raw, "MemAvailable")
     if available is None:
-        available = max(0, total - (_meminfo_kb(raw, "MemFree") or 0))
+        available = _meminfo_kb(raw, "MemFree") or 0
     used = max(0, total - available)
     if max(total, used, available) > _U64_MAX // 1024:
         raise _CollectorParseError("memory value exceeds supported byte range")
@@ -308,9 +291,13 @@ def _parse_network(outputs: Mapping[str, tuple[int, str]]) -> list[dict[str, Any
 
 
 def _parse_docker(outputs: Mapping[str, tuple[int, str]]) -> dict[str, Any]:
+    if outputs["docker_info"][0] in (124, 137):
+        raise _CollectorParseError("Docker detection timed out")
     available = outputs["docker_info"][0] == 0
     if not available:
         return {"available": False, "containers": []}
+    if outputs["docker_ps"][0] != 0:
+        raise _CollectorParseError("Docker container listing failed")
     containers: list[dict[str, Any]] = []
     for line in outputs["docker_ps"][1].splitlines():
         line = line.strip()

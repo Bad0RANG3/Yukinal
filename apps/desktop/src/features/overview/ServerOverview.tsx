@@ -20,6 +20,8 @@ import { Icon } from "../../components/Icon.js";
 import { callDesktop, isDesktopShell, subscribeDesktop } from "../../lib/ipc.js";
 import { useWorkspaceStore } from "../../stores/workspace-store.js";
 import { useServerAction, useServers } from "../../lib/servers.js";
+import { serverSnapshotQueryOptions } from "../../lib/server-snapshot.js";
+import { ServerToolkitSections } from "./ServerToolkitSections.js";
 import { ServerNetworkSection } from "./ServerNetworkSection.js";
 import { ResourceTrends } from "./ResourceTrends.js";
 import { appendResourceSample, ResourceTrendStore } from "./resource-trends.js";
@@ -78,14 +80,17 @@ export function snapshotAge(timestamp: string, displayClock: number, receivedAt:
 }
 
 function collectorSummary(snapshot: ServerSnapshot) {
+  const collectors = [...COLLECTORS, ...[
+    { id: "gpu", label: "GPU" }, { id: "security", label: "安全信息" },
+  ].filter((collector) => snapshot.toolkit?.modules.includes(collector.id) || sampleFor(snapshot, collector.id))];
   const samples = snapshot.collectors;
   const sampleMap = new Map((samples ?? []).map((sample) => [normalizeCollectorId(sample.collectorId), sample]));
-  const missing = COLLECTORS.filter((collector) => !sampleMap.has(collector.id));
-  const failed = COLLECTORS.filter((collector) => sampleMap.get(collector.id)?.ok === false);
-  const reported = COLLECTORS.length - missing.length;
+  const missing = collectors.filter((collector) => !sampleMap.has(collector.id));
+  const failed = collectors.filter((collector) => sampleMap.get(collector.id)?.ok === false);
+  const reported = collectors.length - missing.length;
   const kind = samples === undefined || samples.length === 0
     ? "unknown"
-    : failed.length === COLLECTORS.length
+    : failed.length === collectors.length
       ? "failed"
       : failed.length > 0
         ? "partial"
@@ -103,10 +108,10 @@ function collectorSummary(snapshot: ServerSnapshot) {
           : "采集完成";
   const description = samples === undefined || samples.length === 0
     ? "此快照没有提供采集器状态明细。"
-    : reported + "/" + COLLECTORS.length + " 个采集器报告状态" +
+    : reported + "/" + collectors.length + " 个采集器报告状态" +
       (failed.length > 0 ? " · " + failed.length + " 个失败" : "") +
       (missing.length > 0 ? " · " + missing.length + " 个未报告" : "");
-  return { kind, label, description, sampleMap };
+  return { kind, label, description, sampleMap, collectors };
 }
 
 function formatUptime(seconds?: number): string {
@@ -126,12 +131,7 @@ export function ServerOverview({ active = true }: { active?: boolean }) {
   const server = serversQuery.data?.find((candidate: Server) => candidate.id === selectedServerId);
 
   const snapshotQuery = useQuery({
-    queryKey: ["serverSnapshot", selectedServerId],
-    staleTime: 15_000,
-    queryFn: async () => {
-      if (!selectedServerId) return null;
-      return (await callDesktop(IPC_COMMANDS.serverSnapshot, { serverId: selectedServerId })).snapshot;
-    },
+    ...serverSnapshotQueryOptions(selectedServerId ?? ""),
     refetchInterval: active ? 15_000 : false,
     refetchIntervalInBackground: false,
     retry: false,
@@ -149,7 +149,7 @@ export function ServerOverview({ active = true }: { active?: boolean }) {
   if (server.status !== "connected" && !snapshot) {
     return <div className="empty-state page-empty connection-empty">
       <span className="empty-icon"><Icon name="connect" size="xxl" /></span>
-      <h2>尚未连接</h2>
+      <h2>{busy || server.status === "connecting" ? "正在建立连接…" : "尚未连接"}</h2>
       <p>{server.connection.username}@{server.connection.host}:{server.connection.port}</p>
       <small>建立 SSH 连接后，查看系统资源与服务状态。</small>
       <button type="button" className="button-primary" disabled={busy || server.status === "connecting"} onClick={() => action.mutate({ type: "connect", serverId: server.id })}><Icon name="connect" size="md" />{busy || server.status === "connecting" ? "正在连接…" : "连接服务器"}</button>
@@ -158,7 +158,7 @@ export function ServerOverview({ active = true }: { active?: boolean }) {
   }
 
   if (snapshotQuery.isLoading) {
-    return <LoadingPanel title="正在连接并采集" hint="SSH · 7 个采集器 · 预计几秒完成" />;
+    return <LoadingPanel title="已连接，正在检测…" hint="系统资源 · GPU · 安全信息" />;
   }
 
   if (!snapshot) {
@@ -245,7 +245,7 @@ function OverviewContent({
   const runningContainers = docker?.containers.filter((container) => container.state === "running").length ?? 0;
   const otherContainers = (docker?.containers.length ?? 0) - runningContainers;
   const diagnosticsLabel = failedSamples.length > 0 ? `${failedSamples.length} 项失败` : collection.label;
-  const reportedCollectors = COLLECTORS.filter((collector) => collection.sampleMap.has(collector.id)).length;
+  const reportedCollectors = collection.collectors.filter((collector) => collection.sampleMap.has(collector.id)).length;
 
   return (
     <div className="overview-page overview-inspector">
@@ -306,7 +306,7 @@ function OverviewContent({
       <details className="overview-inspector-section" key={`docker-${server.id}`}>
         <summary><Icon name="chevronRight" size="xs" /><span>Docker</span><small>{docker?.available ? `${docker.containers.length} 个容器${otherContainers > 0 ? ` · ${otherContainers} 非运行` : ""}` : "不可用"}</small></summary>
         <div className="overview-section-content">
-          {!docker ? <p className="muted-copy">尚未返回 Docker 采集结果。</p> : !docker.available ? <p className="muted-copy">目标服务器未安装或未启用 Docker。</p> : docker.containers.length === 0 ? <p className="muted-copy">当前没有容器。</p> : <ul className="overview-container-list">
+          {!docker ? <p className="muted-copy">尚未返回 Docker 采集结果。</p> : !docker.available ? <p className="muted-copy">Docker 未就绪或当前用户无权访问。</p> : docker.containers.length === 0 ? <p className="muted-copy">当前没有容器。</p> : <ul className="overview-container-list">
             {docker.containers.map((container, index) => <li key={`${container.name}-${index}`}>
               <div><span className={`container-dot ${container.state === "running" ? "container-dot-running" : ""}`} /><strong>{container.name}</strong><small>{container.state}</small></div>
               <span>{container.image}</span><span>{container.status} · 重启 {container.restartCount} 次</span>
@@ -315,22 +315,25 @@ function OverviewContent({
         </div>
       </details>
 
+      <ServerToolkitSections snapshot={snapshot} />
+
       <RecentServerActivity serverId={server.id} active={active} />
 
       <details className="overview-inspector-section overview-diagnostics" key={`diagnostics-${server.id}`}>
-        <summary><Icon name="chevronRight" size="xs" /><span>采集诊断</span><small>{reportedCollectors}/{COLLECTORS.length} · {diagnosticsLabel}</small></summary>
+        <summary><Icon name="chevronRight" size="xs" /><span>采集诊断</span><small>{reportedCollectors}/{collection.collectors.length} · {diagnosticsLabel}</small></summary>
         <div className="overview-section-content">
           <p className="overview-diagnostics-description">{collection.description}</p>
           <dl className="overview-properties">
             <div><dt>数据来源</dt><dd>SSH 远端采集器</dd></div>
+            {snapshot.toolkit ? <div><dt>工具包</dt><dd>v{snapshot.toolkit.version} · {snapshot.toolkit.modules.length} 个扩展模块</dd></div> : null}
             <div><dt>最后采集</dt><dd><time dateTime={snapshot.collectedAt}>{formatTimestamp(snapshot.collectedAt)}</time></dd></div>
             <div><dt>更新频率</dt><dd>{connected ? "每 15 秒自动采集" : "连接后恢复自动采集"}</dd></div>
             {!connected ? <div><dt>当前数据</dt><dd>缓存快照</dd></div> : null}
           </dl>
           <ul className="overview-collector-list">
-            {COLLECTORS.map((collector) => <CollectorRow key={collector.id} label={collector.label} sample={collection.sampleMap.get(collector.id)} />)}
+            {collection.collectors.map((collector) => <CollectorRow key={collector.id} label={collector.label} sample={collection.sampleMap.get(collector.id)} />)}
             {(snapshot.collectors ?? [])
-              .filter((sample) => !COLLECTORS.some((collector) => collector.id === normalizeCollectorId(sample.collectorId)))
+              .filter((sample) => !collection.collectors.some((collector) => collector.id === normalizeCollectorId(sample.collectorId)))
               .map((sample, index) => <CollectorRow key={`${sample.collectorId}-${index}`} label={sample.collectorId} sample={sample} />)}
           </ul>
         </div>

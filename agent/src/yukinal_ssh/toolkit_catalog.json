@@ -1,0 +1,222 @@
+{
+  "version": "1",
+  "probes": [
+    {
+      "id": "os_detect",
+      "module": "os",
+      "required": true,
+      "timeoutSeconds": 0,
+      "command": "uname -s 2>/dev/null; test $? -eq 0"
+    },
+    {
+      "id": "os_release",
+      "module": "os",
+      "required": true,
+      "timeoutSeconds": 0,
+      "command": "cat /etc/os-release 2>/dev/null"
+    },
+    {
+      "id": "os_kernel",
+      "module": "os",
+      "required": true,
+      "timeoutSeconds": 0,
+      "command": "uname -r"
+    },
+    {
+      "id": "os_arch",
+      "module": "os",
+      "required": true,
+      "timeoutSeconds": 0,
+      "command": "uname -m"
+    },
+    {
+      "id": "os_hostname",
+      "module": "os",
+      "required": true,
+      "timeoutSeconds": 0,
+      "command": "hostname"
+    },
+    {
+      "id": "cpu_detect",
+      "module": "cpu",
+      "required": true,
+      "timeoutSeconds": 0,
+      "command": "test -r /proc/stat && echo ok"
+    },
+    {
+      "id": "cpu_ticks_a",
+      "module": "cpu",
+      "required": true,
+      "timeoutSeconds": 0,
+      "command": "head -n1 /proc/stat"
+    },
+    {
+      "id": "cpu_ticks_b",
+      "module": "cpu",
+      "required": true,
+      "timeoutSeconds": 0,
+      "command": "sleep 0.12; head -n1 /proc/stat"
+    },
+    {
+      "id": "cpu_cores",
+      "module": "cpu",
+      "required": true,
+      "timeoutSeconds": 0,
+      "command": "nproc 2>/dev/null || grep -c ^processor /proc/cpuinfo"
+    },
+    {
+      "id": "cpu_model",
+      "module": "cpu",
+      "required": true,
+      "timeoutSeconds": 0,
+      "command": "grep -m1 'model name' /proc/cpuinfo | cut -d: -f2"
+    },
+    {
+      "id": "cpu_load",
+      "module": "cpu",
+      "required": true,
+      "timeoutSeconds": 0,
+      "command": "cat /proc/loadavg"
+    },
+    {
+      "id": "memory_detect",
+      "module": "memory",
+      "required": true,
+      "timeoutSeconds": 0,
+      "command": "test -r /proc/meminfo && echo ok"
+    },
+    {
+      "id": "memory_info",
+      "module": "memory",
+      "required": true,
+      "timeoutSeconds": 0,
+      "command": "cat /proc/meminfo"
+    },
+    {
+      "id": "uptime_detect",
+      "module": "uptime",
+      "required": true,
+      "timeoutSeconds": 0,
+      "command": "test -r /proc/uptime && echo ok"
+    },
+    {
+      "id": "uptime_info",
+      "module": "uptime",
+      "required": true,
+      "timeoutSeconds": 0,
+      "command": "cat /proc/uptime"
+    },
+    {
+      "id": "disk_detect",
+      "module": "disk",
+      "required": true,
+      "timeoutSeconds": 0,
+      "command": "command -v df >/dev/null && echo ok"
+    },
+    {
+      "id": "disk_usage",
+      "module": "disk",
+      "required": true,
+      "timeoutSeconds": 2,
+      "command": "df -B1 -P 2>/dev/null"
+    },
+    {
+      "id": "network_detect",
+      "module": "network",
+      "required": true,
+      "timeoutSeconds": 0,
+      "command": "test -r /proc/net/dev && echo ok"
+    },
+    {
+      "id": "network_info",
+      "module": "network",
+      "required": true,
+      "timeoutSeconds": 0,
+      "command": "cat /proc/net/dev"
+    },
+    {
+      "id": "network_addresses",
+      "module": "network",
+      "required": false,
+      "timeoutSeconds": 0,
+      "command": "ip -j address show"
+    },
+    {
+      "id": "network_routes4",
+      "module": "network",
+      "required": false,
+      "timeoutSeconds": 0,
+      "command": "ip -j -4 route show table main"
+    },
+    {
+      "id": "network_routes6",
+      "module": "network",
+      "required": false,
+      "timeoutSeconds": 0,
+      "command": "ip -j -6 route show table main"
+    },
+    {
+      "id": "network_dns",
+      "module": "network",
+      "required": false,
+      "timeoutSeconds": 0,
+      "command": "cat /etc/resolv.conf"
+    },
+    {
+      "id": "docker_info",
+      "module": "docker",
+      "required": true,
+      "timeoutSeconds": 2,
+      "command": "docker info >/dev/null 2>&1"
+    },
+    {
+      "id": "docker_detect",
+      "module": "docker",
+      "required": true,
+      "timeoutSeconds": 0,
+      "command": "printf '%s\\n' \"$yk_docker_status\""
+    },
+    {
+      "id": "docker_ps",
+      "module": "docker",
+      "required": true,
+      "timeoutSeconds": 2,
+      "command": "test \"$yk_docker_status\" = 0 && docker ps -a --format '{{json .}}' 2>/dev/null"
+    },
+    {
+      "id": "gpu_nvidia",
+      "module": "gpu",
+      "required": false,
+      "timeoutSeconds": 2,
+      "command": "nvidia-smi --query-gpu=index,name,utilization.gpu,memory.used,memory.total,temperature.gpu --format=csv,noheader,nounits 2>/dev/null"
+    },
+    {
+      "id": "security_identity",
+      "module": "security",
+      "required": false,
+      "timeoutSeconds": 0,
+      "command": "id -u"
+    },
+    {
+      "id": "security_sshd",
+      "module": "security",
+      "required": false,
+      "timeoutSeconds": 2,
+      "command": "yk_sshd=$(command -v sshd 2>/dev/null); if test -z \"$yk_sshd\" && test -x /usr/sbin/sshd; then yk_sshd=/usr/sbin/sshd; fi; test -n \"$yk_sshd\" || exit 127; yk_config=$(\"$yk_sshd\" -T 2>/dev/null) || exit $?; printf '%s\\n' \"$yk_config\" | grep -E '^(permitrootlogin|passwordauthentication|pubkeyauthentication) '"
+    },
+    {
+      "id": "security_firewall",
+      "module": "security",
+      "required": false,
+      "timeoutSeconds": 2,
+      "command": "if command -v ufw >/dev/null 2>&1; then printf 'ufw\\n'; ufw status 2>/dev/null; elif command -v firewall-cmd >/dev/null 2>&1; then printf 'firewalld\\n'; firewall-cmd --state 2>/dev/null; else exit 127; fi"
+    },
+    {
+      "id": "security_listeners",
+      "module": "security",
+      "required": false,
+      "timeoutSeconds": 2,
+      "command": "ss -H -lntu 2>/dev/null"
+    }
+  ]
+}

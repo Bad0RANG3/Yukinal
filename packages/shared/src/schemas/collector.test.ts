@@ -1,8 +1,21 @@
 import assert from "node:assert/strict";
 import test from "node:test";
+import { readFileSync } from "node:fs";
 import { ContainerInfoSchema, ServerSnapshotSchema } from "./collector.js";
 
 const legacy = { id: "snap_test", serverId: "srv_test", collectedAt: "2026-10-17T00:00:00Z", health: "unknown", capabilities: {} };
+test("Python toolkit fixture passes the strict UI boundary including unknown security checks", () => {
+  const fixture = JSON.parse(readFileSync(new URL("../../fixtures/server_toolkit.json", import.meta.url), "utf8"));
+  const parsed = ServerSnapshotSchema.parse(fixture);
+  assert.equal(parsed.gpu?.devices[0]?.usagePercent, 73);
+  assert.equal(parsed.security?.checks.find((check) => check.id === "firewall")?.status, "unknown");
+  assert.deepEqual(parsed.toolkit?.modules, ["gpu", "security"]);
+  assert.doesNotThrow(() => ServerSnapshotSchema.parse(legacy));
+  for (const usage of [-1, 101, Infinity]) {
+    assert.equal(ServerSnapshotSchema.safeParse({ ...legacy, gpu: { status: "available", devices: [{ index: 0, name: "GPU", usagePercent: usage }] } }).success, false);
+  }
+  assert.equal(ServerSnapshotSchema.safeParse({ ...legacy, security: { checks: [{ id: "test", label: "test", status: "secure", detail: "" }] } }).success, false);
+});
 test("empty legacy container state is unknown without discarding its actual status", () => {
   const container = { name: "web", image: "web:test", state: "", status: "Up 2 minutes", restartCount: 0 };
   assert.deepEqual(ContainerInfoSchema.parse(container), { ...container, state: "unknown" });

@@ -1,4 +1,5 @@
 #include "yukinal/ssh.hpp"
+#include "yukinal/snapshot_toolkit.hpp"
 #include "yukinal/policy.hpp"
 
 #include <algorithm>
@@ -2562,43 +2563,7 @@ ExecResult system_snapshot(const TargetConfig& target, const std::string& nonce,
     fail(&result, "invalid_parameters", "The system snapshot parameters are invalid");
     return result;
   }
-  static constexpr std::pair<std::string_view, std::string_view> commands[] = {
-      {"os_detect", "uname -s 2>/dev/null; test $? -eq 0"},
-      {"os_release", "cat /etc/os-release 2>/dev/null"},
-      {"os_kernel", "uname -r"},
-      {"os_arch", "uname -m"},
-      {"os_hostname", "hostname"},
-      {"cpu_detect", "test -r /proc/stat && echo ok"},
-      {"cpu_ticks_a", "head -n1 /proc/stat"},
-      {"cpu_wait", "sleep 0.12"},
-      {"cpu_ticks_b", "head -n1 /proc/stat"},
-      {"cpu_cores", "nproc 2>/dev/null || grep -c ^processor /proc/cpuinfo"},
-      {"cpu_model", "grep -m1 'model name' /proc/cpuinfo | cut -d: -f2"},
-      {"cpu_load", "cat /proc/loadavg"},
-      {"memory_detect", "test -r /proc/meminfo && echo ok"},
-      {"memory_info", "cat /proc/meminfo"},
-      {"uptime_detect", "test -r /proc/uptime && echo ok"},
-      {"uptime_info", "cat /proc/uptime"},
-      {"disk_detect", "command -v df >/dev/null && echo ok"},
-      {"disk_usage", "df -B1 -P 2>/dev/null"},
-      {"network_detect", "test -r /proc/net/dev && echo ok"},
-      {"network_info", "cat /proc/net/dev"},
-      {"network_addresses", "ip -j address show"},
-      {"network_routes4", "ip -j -4 route show table main"},
-      {"network_routes6", "ip -j -6 route show table main"},
-      {"network_dns", "cat /etc/resolv.conf"},
-      {"docker_detect", "docker info >/dev/null 2>&1; echo $?"},
-      {"docker_info", "docker info >/dev/null 2>&1"},
-      {"docker_ps", "docker ps -a --format '{{json .}}' 2>/dev/null"},
-  };
-  std::string command;
-  command.reserve(8192);
-  for (const auto& [id, probe] : commands) {
-    command += "printf '__YK_SNAPSHOT_" + nonce + "_" + std::string(id) + "_BEGIN__\\n'; ";
-    command += probe;
-    command += "; yk_snapshot_status=$?; printf '\\n__YK_SNAPSHOT_" + nonce + "_" +
-               std::string(id) + "_END_%s__\\n' \"$yk_snapshot_status\"; ";
-  }
+  const auto command = build_system_snapshot_command(nonce);
   return run_ssh_command(target, command, timeout_seconds);
 }
 

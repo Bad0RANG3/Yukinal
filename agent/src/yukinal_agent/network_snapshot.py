@@ -6,9 +6,7 @@ import json
 from collections.abc import Mapping
 from typing import Any
 
-NETWORK_SNAPSHOT_COMMAND_IDS = (
-    "network_addresses", "network_routes4", "network_routes6", "network_dns",
-)
+from yukinal_ssh.toolkit_catalog import NETWORK_SNAPSHOT_COMMAND_IDS
 
 
 def _text(value: object) -> str:
