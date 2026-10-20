@@ -37,7 +37,9 @@ test("model edits retain exact legacy custom names, prompts and unrelated record
   assert.equal(dispatched.preferredRoleId, "blue-guardian");
   assert.equal(dispatched.roles.find((role) => role.id === "blue-guardian")?.providerId, "deepseek");
   assert.equal(dispatched.roles.find((role) => role.id === "blue-guardian")?.model, "deepseek-reasoner");
-  assert.equal(dispatched.roles.some((role) => role.id === "blue-logs"), false, "broken independent bindings stay unavailable instead of inheriting silently");
+  assert.equal(dispatched.roles.length, 3);
+  assert.equal(dispatched.roles.some((role) => role.id === "blue-logs"), false, "retired role settings stay in storage and are not dispatched");
+  assert.equal(coordinatorConfig(roles, [provider()], [], "blue-logs").preferredRoleId, "blue-guardian");
 });
 
 test("explicitly applying inheritance updates all model bindings and leaves an existing run snapshot and foreground model unchanged", () => {

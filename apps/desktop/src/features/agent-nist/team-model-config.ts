@@ -13,20 +13,13 @@ import {
 
 /** Public capability names are independent of saved user names and internal prompts. */
 export const ROLE_CAPABILITY_LABELS: Readonly<Record<string, string>> = {
-  "blue-guardian": "运行安全与响应", "blue-logs": "日志分析",
-  "red-review": "授权攻击测试", "red-validation": "攻击路径验证",
-  "purple-detection": "检测覆盖验证", "purple-retest": "防护复测",
-  "white-scope": "范围与规则", "white-control": "风险与验收",
-  "yellow-architecture": "系统设计", "yellow-engineering": "部署、开发与修复",
-  "orange-incident": "漏洞协同修复", "orange-retrospective": "安全开发改进",
-  "green-observability": "监测与告警建设", "green-response": "响应与取证设计",
+  "blue-guardian": "运维", "yellow-engineering": "执行", "purple-retest": "验证",
 };
 
 export const TEAM_CAPABILITIES = [
-  { id: "build", label: "建设与修复", description: "环境部署、系统设计、开发和漏洞修复。", preferredRoleId: "yellow-engineering", roleIds: ["yellow-architecture", "yellow-engineering", "orange-incident", "orange-retrospective"] },
-  { id: "operate", label: "运行与响应", description: "运行检查、日志分析、监测告警与事件响应。", preferredRoleId: "blue-guardian", roleIds: ["blue-guardian", "blue-logs", "green-observability", "green-response"] },
-  { id: "validate", label: "验证与复测", description: "在授权范围内验证攻击路径、防护效果和检测覆盖。", preferredRoleId: "purple-retest", roleIds: ["red-review", "red-validation", "purple-detection", "purple-retest"] },
-  { id: "control", label: "范围与风险", description: "明确操作边界、停止条件、验收依据和待确认事项。", preferredRoleId: "white-scope", roleIds: ["white-scope", "white-control"] },
+  { id: "build", label: "执行", description: "部署、开发与修复。", preferredRoleId: "yellow-engineering", roleIds: ["yellow-engineering"] },
+  { id: "operate", label: "运维", description: "监测、排障与响应。", preferredRoleId: "blue-guardian", roleIds: ["blue-guardian"] },
+  { id: "validate", label: "验证", description: "测试、审查与验收。", preferredRoleId: "purple-retest", roleIds: ["purple-retest"] },
 ] as const;
 
 export type TeamModelBinding = Pick<AgentRole, "providerId" | "model">;

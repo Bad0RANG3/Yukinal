@@ -12,7 +12,7 @@ import { TeamFeedbackPreview } from "./TeamActivity.js";
 import { TEAM_WORK } from "./team-operations.js";
 import { useTeamRuntimeStore, TEAM_STAGE_LABEL, teamRunActive } from "./team-runtime-store.js";
 import {
-  AGENT_NIST_STORAGE_KEY, defaultAgentRoles, draftProtection, handoffAgentRole,
+  AGENT_NIST_STORAGE_KEY, currentAgentRoleId, defaultAgentRoles, draftProtection, handoffAgentRole,
   loadAgentRoles, roleModelChoices, type AgentRole,
 } from "./agent-nist.js";
 import {
@@ -56,7 +56,7 @@ export function AgentNistPane({ onUseAgent }: { onUseAgent?: () => void }) {
   const protection = draftProtection({ agentDraft, agentAttachments, agentBusy, agentSessionArchived });
   const queryBlock = providers.isLoading ? "正在读取 AI 连接。" : providers.isError ? "请先重试读取 AI 连接。" : null;
   const activeRuns = [...runs].reverse().filter((run) => teamRunActive(run) && (!selectedServerId || run.serverId === selectedServerId));
-  const selectedRole = config.roles.find((role) => role.id === selectedRoleId);
+  const selectedRole = config.roles.find((role) => role.id === currentAgentRoleId(selectedRoleId ?? ""));
   const coordinatorModel = teamModelBinding({ providerId: null, model: null }, availableProviders, conversation);
   const common = commonModelBinding(config.roles);
   const draftBinding = modelDraft && teamModelBinding(modelDraft, availableProviders, conversation);

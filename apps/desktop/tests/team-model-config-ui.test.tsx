@@ -93,16 +93,16 @@ test("active runs disable model persistence and routing while retaining the sele
   assert.match(html, /<select[^>]*aria-label="路由方式"[^>]*disabled=""/);
   assert.match(html, /<select[^>]*aria-label="团队 AI 连接"[^>]*disabled=""/);
   assert.match(html, /<button[^>]*type="submit"[^>]*disabled=""/);
-  assert.match(html, /当前优先：部署、开发与修复/);
+  assert.match(html, /当前优先：执行/);
   assert.match(html, /恢复自动分工/);
 });
 
-test("the home page presents four capability groups and uses no seven-color roster or private role text", () => {
+test("the home page presents three core roles and uses no seven-color roster or private role text", () => {
   const roles = defaultAgentRoles();
   roles[0]!.responsibility = "PRIVATE_HOME_PROMPT";
   const html = render({ view: "teams", roles });
-  for (const label of ["建设与修复", "运行与响应", "验证与复测", "范围与风险"]) assert.ok(html.includes(label));
-  assert.equal((html.match(/class="team-capability-toggle"/g) ?? []).length, 4);
+  for (const label of ["执行", "运维", "验证"]) assert.ok(html.includes(label));
+  assert.equal((html.match(/class="team-capability-toggle"/g) ?? []).length, 3);
   assert.doesNotMatch(html, /蓝队|红队|紫队|白队|黄队|橙队|绿队|team-roster|team-color-|PRIVATE_HOME_PROMPT/);
   assert.match(html, /协调助手按任务需要分工/);
 });
