@@ -50,7 +50,7 @@ class ModelSpy:
         return self.provider, self.model
 
     def bind_tools(self, tools, *, parallel_tool_calls):
-        assert parallel_tool_calls is False
+        assert parallel_tool_calls is True
         self.tools = {tool["function"]["name"] for tool in tools}
         return self
 
@@ -65,9 +65,10 @@ class ModelSpy:
         self.histories.append(humans)
         prompt = humans[-1]
         try:
-            if "teams__dispatch" in self.tools:
+            if prompt in self.factory.foreground_prompts:
                 planned = self.factory.plans.get(prompt)
                 if planned and not isinstance(messages[-1], ToolMessage):
+                    assert "teams__dispatch" in self.tools, "The fixture requires an admitted delegation scope"
                     yield AIMessageChunk(content="", tool_calls=[{
                         "name": "teams__dispatch", "args": {"tasks": planned},
                         "id": "fixture-dispatch", "type": "tool_call"}])
@@ -86,6 +87,7 @@ class ModelSpy:
 class FactorySpy:
     def __init__(self):
         self.created, self.plans, self.workers = [], {}, {}
+        self.foreground_prompts = set()
         self.started, self.gates = {}, {}
 
     def create_with_api_key(self, config, api_key):
@@ -134,6 +136,7 @@ class Fixture:
         return response["result"]
 
     async def run(self, run_id, roles, *, prompt="dispatch", session="foreground", defaults=False, **extra):
+        self.factory.foreground_prompts.add(prompt)
         params = {"runId": run_id, "sessionId": session, "prompt": prompt, "delivery": "sync",
                   "coordination": {"version": 1, "roles": roles, "servers": []}}
         if not defaults:
@@ -232,7 +235,7 @@ class MoeRoutingTests(unittest.IsolatedAsyncioTestCase):
                  role("explicit", providerId="provider-a", model="a-selected"),
                  role("default-b", providerId="provider-b")]
         fixture.factory.plans["dispatch"] = [task(item["id"]) for item in roles[:4]]
-        fixture.factory.plans["default-effort"] = [task("default-b")]
+        fixture.factory.plans["dispatch default-effort"] = [task("default-b")]
         efforts = []
 
         def bind_effort(model, effort):
@@ -242,10 +245,10 @@ class MoeRoutingTests(unittest.IsolatedAsyncioTestCase):
             model.effort = effort
             return model
 
-        with patch("yukinal_agent.sidecar.with_reasoning_effort", side_effect=bind_effort):
+        with patch("yukinal_agent.inference_policy.with_reasoning_effort", side_effect=bind_effort):
             await fixture.run("lead-effort", roles, reasoningEffort="max")
             await fixture.settle()
-            await fixture.run("lead-default-effort", roles, prompt="default-effort", reasoningEffort="max")
+            await fixture.run("lead-default-effort", roles, prompt="dispatch default-effort", reasoningEffort="max")
             await fixture.settle()
         self.assertEqual({job["state"] for job in fixture.jobs()}, {"completed"})
         self.assertEqual(len(efforts), 4)  # Two foreground turns, inherited model, same-model override.

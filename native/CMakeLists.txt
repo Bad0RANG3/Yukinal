@@ -5,6 +5,12 @@ set(CMAKE_CXX_STANDARD 20)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(CMAKE_CXX_EXTENSIONS OFF)
 
+# One checked-in read-only probe catalog is shared with the Python runtime.
+set(YUKINAL_TOOLKIT_CATALOG "${CMAKE_CURRENT_SOURCE_DIR}/../agent/src/yukinal_ssh/toolkit_catalog.json")
+set_property(DIRECTORY APPEND PROPERTY CMAKE_CONFIGURE_DEPENDS "${YUKINAL_TOOLKIT_CATALOG}")
+file(READ "${YUKINAL_TOOLKIT_CATALOG}" YUKINAL_SNAPSHOT_TOOLKIT_CATALOG)
+configure_file(cmake/snapshot_toolkit_data.hpp.in generated/yukinal/snapshot_toolkit_data.hpp @ONLY)
+
 if(MSVC)
   # The desktop installer must run on machines without a separately installed
   # Visual C++ Redistributable; keep the standalone service self-contained.
@@ -177,7 +183,7 @@ add_library(yukinal_ssh_core
   src/ssh_credentials.cpp
   src/http_service.cpp
 )
-target_include_directories(yukinal_ssh_core PUBLIC include)
+target_include_directories(yukinal_ssh_core PUBLIC include "${CMAKE_CURRENT_BINARY_DIR}/generated")
 if(YUKINAL_FETCH_DEPS)
   target_include_directories(yukinal_ssh_core PRIVATE ${cpp_httplib_SOURCE_DIR})
 else()
@@ -211,6 +217,7 @@ if(YUKINAL_BUILD_TESTS)
     tests/test_config.cpp
     tests/test_host_key.cpp
     tests/test_policy.cpp
+    tests/test_snapshot_toolkit.cpp
     tests/test_network.cpp
     tests/test_credentials.cpp
   )
@@ -250,9 +257,15 @@ if(YUKINAL_BUILD_TESTS)
         NAME python_agent_tests
         COMMAND ${Python3_EXECUTABLE} -m unittest discover -s ${CMAKE_CURRENT_SOURCE_DIR}/../agent/tests -p test_*.py -v
       )
+      set(YUKINAL_AGENT_TEST_TIMEOUT 300)
+      if(WIN32)
+        # Hosted Windows runners execute the full async Agent suite substantially
+        # slower than Linux/macOS, especially the long durable-context workflow.
+        set(YUKINAL_AGENT_TEST_TIMEOUT 600)
+      endif()
       set_tests_properties(python_agent_tests PROPERTIES
         ENVIRONMENT "PYTHONPATH=${CMAKE_CURRENT_SOURCE_DIR}/../agent/src;YUKINAL_SSH_SERVICE_BINARY=$<TARGET_FILE:yukinal-ssh-service>"
-        TIMEOUT 300
+        TIMEOUT ${YUKINAL_AGENT_TEST_TIMEOUT}
       )
     else()
       message(STATUS "Agent dependencies are not installed; python_agent_tests is not registered (install agent[agent])")
@@ -390,6 +403,7 @@ if(YUKINAL_BUILD_DESKTOP_HOST)
     desktop_host/src/host_trust.cpp
     desktop_host/src/ipc_router.cpp
     desktop_host/src/ipc_dispatcher.cpp
+    desktop_host/src/watch_scheduler.cpp
     desktop_host/src/local_paths.cpp
     desktop_host/src/network_proxy.cpp
     desktop_host/src/remote_drag.cpp
@@ -487,6 +501,9 @@ if(YUKINAL_BUILD_DESKTOP_HOST)
     add_executable(yukinal_ipc_dispatcher_tests desktop_host/tests/test_ipc_dispatcher.cpp)
     target_link_libraries(yukinal_ipc_dispatcher_tests PRIVATE yukinal_desktop_host_core)
     add_test(NAME ipc_dispatcher_tests COMMAND yukinal_ipc_dispatcher_tests)
+    add_executable(yukinal_watch_scheduler_tests desktop_host/tests/test_watch_scheduler.cpp)
+    target_link_libraries(yukinal_watch_scheduler_tests PRIVATE yukinal_desktop_host_core)
+    add_test(NAME watch_scheduler_tests COMMAND yukinal_watch_scheduler_tests)
     set_tests_properties(ipc_dispatcher_tests PROPERTIES TIMEOUT 20)
 
     add_executable(yukinal_desktop_host_transfer_tests

@@ -7,7 +7,7 @@ import { callDesktop, isDesktopShell } from "../../lib/ipc.js";
 import { errorMessage, formatTimestamp } from "../../lib/format.js";
 import { useWorkpagesStore } from "../workpages/workpages-store.js";
 import { artifactFromContent } from "../workpages/workpage-model.js";
-import { AGENT_TEAMS } from "./agent-nist.js";
+import { agentTeamLabel } from "./agent-nist.js";
 import { TEAM_HEARTBEAT_MS } from "./team-operations.js";
 import { useCoordinatorStore, TEAM_TASK_LABEL } from "../agent/coordinator-state.js";
 import { teamBoardCards, type TeamBoardCard } from "./team-board.js";
@@ -22,7 +22,7 @@ export function TaskPropertiesWindow({ card, serverName, onClose }: { card: Team
   });
   const task = detail.data?.task ?? card.task;
   const status = task ? teamBoardCards([task], card.run ? [card.run] : [])[0]?.status ?? card.status : background ? TEAM_TASK_LABEL[background.state] : card.status;
-  const team = AGENT_TEAMS.find((item) => item.id === card.team);
+  const teamLabel = agentTeamLabel(card.team ?? "");
   const updatedAt = task?.updatedAt ?? (card.updatedAt > 0 ? new Date(card.updatedAt).toISOString() : undefined);
   return <SecondaryWindow title="任务属性" subtitle={card.goal || "附件任务"} icon="board" tabs={TABS} activeTab={tab} onTabChange={setTab} onClose={onClose}
     footer={<><span>{card.preview ? "模拟反馈" : background ? "后台团队任务 · 已保存" : task ? "已保存任务" : "本窗口对话运行"}</span>{updatedAt ? <time dateTime={updatedAt}>更新于 {formatTimestamp(updatedAt)}</time> : null}</>}>
@@ -30,7 +30,7 @@ export function TaskPropertiesWindow({ card, serverName, onClose }: { card: Team
     {tab === "overview" ? <>
       <PropertySection title="任务目标"><p>{task?.objective || card.goal || "附件任务"}</p></PropertySection>
       <PropertySection title="属性"><PropertyList items={[
-        { label: "状态", value: status }, { label: "团队", value: team?.label ?? "未记录团队" }, { label: "服务器", value: serverName },
+        { label: "状态", value: status }, { label: "团队", value: teamLabel ?? "未记录团队" }, { label: "服务器", value: serverName },
         { label: "来源", value: card.preview ? "仅界面演示，不连接服务器" : background ? "协调助手分派" : task ? "已保存任务" : "当前窗口会话" },
       ]} /></PropertySection>
       {task?.successCriteria.length ? <PropertySection title="完成条件"><ul>{task.successCriteria.map((criterion, index) => <li key={index}>{criterion}</li>)}</ul></PropertySection> : null}

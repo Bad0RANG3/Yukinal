@@ -178,6 +178,13 @@ class PythonSidecarTests(unittest.TestCase):
         self.assertEqual(extended["ipv4Routes"], [])
         self.assertNotIn("dnsServers", extended)
         self.assertIn("dnsServers", extended["errors"])
+        toolkit = sidecar.handle(_request(5, "server.snapshot.normalize", {
+            "outputs": {**outputs, "gpu_nvidia": {"exitCode": 127, "stdout": ""},
+                        "security_identity": {"exitCode": 0, "stdout": "1000"}},
+        }))["result"]["snapshotData"]
+        self.assertEqual(toolkit["toolkit"]["modules"], ["gpu", "security"])
+        self.assertEqual(toolkit["gpu"]["status"], "unavailable")
+        self.assertEqual(toolkit["security"]["checks"][0]["status"], "info")
 
         invalid = sidecar.handle(_request(3, "server.snapshot.normalize", {
             "outputs": {**outputs, "extra": {"exitCode": 0, "stdout": ""}},

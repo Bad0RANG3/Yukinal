@@ -55,11 +55,11 @@ test("the approval card shows the facts and the exact input being approved", () 
     }),
   });
   assert.ok(markup.includes("command: systemctl restart nginx"), "the reason list must be visible before approving");
-  assert.ok(markup.includes("查看具体输入"), "the raw input must be reachable from the card");
+  assert.ok(markup.includes("全部参数"), "the raw input must be reachable from the card");
   assert.match(markup, /<pre[^>]*class="[^"]*approval-input-json[^"]*"[^>]*><code>[^<]*systemctl restart nginx/u);
   assert.ok(markup.includes("call_0123456"), "the call id prefix is needed to reconcile the approval with the audit log");
   assert.ok(markup.includes("sha256:abcde"), "the input fingerprint prefix is needed to reconcile the approval with the audit log");
-  // The full identifiers stay available as tooltips rather than bloating the card.
+  // The full identifiers stay available in a collapsed reference section.
   assert.ok(markup.includes("call_0123456789abcdef"));
   assert.ok(markup.includes("sha256:abcdef0123456789"));
 });
@@ -70,7 +70,7 @@ test("an approval without facts or readable input still renders the card", () =>
     approval: approval({ factsSummary: [], input: null }),
   });
   assert.equal(markup.includes("审批依据"), false, "an empty fact list must not render an empty landmark");
-  assert.ok(markup.includes("查看具体输入"));
+  assert.ok(markup.includes("操作参数"));
   assert.ok(markup.includes("批准一次"));
 });
 

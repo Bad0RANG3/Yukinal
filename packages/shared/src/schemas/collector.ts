@@ -87,7 +87,8 @@ export const NetworkDetailsSchema = z.strictObject({
 export const ContainerInfoSchema = z.strictObject({
   name: z.string().min(1),
   image: z.string().min(1),
-  state: z.string().min(1),
+  // Older Docker collectors can omit State while still returning Status.
+  state: z.string().transform((value) => value.trim() || "unknown"),
   status: z.string().min(1),
   restartCount: z.number().int().nonnegative(),
 });
@@ -97,6 +98,28 @@ const CollectorSampleSchema = z.strictObject({
   collectedAt: z.string().min(1),
   ok: z.boolean(),
   error: z.string().optional(),
+});
+
+export const GpuSampleSchema = z.strictObject({
+  status: z.enum(["available", "unavailable", "error"]),
+  message: z.string().max(512).optional(),
+  devices: z.array(z.strictObject({
+    index: z.number().int().min(0).max(65535),
+    name: z.string().min(1).max(256),
+    usagePercent: z.number().min(0).max(100).optional(),
+    memoryUsedBytes: z.number().int().nonnegative().optional(),
+    memoryTotalBytes: z.number().int().nonnegative().optional(),
+    temperatureCelsius: z.number().min(0).max(200).optional(),
+  })).max(64),
+});
+
+export const SecuritySampleSchema = z.strictObject({
+  checks: z.array(z.strictObject({
+    id: z.string().min(1).max(64),
+    label: z.string().min(1).max(128),
+    status: z.enum(["info", "warning", "unknown"]),
+    detail: z.string().max(2048),
+  })).max(64),
 });
 
 /** One row of the `snapshots` table. */
@@ -113,6 +136,12 @@ export const ServerSnapshotSchema = z.strictObject({
   uptimeSeconds: z.number().int().nonnegative().optional(),
   network: z.array(NetworkInterfaceSampleSchema).optional(),
   networkDetails: NetworkDetailsSchema.optional(),
+  gpu: GpuSampleSchema.optional(),
+  security: SecuritySampleSchema.optional(),
+  toolkit: z.strictObject({
+    version: z.string().min(1).max(64),
+    modules: z.array(z.string().min(1).max(64)).max(64),
+  }).optional(),
   docker: z
     .strictObject({
       available: z.boolean(),

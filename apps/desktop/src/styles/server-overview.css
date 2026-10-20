@@ -92,3 +92,10 @@
 .network-full-config > summary small { margin-left: auto; color: var(--faint); font-size: inherit; }
 .network-full-config[open] > summary > .icon { transform: rotate(90deg); }
 .network-full-config > .overview-subsection-title:first-of-type { margin-top: 10px; }
+.overview-toolkit-checks { list-style: none; margin: 0; padding: 0; }
+.overview-toolkit-checks li { padding: 8px 0; border-bottom: 1px solid var(--edge-normal); }
+.overview-toolkit-checks li > div { display: flex; align-items: center; justify-content: space-between; gap: 12px; }
+.overview-toolkit-checks strong { font-weight: 500; }
+.overview-toolkit-checks small { color: var(--faint); flex-shrink: 0; }
+.overview-toolkit-checks p { margin: 4px 0 0; overflow-wrap: anywhere; color: var(--muted); }
+.overview-toolkit-checks li[data-state="warning"] small { color: var(--warning); }

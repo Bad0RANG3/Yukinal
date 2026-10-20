@@ -1,48 +1,40 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { conversationScrollGeometry as geometry, conversationScrollTarget as target } from "../src/features/agent/conversation-scroll.js";
+import { conversationTurns, currentConversationTurn as current, conversationTurnTarget as target } from "../src/features/agent/conversation-scroll.js";
+import type { Entry } from "../src/features/agent/transcript.js";
 
-test("a short or unmeasurable conversation has no interactive scroll rail", () => {
-  for (const [viewport, content, track] of [[500, 300, 468], [500, 500, 468], [0, 500, 0], [500, 5000, 0], [NaN, 1000, 400]]) {
-    const rail = geometry(viewport!, content!, 0, track!);
-    assert.equal(rail.enabled, false);
-    assert.equal(target(200, 10, rail), 0);
-    assert.ok(Number.isFinite(rail.thumbTop));
-  }
+test("one user message is one turn regardless of assistant length, reasoning or tools", () => {
+  const entries: Entry[] = [{ kind: "user", entryId: "u1", text: "检查服务器" }, { kind: "assistant", text: "a".repeat(50_000) }, { kind: "reasoning", text: "thinking" }, { kind: "tool", callId: "c", toolName: "server.info", target: "staging", riskLevel: "read", decision: "auto" }, { kind: "assistant", text: "结果" }, { kind: "user", entryId: "u2", text: "看看日志" }];
+  const turns = conversationTurns(entries, "chat");
+  assert.equal(turns.length, 2); assert.equal(turns[0]!.id, "chat-turn-u1"); assert.equal(turns[1]!.entryIndex, 5);
+  assert.equal(conversationTurns([{ kind: "assistant", text: "orphan" }], "chat").length, 0);
 });
 
-test("ticks mark the visible proportion and reach both ends of the conversation", () => {
-  const top = geometry(600, 2400, 0, 560);
-  assert.equal(top.thumbHeight, 140);
-  assert.equal(top.thumbTop, 0);
-  const middle = geometry(600, 2400, 900, 560);
-  assert.equal(middle.progress, .5);
-  assert.equal(middle.thumbTop, 210);
-  const bottom = geometry(600, 2400, 1800, 560);
-  assert.equal(bottom.thumbTop + bottom.thumbHeight, bottom.trackHeight);
-  assert.equal(target(560, bottom.thumbHeight, bottom), 1800);
+test("anchors retain identity across history trimming, duplicate prompt text, and text edits", () => {
+  const entries: Entry[] = [{ kind: "user", entryId: "first", text: "重复" }, { kind: "assistant", text: "回答" }, { kind: "user", entryId: "second", text: "重复" }];
+  assert.notEqual(conversationTurns(entries, "a")[0]!.id, conversationTurns(entries, "a")[1]!.id);
+  assert.equal(conversationTurns(entries.slice(2), "a")[0]!.id, "a-turn-second");
+  assert.notEqual(conversationTurns(entries, "a")[0]!.id, conversationTurns(entries, "b")[0]!.id);
 });
 
-test("grabbing any point inside the reading marker never jumps the conversation", () => {
-  const rail = geometry(600, 2400, 900, 560);
-  for (const grab of [0, 20, rail.thumbHeight / 2, rail.thumbHeight]) {
-    assert.equal(target(rail.thumbTop + grab, grab, rail), 900);
-    assert.equal(target(-200, grab, rail), 0);
-    assert.equal(target(2000, grab, rail), rail.maxScroll);
-  }
+test("turn previews use bounded user text or attachment count, not assistant reasoning", () => {
+  const turns = conversationTurns([{ kind: "user", text: "  hello\n world   " }, { kind: "user", text: "x".repeat(1000) }, { kind: "user", text: "", attachments: [{ type: "file", name: "note.txt", mediaType: "text/plain", data: "private body" }] }, { kind: "user", text: "" }], "scope");
+  assert.equal(turns[0]!.preview, "hello world"); assert.equal(turns[1]!.preview.length, 180); assert.equal(turns[2]!.preview, "附加了 1 个文件"); assert.equal(turns[3]!.preview, "用户消息");
 });
 
-test("very long conversations keep a usable marker after resize and content growth", () => {
-  const long = geometry(500, 100000, 50000, 468);
-  assert.equal(long.thumbHeight, 36);
-  const resized = geometry(300, 100000, 50000, 268);
-  assert.equal(resized.maxScroll, 99700);
-  assert.ok(resized.thumbTop < long.thumbTop);
-  const grown = geometry(300, 120000, 50000, 268);
-  assert.ok(grown.progress < resized.progress);
-  assert.equal(geometry(300, 120000, -50, 268).progress, 0);
-  assert.equal(geometry(300, 120000, 200000, 268).progress, 1);
-  const compact = geometry(64, 1000, 936, 32);
-  assert.equal(compact.thumbHeight, 16);
-  assert.equal(target(32, compact.thumbHeight, compact), 936);
+test("reading position uses actual message anchors rather than equal text-height intervals", () => {
+  const tops = [24, 300, 8000];
+  assert.equal(current(tops, 0, 500, 10000), 0);
+  assert.equal(current(tops, 290, 500, 10000), 1);
+  assert.equal(current(tops, 7000, 500, 10000), 1);
+  assert.equal(current(tops, 8000, 500, 10000), 2);
+  assert.equal(current(tops, 9500, 500, 10000), 2);
+  assert.equal(current([], 0, 500, 500), -1);
+});
+
+test("anchor jumps clamp to real scroll bounds and keep a small reading inset", () => {
+  assert.equal(target(24, 500, 5000), 12);
+  assert.equal(target(1000, 500, 5000), 988);
+  assert.equal(target(4999, 500, 5000), 4500);
+  assert.equal(target(24, 1000, 500), 0);
 });

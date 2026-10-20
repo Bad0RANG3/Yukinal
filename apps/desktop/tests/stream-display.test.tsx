@@ -63,7 +63,7 @@ test("quiet tool rows retain the actual target and outcome with user controlled 
   const markup = renderToStaticMarkup(<AgentEntryView entry={{ kind: "tool", callId: "call_fixture", toolName: "filesystem.list", target: "local:/workspace", riskLevel: "read", decision: "auto", result: { status: "failed", durationMs: 12, summary: "实际错误摘要" } }} onApproval={async () => {}} approvalBusy={false} />);
   assert.match(markup, /<summary/);
   assert.match(markup, /local:\/workspace/);
-  assert.match(markup, /12ms/);
+  assert.match(markup, /12\s*ms/);
   assert.match(markup, /实际错误摘要/);
   assert.doesNotMatch(markup, /\bopen=/);
 });

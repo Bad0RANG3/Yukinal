@@ -52,6 +52,7 @@ class ToolSpec:
     origin: dict[str, str] | None = None
     timeout_ms: int = 30_000
     cancellable: bool = False
+    parallel_safe: bool = False
 
     def __post_init__(self) -> None:
         if not isinstance(self.name, str) or not _TOOL_NAME.fullmatch(self.name):
@@ -74,6 +75,8 @@ class ToolSpec:
             raise ValueError("tool timeout_ms must be between 1 and 300000")
         if not isinstance(self.cancellable, bool):
             raise ValueError("tool cancellable must be a boolean")
+        if not isinstance(self.parallel_safe, bool) or self.parallel_safe and (self.risk_level != "read" or self.requires_approval):
+            raise ValueError("only read tools without approval may opt into parallel execution")
         if self.origin is not None:
             kind = self.origin.get("kind") if isinstance(self.origin, dict) else None
             if (
@@ -240,6 +243,7 @@ class ToolRegistry:
                 origin=copy.deepcopy(spec.origin),
                 timeout_ms=spec.timeout_ms,
                 cancellable=spec.cancellable,
+                parallel_safe=spec.parallel_safe,
             )
             for spec in specs
         }
@@ -251,6 +255,38 @@ class ToolRegistry:
 
     def list(self) -> tuple[ToolSpec, ...]:
         return tuple(self._copy_spec(self._tools[name]) for name in sorted(self._tools))
+
+    def validate_arguments(self, name: str, arguments: object) -> ToolSpec:
+        """Validate registered input before metadata preparation; never execute or approve."""
+        spec = self._tools.get(name) if isinstance(name, str) else None
+        if spec is None:
+            raise ToolCallError("unknown_tool", "Tool is not registered")
+        if not isinstance(arguments, dict):
+            raise ToolCallError("invalid_arguments", "Tool arguments must be an object")
+        if not _has_string_object_keys(arguments):
+            raise ToolCallError("invalid_arguments", "Tool arguments must use string object keys")
+        try:
+            argument_bytes = json.dumps(
+                arguments, ensure_ascii=False, separators=(",", ":"), allow_nan=False
+            ).encode("utf-8")
+        except (TypeError, ValueError):
+            raise ToolCallError("invalid_arguments", "Tool arguments must be valid JSON values") from None
+        if len(argument_bytes) > 1024 * 1024:
+            raise ToolCallError("invalid_arguments", "Tool arguments exceeded the size limit")
+        try:
+            Draft202012Validator(spec.input_schema).validate(arguments)
+        except ValidationError as error:
+            # Report the violated schema constraint, never the input value
+            # (which may contain credentials or private file contents).
+            field = next(iter(error.absolute_path), "input")
+            if field not in spec.input_schema.get("properties", {}):
+                field = "input"
+            rule = str(error.validator)
+            limit = (f"={error.validator_value}" if rule in {
+                "maxLength", "minLength", "maximum", "minimum", "maxItems", "minItems"
+            } and isinstance(error.validator_value, (int, float)) else "")
+            raise ToolCallError("invalid_arguments", f"Tool input {field} violates {rule}{limit}") from None
+        return self._copy_spec(spec)
 
     async def execute(
         self,
@@ -291,24 +327,7 @@ class ToolRegistry:
 
         approval_status = "not_required"
         try:
-            if spec is None:
-                raise ToolCallError("unknown_tool", "Tool is not registered")
-            if not isinstance(arguments, dict):
-                raise ToolCallError("invalid_arguments", "Tool arguments must be an object")
-            if not _has_string_object_keys(arguments):
-                raise ToolCallError("invalid_arguments", "Tool arguments must use string object keys")
-            try:
-                argument_bytes = json.dumps(
-                    arguments, ensure_ascii=False, separators=(",", ":"), allow_nan=False
-                ).encode("utf-8")
-            except (TypeError, ValueError):
-                raise ToolCallError("invalid_arguments", "Tool arguments must be valid JSON values") from None
-            if len(argument_bytes) > 1024 * 1024:
-                raise ToolCallError("invalid_arguments", "Tool arguments exceeded the size limit")
-            try:
-                Draft202012Validator(spec.input_schema).validate(arguments)
-            except ValidationError:
-                raise ToolCallError("invalid_arguments", "Tool arguments do not match the registered schema") from None
+            self.validate_arguments(name, arguments)
             approval_status = "required" if spec.requires_approval else "not_required"
             policy_status = self._authorization.authorize(context, spec, arguments)
             if policy_status not in {"not_required", "approved"}:
@@ -401,6 +420,7 @@ class ToolRegistry:
             origin=copy.deepcopy(spec.origin),
             timeout_ms=spec.timeout_ms,
             cancellable=spec.cancellable,
+            parallel_safe=spec.parallel_safe,
         )
 
     async def _record_finished(

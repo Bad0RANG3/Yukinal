@@ -214,17 +214,22 @@ def _resolve(value: str | None) -> str | None:
     return os.environ.get(reference.group(1), "") if reference is not None else value
 
 
+def supports_reasoning_effort(model: Any) -> bool:
+    """Capabilities belong to the verified adapter, endpoint and model together."""
+    try:
+        from .deepseek_model import DeepSeekChatModel
+    except ImportError:
+        return False
+
+    return (isinstance(model, DeepSeekChatModel)
+            and urlsplit(model.openai_api_base or "").scheme == "https"
+            and urlsplit(model.openai_api_base or "").hostname == "api.deepseek.com"
+            and model.model_name in {"deepseek-flash", "deepseek-v4-pro"})
+
+
 def with_reasoning_effort(model: Any, effort: str) -> Any:
     """Apply a documented DeepSeek parameter before tools/output budgets are bound."""
-    from .deepseek_model import DeepSeekChatModel
-
-    if (
-        effort not in {"none", "low", "high", "max"}
-        or not isinstance(model, DeepSeekChatModel)
-        or urlsplit(model.openai_api_base or "").scheme != "https"
-        or urlsplit(model.openai_api_base or "").hostname != "api.deepseek.com"
-        or model.model_name not in {"deepseek-flash", "deepseek-v4-pro"}
-    ):
+    if effort not in {"none", "low", "high", "max"} or not supports_reasoning_effort(model):
         raise ModelFactoryError("reasoning_not_supported", "This model does not support the selected reasoning effort")
     extra_body = {**(model.extra_body or {}), "thinking": {"type": "disabled" if effort == "none" else "enabled"}}
     return model.model_copy(update={"reasoning_effort": None if effort == "none" else effort, "extra_body": extra_body})

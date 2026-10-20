@@ -180,3 +180,9 @@
 .remote-list-pager { display: flex; flex-wrap: wrap; align-items: center; justify-content: space-between; gap: 8px; margin-block: 10px; color: var(--muted); font-size: var(--text-caption); }
 .remote-list-pager .button-secondary { padding: 5px 8px; }
 .remote-list-filters :is(input, select) { min-height: 30px; padding: 5px 8px; border: 1px solid var(--line); border-radius: var(--radius-control); color: var(--text); background: var(--surface-2); font: inherit; font-size: var(--text-caption); }
+
+.overview-refresh-error { min-width: 0; }
+.overview-refresh-error > p { margin: 0; }
+.overview-refresh-error > details { margin-top: 6px; }
+.overview-refresh-error summary { cursor: pointer; }
+.overview-refresh-error pre { max-height: 220px; margin: 8px 0 0; overflow: auto; white-space: pre-wrap; overflow-wrap: anywhere; user-select: text; }

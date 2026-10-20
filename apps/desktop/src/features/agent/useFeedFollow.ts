@@ -2,6 +2,7 @@
  * Follow only an explicit reading intent. Content/viewport changes never
  * re-enable following after the user has moved away from the latest entry.
  */
+import { CONVERSATION_LATEST_EVENT, CONVERSATION_NAVIGATE_EVENT } from "./conversation-scroll.js";
 import { useCallback, useLayoutEffect, useRef, useState, type UIEvent } from "react";
 import { FeedFollowIntent, feedKeyDirection, feedTouchDirection, feedWheelDirection, listenForFeedLayout, type FeedScrollDirection } from "./feed-follow.js";
 
@@ -100,6 +101,7 @@ export function useFeedFollow(active: boolean, dependency: unknown, scope: unkno
       else intent.current.cancelPointer();
       schedule();
     };
+    const navigateToTurn = () => { intent.current.navigateToTurn(feed); schedule(); };
     const visibility = () => {
       if (document.hidden) {
         if (animationFrame !== null) cancelAnimationFrame(animationFrame);
@@ -123,6 +125,7 @@ export function useFeedFollow(active: boolean, dependency: unknown, scope: unkno
     const mutation = typeof MutationObserver === "undefined" ? null : new MutationObserver(observeEntries);
     mutation?.observe(feed, { childList: true });
     const stopLayoutEvents = listenForFeedLayout(feed, window, schedule, document.fonts ?? null);
+    feed.addEventListener(CONVERSATION_NAVIGATE_EVENT, navigateToTurn);
     frame.addEventListener("wheel", wheel, { capture: true, passive: true });
     frame.addEventListener("touchstart", touchStart, { capture: true, passive: true });
     frame.addEventListener("touchmove", touchMove, { capture: true, passive: true });
@@ -142,6 +145,7 @@ export function useFeedFollow(active: boolean, dependency: unknown, scope: unkno
       resize?.disconnect();
       mutation?.disconnect();
       stopLayoutEvents();
+      feed.removeEventListener(CONVERSATION_NAVIGATE_EVENT, navigateToTurn);
       frame.removeEventListener("wheel", wheel, true);
       frame.removeEventListener("touchstart", touchStart, true);
       frame.removeEventListener("touchmove", touchMove, true);
@@ -172,6 +176,7 @@ export function useFeedFollow(active: boolean, dependency: unknown, scope: unkno
 
   /** A submitted input or the explicit latest button restores following. */
   const pinToBottom = useCallback((): void => {
+    feedRef.current?.dispatchEvent(new Event(CONVERSATION_LATEST_EVENT));
     intent.current.pinToLatest();
     publish(false);
     scheduleRef.current();

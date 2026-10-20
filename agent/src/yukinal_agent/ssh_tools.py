@@ -162,7 +162,7 @@ def register_desktop_ssh_tools(
     tools: tuple[tuple[str, str, dict[str, Any], str], ...] = (
         (
             "server.info",
-            "Collect a fresh read-only health snapshot for the selected remote server.",
+            "Collect a fresh read-only server snapshot: CPU, memory, disks, NVIDIA GPU, network, Docker and basic security checks.",
             {"type": "object", "additionalProperties": False, "properties": {}},
             "system_snapshot",
         ),
@@ -506,6 +506,7 @@ def register_desktop_ssh_tools(
             handler=lambda arguments, context, tool_name=name, operation=operation: execute(
                 tool_name, operation, arguments, context
             ),
+            parallel_safe=True,
             target_id_argument=None,
             target_required=True,
             origin={"kind": "builtin"},

@@ -697,6 +697,31 @@ void run_tests(const std::string& python) {
       {"status", "disconnected"}, {"createdAt", "2026-01-01T00:00:00Z"},
       {"updatedAt", "2026-01-01T00:00:00Z"}};
   database.add_server(server, std::nullopt, "activity_fixture");
+  // Drive the real native -> sidecar async admission -> native event/SQLite path.
+  auto watch_task = remote_task("task_watch_relay");
+  watch_task["mode"] = "readonly";
+  watch_task["automationLevel"] = "readonly";
+  (void)database.create_investigation_task(watch_task);
+  const auto watch = router.invoke("investigation_schedule_create", {{"input", {
+      {"id", "watch_relay"}, {"taskId", "task_watch_relay"}, {"intervalSeconds", 30},
+      {"cooldownSeconds", 0}, {"dedupeWindowSeconds", 1}, {"notificationPolicy", "on_change"}}}});
+  check(watch.ok && router.poll_schedules().ok, "watch clock must run without a mounted UI");
+  const auto watch_start = last_start(router);
+  check(watch_start["delivery"] == "async" && watch_start["resume"] == true &&
+            watch_start["mode"] == "readonly" && watch_start["target"]["serverId"] == "srv_fixture",
+        "wire admission must retain scoped readonly async execution");
+  const auto watch_run = watch_start.at("runId").get<std::string>();
+  auto watch_tool = event("agent.tool_result", watch_run, "task_watch_relay");
+  watch_tool["toolName"] = "server.logs"; watch_tool["status"] = "success";
+  deliver(router, watch_tool);
+  auto watch_done = completion(watch_run, "task_watch_relay");
+  watch_done["result"]["text"] = R"({"outcome":"changed","summary":"Fixture login failures detected"})";
+  deliver(router, watch_done);
+  check(database.get_investigation_schedule_run(watch_run)->at("status") == "succeeded" &&
+            database.get_investigation_task("task_watch_relay")->at("task").at("status") == "pending",
+        "wire completion must finish the inspection without terminating its persistent task");
+  check(router.invoke("investigation_schedule_update", {{"input", {
+      {"scheduleId", "watch_relay"}, {"status", "paused"}}}}).ok, "fixture watch must pause");
   auto planned = task("task_planned");
   planned["serverId"] = "srv_fixture";
   planned["scope"] = {{"host", "remote"}, {"serverId", "srv_fixture"}, {"environment", "staging"}};

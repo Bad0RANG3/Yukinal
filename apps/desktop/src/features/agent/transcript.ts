@@ -23,6 +23,7 @@ import { environmentLabel } from "../../lib/labels.js";
 export type ToolCallFacts = {
   callId: string;
   toolName: string;
+  purpose?: string;
   target: string;
   riskLevel: RiskLevel;
   decision: PermissionMode;
@@ -34,6 +35,9 @@ export type ToolOutcome = {
   status: "success" | "failed" | "cancelled";
   durationMs: number;
   summary: string;
+  /** Already-redacted event fields, never raw command output. */
+  error?: string;
+  errorCode?: string;
 };
 
 /**
@@ -186,13 +190,25 @@ export function lastUserEntry(
 }
 
 /**
- * 文件正文从不进入动态，只回一句说明；其余工具输出按长度截断。
- * 这条规则同时服务于隐私与可读性，所以它必须有一个名字。
+ * 文件正文不进入动态；其余保留服务端已脱敏、限长的完整摘要。
+ * 结果默认折叠展示，不能再次截断结构化输出使其无法解析。
  */
 export function toolResultSummary(toolName: string, outputSummary: string): string {
   return toolName === "filesystem.read"
     ? "文件内容已返回给 Agent（正文不在动态中保存）"
-    : outputSummary.slice(0, 240);
+    : outputSummary;
+}
+
+/** Keep the safe failure explanation; outputSummary may contain only a generic code. */
+export function toolOutcomeFromEvent(event: { toolName: string; outputSummary: string; status: ToolOutcome["status"]; durationMs: number; error?: string; errorCode?: string }): ToolOutcome {
+  const error = event.error?.trim().slice(0, 4_000);
+  return {
+    status: event.status,
+    durationMs: event.durationMs,
+    summary: toolResultSummary(event.toolName, event.outputSummary),
+    ...(event.status === "failed" && error ? { error } : {}),
+    ...(event.errorCode ? { errorCode: event.errorCode } : {}),
+  };
 }
 
 export const RUN_STATE_LABEL: Record<string, string> = {
@@ -207,6 +223,23 @@ export const RUN_STATE_LABEL: Record<string, string> = {
 
 export function runStateLabel(state: string | null): string | null {
   return state ? RUN_STATE_LABEL[state] ?? state : null;
+}
+
+export function agentFailureLabel(error: string): string {
+  return ({
+    tool_call_limit_exceeded: "本次运行已达到工具调用次数上限。已完成的操作仍保留，可从当前状态继续。",
+    model_round_limit_exceeded: "本次运行已达到模型请求次数上限。可从当前状态继续。",
+    tool_repetition_detected: "已停止重复调用：相同操作持续返回相同结果。此前已完成的操作仍保留。",
+    goal_review_failed: "验收检查未返回有效结果，本次任务未标记完成。已完成的操作仍保留。",
+    goal_blocked: "任务遇到需要处理的阻塞，尚未完成。请查看上方具体说明。",
+    goal_no_progress: "任务连续没有新进展，已停止空转。已完成的操作仍保留。",
+  } as Record<string, string>)[error] ?? error;
+}
+
+export function toolPurpose(input: unknown): string | undefined {
+  if (!input || typeof input !== "object" || Array.isArray(input)) return undefined;
+  const purpose = (input as Record<string, unknown>).purpose;
+  return typeof purpose === "string" && purpose.trim() ? purpose : undefined;
 }
 
 export function targetLabel(target: ToolTarget): string {

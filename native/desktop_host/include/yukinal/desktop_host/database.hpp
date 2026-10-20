@@ -156,6 +156,13 @@ class DesktopDatabase {
       const nlohmann::json& schedule) const;
   [[nodiscard]] nlohmann::json claim_due_investigation_schedule_runs(
       const std::string& now, int limit) const;
+  [[nodiscard]] bool start_investigation_schedule_run(const std::string& run_id,
+                                                       const std::string& now) const;
+  // Terminal transitions are compare-and-set: late/repeated events cannot resurrect a run.
+  [[nodiscard]] bool finish_investigation_schedule_run(
+      const std::string& run_id, const std::string& status, const std::string& outcome,
+      const std::optional<std::string>& error, const std::string& now) const;
+  void recover_investigation_schedule_runs(const std::string& now) const;
   [[nodiscard]] int investigation_evidence_count_for_run(const std::string& run_id) const;
   // ── Investigation runs (durable Agent-run binding) ──────────────────────────
   [[nodiscard]] std::optional<nlohmann::json> get_investigation_run(

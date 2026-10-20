@@ -7,8 +7,7 @@ import { errorMessage, formatRelativeTime, formatTimestamp } from "../../lib/for
 import { isPreviewFixture } from "../../lib/preview-fixtures.js";
 import { useServers } from "../../lib/servers.js";
 import { useWorkspaceStore } from "../../stores/workspace-store.js";
-import { AGENT_TEAMS } from "./agent-nist.js";
-import { TEAM_HEARTBEAT_MS } from "./team-operations.js";
+import { AGENT_TEAMS, agentTeamLabel } from "./agent-nist.js";
 import { useTeamRuntimeStore } from "./team-runtime-store.js";
 import { BOARD_COLUMNS, boardCardFeedback, boardPreviewCards, teamBoardCards, type TeamBoardCard } from "./team-board.js";
 import { TeamFeedbackPreview } from "./TeamActivity.js";
@@ -27,7 +26,7 @@ export function TeamBoardPane({ serverId }: { serverId: string | null; expanded?
   const [selectedId, setSelectedId] = useState<string | null>(null);
   const servers = useServers({ enabled: false });
   const names = new Map(servers.data?.map((server) => [server.id, server.name]));
-  const query = useQuery({ queryKey: ["team-board-tasks"], enabled: isDesktopShell() && !goalsOpen, staleTime: TEAM_HEARTBEAT_MS,
+  const query = useQuery({ queryKey: ["team-board-tasks"], enabled: isDesktopShell() && !goalsOpen, staleTime: 2_000, refetchInterval: goalsOpen ? false : 2_000,
     queryFn: async () => (await callDesktop(IPC_COMMANDS.investigationTaskList, { limit: 100 })).tasks,
   });
   const allCards = [...(isPreviewFixture() ? boardPreviewCards(cues) : []), ...teamBoardCards(query.data ?? [], runs)];
@@ -70,12 +69,12 @@ export function TeamBoardPane({ serverId }: { serverId: string | null; expanded?
 function BoardCard({ card, serverName, onOpen }: { card: TeamBoardCard; serverName: string; onOpen: () => void }) {
   const cues = useTeamRuntimeStore((state) => state.cues);
   const feedback = boardCardFeedback(card, cues);
-  const team = AGENT_TEAMS.find((item) => item.id === card.team);
+  const teamLabel = agentTeamLabel(card.team ?? "");
   return <article className={`team-board-card ${card.failed ? "has-failure" : ""} ${feedback ? `team-color-${feedback.team}` : ""}`} data-operation={feedback?.phase}>
     {feedback ? <span key={feedback.key} aria-hidden="true" className={`team-operation-outline team-color-${feedback.team}`} data-operation={feedback.phase} /> : null}
     <button type="button" className="team-board-card-toggle" aria-haspopup="dialog" aria-label={`查看任务属性：${card.goal || "附件任务"}`} onClick={onOpen}>
       <strong title={card.goal || "附件任务"}>{card.goal || "附件任务"}</strong>
-      <span className="team-board-card-meta"><span className={card.team ? `team-color-${card.team}` : ""}>{card.preview ? "模拟 · " : ""}{team?.label ?? "未记录团队"}</span><span className={feedback?.phase === "working" ? "team-board-working" : ""}>{feedback?.phase === "working" ? <i aria-hidden="true" /> : null}{card.status}</span></span>
+      <span className="team-board-card-meta"><span className={card.team ? `team-color-${card.team}` : ""}>{card.preview ? "模拟 · " : ""}{teamLabel ?? "未记录团队"}</span><span className={feedback?.phase === "working" ? "team-board-working" : ""}>{feedback?.phase === "working" ? <i aria-hidden="true" /> : null}{card.status}</span></span>
       <span className="team-board-card-target"><Icon name={card.serverId ? "servers" : "projects"} size="xs" /><span title={serverName}>{serverName}</span>{card.updatedAt > 0 ? <time dateTime={new Date(card.updatedAt).toISOString()} title={formatTimestamp(new Date(card.updatedAt).toISOString())}>{formatRelativeTime(new Date(card.updatedAt).toISOString())}</time> : null}</span>
     </button>
   </article>;

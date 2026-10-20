@@ -9,6 +9,7 @@
 #include "yukinal/desktop_host/remote_drag.hpp"
 #include "yukinal/desktop_host/sidecar.hpp"
 #include "yukinal/desktop_host/transfer_manager.hpp"
+#include "yukinal/desktop_host/watch_scheduler.hpp"
 
 #include <atomic>
 #include <chrono>
@@ -39,6 +40,7 @@ class IpcRouter {
   ~IpcRouter();
 
   IpcReply invoke(const std::string& method, nlohmann::json params);
+  IpcReply poll_schedules();
   [[nodiscard]] std::set<std::string> subscribers(const std::string& event) const;
 
   // The Agent→host request entry point the sidecar dispatches through. Exposed so
@@ -156,6 +158,7 @@ class IpcRouter {
   std::unordered_map<std::string, std::set<std::string>> subscriptions_;
   std::unique_ptr<SidecarClient> sidecar_;
   std::mutex sidecar_mutex_;
+  std::unique_ptr<WatchScheduler> watch_scheduler_;
   std::unique_ptr<TerminalManager> terminals_;
   std::unique_ptr<McpSupervisor> mcp_;
   LocalPathHandles local_paths_;

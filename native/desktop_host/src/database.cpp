@@ -432,6 +432,12 @@ nlohmann::json decode_investigation_schedule(sqlite3_stmt* row) {
   add_optional_text(schedule, "lastOutcome", row, 11);
   add_optional_text(schedule, "lastError", row, 12);
   add_optional_text(schedule, "baselineRunId", row, 15);
+  Statement latest(sqlite3_db_handle(row), "SELECT status FROM investigation_schedule_runs "
+      "WHERE schedule_id=?1 AND status<>'skipped' ORDER BY scheduled_at DESC,id DESC LIMIT 1");
+  bind_text(sqlite3_db_handle(row), latest.get(), 1, schedule.at("id").get<std::string>());
+  const auto result = sqlite3_step(latest.get());
+  if (result == SQLITE_ROW) schedule["lastRunStatus"] = column_text(latest.get(), 0);
+  else if (result != SQLITE_DONE) throw std::runtime_error(sqlite3_errmsg(sqlite3_db_handle(row)));
   return schedule;
 }
 
@@ -4402,8 +4408,12 @@ nlohmann::json DesktopDatabase::claim_due_investigation_schedule_runs(
     insert_investigation_schedule_run(connection_, run);
     if (concurrency_reason.has_value()) {
       skipped.push_back(run);
-      finish_skipped_schedule(schedule_id, next_run_at, previous_last_run(schedule),
-                              *concurrency_reason);
+      if (*concurrency_reason == "cooldown" || *concurrency_reason == "concurrency_limit") {
+        advance_schedule(schedule_id, next_run_at);
+      } else {
+        finish_skipped_schedule(schedule_id, next_run_at, previous_last_run(schedule),
+                                *concurrency_reason);
+      }
       if (*concurrency_reason == "task_terminal") revoke(schedule_id);
     } else {
       claimed.push_back(run);
@@ -4412,6 +4422,72 @@ nlohmann::json DesktopDatabase::claim_due_investigation_schedule_runs(
   }
   transaction.commit();
   return {{"claimed", std::move(claimed)}, {"skipped", std::move(skipped)}};
+}
+
+bool DesktopDatabase::start_investigation_schedule_run(const std::string& run_id,
+                                                       const std::string& now) const {
+  std::lock_guard lock(mutex_);
+  if (!connection_) return false;
+  Statement update(connection_, "UPDATE investigation_schedule_runs SET status='running', "
+      "started_at=?2 WHERE id=?1 AND status='claimed'");
+  bind_text(connection_, update.get(), 1, run_id);
+  bind_text(connection_, update.get(), 2, now);
+  if (sqlite3_step(update.get()) != SQLITE_DONE) throw std::runtime_error(sqlite3_errmsg(connection_));
+  return sqlite3_changes(connection_) == 1;
+}
+
+bool DesktopDatabase::finish_investigation_schedule_run(
+    const std::string& run_id, const std::string& status, const std::string& outcome,
+    const std::optional<std::string>& error, const std::string& now) const {
+  if (!is_one_of(status, {"succeeded", "failed", "interrupted", "skipped"})) {
+    throw std::invalid_argument("invalid terminal schedule run status");
+  }
+  std::lock_guard lock(mutex_);
+  if (!connection_) return false;
+  Transaction transaction(connection_);
+  Statement update(connection_, "UPDATE investigation_schedule_runs SET status=?2, "
+      "outcome=?3,error=?4,finished_at=?5 WHERE id=?1 AND status IN ('claimed','running','queued')");
+  bind_text(connection_, update.get(), 1, run_id);
+  bind_text(connection_, update.get(), 2, status);
+  bind_text(connection_, update.get(), 3, outcome);
+  bind_optional_text(connection_, update.get(), 4, error);
+  bind_text(connection_, update.get(), 5, now);
+  if (sqlite3_step(update.get()) != SQLITE_DONE) throw std::runtime_error(sqlite3_errmsg(connection_));
+  const bool accepted = sqlite3_changes(connection_) == 1;
+  if (accepted) {
+    Statement schedule(connection_, R"SQL(
+      UPDATE investigation_schedules SET last_outcome=?2,last_error=?3,updated_at=?4
+      WHERE id=(SELECT schedule_id FROM investigation_schedule_runs WHERE id=?1)
+        AND NOT EXISTS (SELECT 1 FROM investigation_schedule_runs newer
+          WHERE newer.schedule_id=investigation_schedules.id AND newer.id<>?1 AND newer.status<>'skipped'
+            AND newer.scheduled_at>(SELECT scheduled_at FROM investigation_schedule_runs WHERE id=?1))
+    )SQL");
+    bind_text(connection_, schedule.get(), 1, run_id);
+    bind_text(connection_, schedule.get(), 2, outcome);
+    bind_optional_text(connection_, schedule.get(), 3, error);
+    bind_text(connection_, schedule.get(), 4, now);
+    if (sqlite3_step(schedule.get()) != SQLITE_DONE) throw std::runtime_error(sqlite3_errmsg(connection_));
+  }
+  transaction.commit();
+  return accepted;
+}
+
+void DesktopDatabase::recover_investigation_schedule_runs(const std::string& now) const {
+  std::lock_guard lock(mutex_);
+  if (!connection_) return;
+  Transaction transaction(connection_);
+  Statement schedules(connection_, R"SQL(
+    UPDATE investigation_schedules SET last_error='app_restarted',updated_at=?1
+    WHERE id IN (SELECT schedule_id FROM investigation_schedule_runs
+      WHERE status IN ('queued','claimed','running'))
+  )SQL");
+  bind_text(connection_, schedules.get(), 1, now);
+  if (sqlite3_step(schedules.get()) != SQLITE_DONE) throw std::runtime_error(sqlite3_errmsg(connection_));
+  Statement runs(connection_, "UPDATE investigation_schedule_runs SET status='interrupted', "
+      "error='app_restarted',finished_at=?1 WHERE status IN ('queued','claimed','running')");
+  bind_text(connection_, runs.get(), 1, now);
+  if (sqlite3_step(runs.get()) != SQLITE_DONE) throw std::runtime_error(sqlite3_errmsg(connection_));
+  transaction.commit();
 }
 
 int DesktopDatabase::investigation_evidence_count_for_run(const std::string& run_id) const {

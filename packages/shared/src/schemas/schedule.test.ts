@@ -45,3 +45,9 @@ test("schedule responses and updates carry an optional explicit baseline", () =>
     baselineRunId: "",
   }));
 });
+
+test("an enabled schedule exposes the actual latest run state without accepting arbitrary states", () => {
+  assert.equal(InvestigationScheduleSchema.parse({ ...schedule, lastRunStatus: "running" }).lastRunStatus, "running");
+  assert.equal(InvestigationScheduleSchema.parse(schedule).lastRunStatus, undefined);
+  assert.throws(() => InvestigationScheduleSchema.parse({ ...schedule, lastRunStatus: "healthy" }));
+});

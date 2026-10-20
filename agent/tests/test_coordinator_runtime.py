@@ -76,6 +76,25 @@ class RoutingModel:
 
 
 class CoordinatorTests(unittest.IsolatedAsyncioTestCase):
+    async def test_stable_system_prefix_excludes_changing_task_state(self):
+        store = ConversationStore()
+        async def launch(*_args): return {"state": "completed", "text": "done"}
+        runtime = CoordinationRuntime(ToolRegistry(MemoryAuditSink()), store, lambda _event: None, launch)
+        parent = {"runId": "run-prefix", "sessionId": "session-prefix", "promptText": "检查 Alpha", "coordination": config()}
+        try:
+            before = runtime.context(parent, include_tasks=False)
+            runtime.jobs["job"] = {"id":"job", "sessionId":"session-prefix", "team":"blue", "title":"check", "state":"running", "access":"read"}
+            running = runtime.turn_context(parent)
+            runtime.jobs["job"]["state"] = "completed"
+            runtime.jobs["other"] = {"id":"foreign", "sessionId":"other-session", "state":"failed", "title":"FOREIGN_PRIVATE_TASK"}
+            parent["promptText"] = "继续 Beta"
+            self.assertEqual(runtime.context(parent, include_tasks=False), before)
+            self.assertNotEqual(runtime.turn_context(parent), running)
+            self.assertIn('"state":"completed"', runtime.turn_context(parent))
+            self.assertNotIn("FOREIGN_PRIVATE_TASK", runtime.turn_context(parent))
+            self.assertNotIn('"tasks"', before)
+        finally: store.close()
+
     async def test_two_team_approvals_are_independent_and_chat_continues_while_waiting(self):
         executed = []
         waiting = asyncio.Event()
@@ -148,7 +167,10 @@ class CoordinatorTests(unittest.IsolatedAsyncioTestCase):
             model.release["alpha private brief"].set()
             await asyncio.wait_for(asyncio.gather(*list(sidecar._coordination.active.values())), 3)
             self.assertEqual(sidecar._coordination.jobs[alpha["id"]]["state"], "completed")
-            self.assertEqual(sidecar._coordination.jobs[alpha["id"]]["usage"], {"inputTokens": 11, "outputTokens": 7, "reportedRequests": 1, "unreportedRequests": 0})
+            usage = sidecar._coordination.jobs[alpha["id"]]["usage"]
+            self.assertEqual({key: usage[key] for key in ("inputTokens", "outputTokens", "reportedRequests", "unreportedRequests")},
+                             {"inputTokens": 11, "outputTokens": 7, "reportedRequests": 1, "unreportedRequests": 0})
+            self.assertGreaterEqual(usage["lastRequest"]["durationMs"], 0)
             self.assertNotIn("verified result", str(store.context("session-main", None).messages))
             self.assertTrue(any(event["type"] == "agent.team_task" for event in sidecar.events))
             # A subsequent coordinator turn gets actual completed results, not a fabricated success.

@@ -39,14 +39,16 @@ function memoryStorage() {
   return { values, getItem: (key: string) => values.get(key) ?? null, setItem: (key: string, value: string) => { values.set(key, value); } };
 }
 
-test("the seven-team catalog keeps one stable assignment per role across reloads", () => {
+test("the three-role catalog keeps one stable assignment per role across reloads", () => {
   const storage = memoryStorage();
   const defaults = defaultAgentRoles();
+  assert.equal(defaults.length, 3);
+  assert.equal(AGENT_TEAMS.length, 3);
   assert.equal(new Set(defaults.map((role) => role.id)).size, defaults.length);
-  assert.deepEqual(new Set(defaults.map((role) => role.team)), new Set(["blue", "red", "purple", "white", "yellow", "orange", "green"]));
+  assert.deepEqual(new Set(defaults.map((role) => role.team)), new Set(["blue", "yellow", "purple"]));
   for (const team of AGENT_TEAMS) {
     const roles = defaults.filter((role) => role.team === team.id);
-    assert.equal(roles.length, 2);
+    assert.equal(roles.length, 1);
     roles[0]!.providerId = `connection-${team.id}`;
     roles[0]!.model = `model-${team.id}`;
   }
@@ -57,31 +59,55 @@ test("the seven-team catalog keeps one stable assignment per role across reloads
 test("upgrading the original catalog updates untouched fields and preserves custom duties and model assignments", () => {
   const storage = memoryStorage();
   const legacy = JSON.stringify({ version: 1, roles: [
-    { id: "red-review", name: "风险审查", responsibility: "自定义测试范围：仅预发布。", providerId: "red-connection", model: "red-model" },
-    { id: "orange-incident", name: "自定义协作角色", responsibility: "整理故障影响、时间线、已完成操作、待确认事项与下一步优先级。围绕已有证据协调排查和交接，明确需要用户决策的节点，不捏造执行结果。", providerId: "orange-connection", model: "orange-model" },
+    { id: "purple-retest", name: "风险审查", responsibility: "自定义测试范围：仅预发布。", providerId: "red-connection", model: "red-model" },
+    { id: "yellow-engineering", name: "自定义协作角色", responsibility: "整理故障影响、时间线、已完成操作、待确认事项与下一步优先级。围绕已有证据协调排查和交接，明确需要用户决策的节点，不捏造执行结果。", providerId: "orange-connection", model: "orange-model" },
   ] });
   storage.values.set(AGENT_NIST_STORAGE_KEY, legacy);
   const loaded = loadAgentRoles(storage);
   const defaults = defaultAgentRoles();
   assert.equal(loaded.notice, null);
-  assert.equal(loaded.roles.length, 14);
-  assert.deepEqual(loaded.roles.find((role) => role.id === "red-review"), {
-    ...defaults.find((role) => role.id === "red-review"), responsibility: "自定义测试范围：仅预发布。", providerId: "red-connection", model: "red-model",
+  assert.equal(loaded.roles.length, 3);
+  assert.deepEqual(loaded.roles.find((role) => role.id === "purple-retest"), {
+    ...defaults.find((role) => role.id === "purple-retest"), name: "风险审查", responsibility: "自定义测试范围：仅预发布。", providerId: "red-connection", model: "red-model",
   });
-  assert.deepEqual(loaded.roles.find((role) => role.id === "orange-incident"), {
-    ...defaults.find((role) => role.id === "orange-incident"), name: "自定义协作角色", providerId: "orange-connection", model: "orange-model",
+  assert.deepEqual(loaded.roles.find((role) => role.id === "yellow-engineering"), {
+    ...defaults.find((role) => role.id === "yellow-engineering"), name: "自定义协作角色", responsibility: JSON.parse(legacy).roles[1].responsibility, providerId: "orange-connection", model: "orange-model",
   });
   assert.equal(storage.values.get(AGENT_NIST_STORAGE_KEY), legacy, "loading must not write storage");
   saveAgentRoles(storage, loaded.roles);
   assert.deepEqual(loadAgentRoles(storage).roles, loaded.roles);
 });
 
+test("the previous catalog projects three roles while retaining bindings and untouched retired data", () => {
+  const storage = memoryStorage();
+  const raw = JSON.stringify({ version: 1, catalogVersion: 2, roles: [
+    { id: "blue-guardian", name: "防守与响应", responsibility: "自定义值守范围", providerId: "ops", model: "ops-model" },
+    { id: "yellow-engineering", name: "专属执行", responsibility: "自定义开发职责", providerId: "builder", model: "build-model" },
+    { id: "purple-retest", name: "防护复测", providerId: "reviewer", model: "review-model" },
+    { id: "red-review", name: "已收起的角色", responsibility: "保留旧设置", providerId: "archived", model: "old-model" },
+  ] });
+  storage.values.set(AGENT_NIST_STORAGE_KEY, raw);
+  const loaded = loadAgentRoles(storage);
+  assert.equal(loaded.notice, null);
+  assert.equal(loaded.roles.length, 3);
+  assert.equal(loaded.roles[0]?.name, "运维");
+  assert.equal(loaded.roles[0]?.responsibility, "自定义值守范围");
+  assert.equal(loaded.roles[0]?.model, "ops-model");
+  assert.equal(loaded.roles[1]?.name, "专属执行");
+  assert.equal(loaded.roles[1]?.providerId, "builder");
+  assert.equal(loaded.roles[2]?.name, "验证");
+  assert.equal(loaded.roles[2]?.model, "review-model");
+  assert.equal(storage.values.get(AGENT_NIST_STORAGE_KEY), raw);
+  assert.equal(resolveAgentRole("继续", loaded.roles, "red-review").role.id, "purple-retest");
+  assert.equal(resolveAgentRole("@日志分析", loaded.roles).role.id, "blue-guardian");
+});
+
 test("newly saved custom values matching an old default are not migrated on later reloads", () => {
   const storage = memoryStorage();
   const roles = defaultAgentRoles();
-  roles.find((role) => role.id === "orange-incident")!.name = "故障协调";
+  roles.find((role) => role.id === "yellow-engineering")!.name = "故障协调";
   saveAgentRoles(storage, roles);
-  assert.equal(loadAgentRoles(storage).roles.find((role) => role.id === "orange-incident")?.name, "故障协调");
+  assert.equal(loadAgentRoles(storage).roles.find((role) => role.id === "yellow-engineering")?.name, "故障协调");
 });
 
 test("local role configuration survives reload and stores only role fields", () => {
@@ -222,17 +248,17 @@ test("missing, inactive and missing-model bindings refuse handoff without select
 test("explicit team mentions override a selected persona and automatic routing preserves the user's wording", () => {
   const roles = defaultAgentRoles();
   const prompt = "@红队 检查授权目标的攻击路径";
-  assert.equal(resolveAgentRole(prompt, roles, "blue-guardian").role.team, "red");
+  assert.equal(resolveAgentRole(prompt, roles, "blue-guardian").role.team, "purple");
   assert.equal(resolveAgentRole(prompt, roles, "blue-guardian").source, "mention");
   assert.equal(resolveAgentRole("@yellow 实现接口", roles).role.team, "yellow");
   assert.equal(resolveAgentRole("@PurpleTeam 检查检测覆盖", roles).role.team, "purple");
   assert.equal(resolveAgentRole("@red-team 检查授权目标", roles).source, "mention");
-  assert.equal(resolveAgentRole("查看服务日志", roles).role.id, "blue-logs");
+  assert.equal(resolveAgentRole("查看服务日志", roles).role.id, "blue-guardian");
   assert.equal(resolveAgentRole("开发代码实现接口", roles).role.id, "yellow-engineering");
-  assert.equal(resolveAgentRole("制定授权范围与停止条件", roles).role.team, "white");
-  assert.equal(resolveAgentRole("完善日志设计和可观测性", roles).role.team, "green");
+  assert.equal(resolveAgentRole("制定授权范围与停止条件", roles).role.team, "purple");
+  assert.equal(resolveAgentRole("完善日志设计和可观测性", roles).role.team, "blue");
   assert.equal(resolveAgentRole("复测红蓝检测覆盖", roles).role.team, "purple");
-  assert.equal(resolveAgentRole("制定安全编码与漏洞修复方案", roles).role.team, "orange");
+  assert.equal(resolveAgentRole("制定安全编码与漏洞修复方案", roles).role.team, "yellow");
   assert.equal(resolveAgentRole("任意任务", roles, "green-response").source, "selected");
   assert.equal(prompt, "@红队 检查授权目标的攻击路径");
 });

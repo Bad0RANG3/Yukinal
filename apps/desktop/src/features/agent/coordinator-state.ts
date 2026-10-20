@@ -1,6 +1,6 @@
 import type { AgentTeamTask, AgentCoordinationConfig, AiProviderConfig, Server } from "@yukinal/shared";
 import { create } from "zustand";
-import { roleBinding, rolePersona, type AgentRole } from "../agent-nist/agent-nist.js";
+import { currentAgentRoleId, roleBinding, rolePersona, type AgentRole } from "../agent-nist/agent-nist.js";
 import { resolveMentionedServer, type MentionCandidate } from "./composer-triggers.js";
 import { useTeamRuntimeStore, type TeamStage } from "../agent-nist/team-runtime-store.js";
 import type { Entry } from "./transcript.js";
@@ -57,6 +57,7 @@ export function coordinatorScope(prompt: string, candidates: readonly MentionCan
 
 /** Explicitly broken bindings are omitted; unbound roles inherit the coordinator model. */
 export function coordinatorConfig(roles: readonly AgentRole[], providers: readonly AiProviderConfig[], servers: readonly Server[], preferredRoleId: string | null): AgentCoordinationConfig {
+  preferredRoleId = currentAgentRoleId(preferredRoleId ?? "");
   const available = roles.flatMap((role): AgentCoordinationConfig["roles"] => {
     const binding = roleBinding(role, providers);
     if (role.providerId && binding.reason) return [];

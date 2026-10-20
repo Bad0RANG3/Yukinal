@@ -26,6 +26,8 @@ import { parseMarkdown, type Block, type ColumnAlign, type Inline } from "../lib
 import { KeywordText } from "./KeywordText.js";
 import { CopyButton } from "./CopyButton.js";
 import { MarkdownWidgetBlock } from "./MarkdownWidgetBlock.js";
+import { MarkdownVisualBlock } from "./MarkdownVisualBlock.js";
+import { VISUAL_LANGUAGE } from "../lib/visual-document.js";
 import { CONVERSATION_WIDGET_LANGUAGE } from "../lib/conversation-widgets.js";
 
 const HEADING_TAG = { 1: "h1", 2: "h2", 3: "h3", 4: "h4", 5: "h5", 6: "h6" } as const;
@@ -151,6 +153,7 @@ function BlockView({ block, headingIds, streaming = false }: { block: Block; hea
         </p>
       );
     case "code":
+      if (block.language?.toLowerCase() === VISUAL_LANGUAGE) return <MarkdownVisualBlock source={block.copyText ?? block.text} streaming={streaming} />;
       return block.language?.toLowerCase() === CONVERSATION_WIDGET_LANGUAGE
         ? <MarkdownWidgetBlock source={block.copyText ?? block.text} streaming={streaming} />
         : <MarkdownCodeBlock text={block.text} copyText={block.copyText ?? block.text} language={block.language} />;

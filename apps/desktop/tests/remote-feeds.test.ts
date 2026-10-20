@@ -28,6 +28,12 @@ test("hidden log and service pages issue no IPC or polling", async () => {
   } finally { stops.forEach((stop) => stop()); client.clear(); removeHost(); }
 });
 
+test("visible data feeds update independently of the 30 second AI clock", () => {
+  assert.equal(serverLogsQueryOptions("srv_feed").refetchInterval, 3_000);
+  assert.equal(serverServicesQueryOptions("srv_feed").refetchInterval, 10_000);
+  assert.equal(serverLogsQueryOptions("srv_feed", false).refetchInterval, false);
+});
+
 test("visible copies and repeated refresh share one pending native request", async () => {
   const client = new QueryClient();
   let calls = 0;

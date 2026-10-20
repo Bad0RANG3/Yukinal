@@ -42,7 +42,8 @@ import {
   appendToolCall,
   settleToolResult,
   targetLabel,
-  toolResultSummary,
+  toolPurpose,
+  toolOutcomeFromEvent,
   type Entry,
   type ReplyIdentity,
 } from "./transcript.js";
@@ -271,6 +272,7 @@ export function useAgentRun(options: {
         appendToolCall(current, {
           callId: event.callId,
           toolName: event.toolName,
+          purpose: toolPurpose(event.input),
           target: targetLabel(event.target),
           riskLevel: event.riskLevel,
           decision: event.decision,
@@ -290,16 +292,13 @@ export function useAgentRun(options: {
           {
             callId: event.callId,
             toolName: event.toolName,
+          purpose: toolPurpose(event.input),
             target: targetLabel(event.target),
             riskLevel: event.riskLevel,
             decision: event.decision,
             approvedBy: event.approvedBy,
           },
-          {
-            status: event.status,
-            durationMs: event.durationMs,
-            summary: toolResultSummary(event.toolName, event.outputSummary),
-          },
+          toolOutcomeFromEvent(event),
         ),
       );
     });

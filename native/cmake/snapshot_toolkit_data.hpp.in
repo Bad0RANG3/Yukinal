@@ -1,0 +1,4 @@
+#pragma once
+namespace yukinal::ssh_service {
+inline constexpr char kSnapshotToolkitCatalog[] = R"YK_CATALOG(@YUKINAL_SNAPSHOT_TOOLKIT_CATALOG@)YK_CATALOG";
+}

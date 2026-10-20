@@ -43,8 +43,9 @@ test("ordinary and native approvals share the complete real input review before 
   const native = renderToStaticMarkup(<NativeTaskApprovalCards snapshot={snapshot} scope={{ taskId: "task_fixture" }} />);
   assert.equal(ordinary, shared);
   assert.ok(native.includes(shared));
-  assert.equal((native.match(/approval-input-json/g) ?? []).length, 1);
-  const exactInput = renderToStaticMarkup(<pre className="agent-entry-body approval-input-json"><code>{JSON.stringify(ticket.input, null, 2)}</code></pre>);
+  assert.equal((native.match(/class="approval-card /g) ?? []).length, 1);
+  assert.equal((native.match(/approval-input-json/g) ?? []).length, 2, "readable command and full parameter review");
+  const exactInput = renderToStaticMarkup(<pre className="approval-input-json">{JSON.stringify(ticket.input, null, 2)}</pre>);
   assert.ok(shared.includes(exactInput));
   assert.ok(shared.includes(ticket.factsSummary[0]!));
   assert.ok(shared.indexOf("approval-input-json") < shared.indexOf("approval-actions"));
@@ -66,7 +67,7 @@ test("busy and resolved approvals remain driven by the shared caller state", () 
   const pending = renderToStaticMarkup(<ApprovalCard approval={ticket} onApproval={noop} busy />);
   assert.match(pending, /aria-busy="true"/);
   assert.equal((pending.match(/disabled=""/g) ?? []).length, 2);
-  assert.match(pending, /正在提交审批决定/);
+  assert.match(pending, /正在提交…/);
   assert.doesNotMatch(pending, /已批准/);
   const resolved = renderToStaticMarkup(<ApprovalCard approval={ticket} onApproval={noop} busy={false} status="宿主确认已拒绝" />);
   assert.match(resolved, /宿主确认已拒绝/);

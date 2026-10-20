@@ -12,7 +12,7 @@ import { TeamFeedbackPreview } from "./TeamActivity.js";
 import { TEAM_WORK } from "./team-operations.js";
 import { useTeamRuntimeStore, TEAM_STAGE_LABEL, teamRunActive } from "./team-runtime-store.js";
 import {
-  AGENT_NIST_STORAGE_KEY, defaultAgentRoles, draftProtection, handoffAgentRole,
+  AGENT_NIST_STORAGE_KEY, currentAgentRoleId, defaultAgentRoles, draftProtection, handoffAgentRole,
   loadAgentRoles, roleModelChoices, type AgentRole,
 } from "./agent-nist.js";
 import {
@@ -32,6 +32,7 @@ export function AgentNistPane({ onUseAgent }: { onUseAgent?: () => void }) {
   const providers = useProviders();
   const servers = useServers({ enabled: false });
   const runs = useTeamRuntimeStore((state) => state.runs);
+  const watchUpdates = useTeamRuntimeStore((state) => state.watchUpdates);
   const view = useTeamRuntimeStore((state) => state.panelView);
   const setView = useTeamRuntimeStore((state) => state.setPanelView);
   const selectedRoleId = useWorkspaceStore((state) => state.agentRoleId);
@@ -56,7 +57,7 @@ export function AgentNistPane({ onUseAgent }: { onUseAgent?: () => void }) {
   const protection = draftProtection({ agentDraft, agentAttachments, agentBusy, agentSessionArchived });
   const queryBlock = providers.isLoading ? "正在读取 AI 连接。" : providers.isError ? "请先重试读取 AI 连接。" : null;
   const activeRuns = [...runs].reverse().filter((run) => teamRunActive(run) && (!selectedServerId || run.serverId === selectedServerId));
-  const selectedRole = config.roles.find((role) => role.id === selectedRoleId);
+  const selectedRole = config.roles.find((role) => role.id === currentAgentRoleId(selectedRoleId ?? ""));
   const coordinatorModel = teamModelBinding({ providerId: null, model: null }, availableProviders, conversation);
   const common = commonModelBinding(config.roles);
   const draftBinding = modelDraft && teamModelBinding(modelDraft, availableProviders, conversation);
@@ -113,7 +114,7 @@ export function AgentNistPane({ onUseAgent }: { onUseAgent?: () => void }) {
       <div><h2 id={`${instanceId}-title`}>团队</h2></div>
       <button type="button" className="agent-nist-text-action" onClick={() => setMemoryOpen(true)}><Icon name="archive" size="sm" />记忆库</button>
     </header>
-    <div className="team-workbench-tabs" role="group" aria-label="团队工作台视图">{([{ id: "teams", label: "能力" }, { id: "watch", label: "值守" }, { id: "config", label: "配置" }] as const).map((tab) => <button type="button" key={tab.id} aria-pressed={view === tab.id} onClick={() => setView(tab.id)}>{tab.label}</button>)}</div>
+    <div className="team-workbench-tabs" role="group" aria-label="团队工作台视图">{([{ id: "teams", label: "能力" }, { id: "watch", label: "值守" }, { id: "config", label: "配置" }] as const).map((tab) => <button type="button" key={tab.id} aria-pressed={view === tab.id} onClick={() => setView(tab.id)}>{tab.label}{tab.id === "watch" && watchUpdates.some((update) => !selectedServerId || update.serverId === selectedServerId) ? <span className="team-watch-unread" aria-label="有最新状态" title="值守有最新状态">新</span> : null}</button>)}</div>
     <div className="team-current-scope"><Icon name={selectedServerId ? "servers" : "projects"} size="xs" /><span title={selectedServerId ? servers.data?.find((server) => server.id === selectedServerId)?.name : undefined}>{selectedServerId ? servers.data?.find((server) => server.id === selectedServerId)?.name ?? selectedServerId : "全局工作区"}</span></div>
     {config.notice ? <p className="agent-nist-notice is-error" role="alert">{config.notice}</p> : null}
     {providers.isLoading ? <p className="agent-nist-notice" role="status">正在读取 AI 连接…</p> : null}

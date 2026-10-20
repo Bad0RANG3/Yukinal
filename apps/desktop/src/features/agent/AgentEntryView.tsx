@@ -26,22 +26,27 @@ import { conversationReplyCopyText } from "../../lib/conversation-reply-copy.js"
 import { approvalSourceLabel, decisionLabel, resultLabel, riskLabel } from "../../lib/labels.js";
 import { imageAttachmentUrl } from "./image-attachments.js";
 import { ApprovalCard } from "./ApprovalCard.js";
-import type { Entry } from "./transcript.js";
+import { agentFailureLabel, type Entry } from "./transcript.js";
 
 export const AgentEntryView = memo(function AgentEntryView({
   entry,
+  turnAnchor,
   onApproval,
   approvalBusy,
   approvalStatus,
   streaming = false,
+  intermediate = false,
   isNewEntry = false,
 }: {
   entry: Entry;
+  turnAnchor?: string;
   onApproval: (approval: ApprovalRequest, decision: ApprovalDecision) => Promise<void>;
   approvalBusy: boolean;
   approvalStatus?: string;
   /** True while this row is the one the model is still writing into. */
   streaming?: boolean;
+  /** Public progress within a still unfinished turn, separate from private reasoning. */
+  intermediate?: boolean;
   /** A newly appended live row; history loading and approvals never animate. */
   isNewEntry?: boolean;
 }) {
@@ -52,7 +57,7 @@ export const AgentEntryView = memo(function AgentEntryView({
        得到的就是要说的话本身，而不是「你 / Agent」这些框。 */
     case "user":
       return (
-        <div className={`agent-entry agent-entry-user${newEntryClass}`}>
+        <div id={turnAnchor} data-conversation-turn={turnAnchor ? "" : undefined} className={`agent-entry agent-entry-user${newEntryClass}`}>
           <span className="entry-label">你</span>
           <div className="agent-entry-body">
             {entry.attachments?.some((attachment) => attachment.type === "image") ? (
@@ -116,17 +121,18 @@ export const AgentEntryView = memo(function AgentEntryView({
       );
     case "assistant":
       return (
-        <div className={`agent-entry agent-entry-assistant${streaming ? " agent-entry-streaming" : ""}${newEntryClass}`}>
-          <span className="entry-label">回复</span>
+        <div className={`agent-entry agent-entry-assistant${intermediate ? " agent-entry-progress" : ""}${streaming ? " agent-entry-streaming" : ""}${newEntryClass}`} data-reply-phase={intermediate ? "progress" : undefined}>
+          <span className="entry-label">{intermediate ? "进展" : "回复"}</span>
           <div className="agent-reply-meta">
             <strong>{entry.participant?.label ?? "Agent"}</strong>
+            {intermediate ? <span className="agent-progress-label">进展</span> : null}
             {entry.participant?.kind === "subagent" ? <span>子 Agent</span> : null}
             {entry.model ? <span title={entry.model}>{entry.model}</span> : null}
           </div>
           <MarkdownText text={entry.text || "…"} className="agent-entry-body agent-markdown" streaming={streaming} />
           {streaming ? <span className="agent-stream-status" role="status"><span className="agent-stream-caret" aria-hidden="true" />正在输出</span> : null}
           {entry.text ? <div className="agent-reply-actions">
-            <CopyButton text={conversationReplyCopyText(entry.text)} label={streaming ? "复制当前内容" : "复制回答"} ariaLabel={streaming ? "复制当前已生成内容" : "复制完整回答"} className="agent-entry-copy" />
+            <CopyButton text={conversationReplyCopyText(entry.text)} label={streaming ? "复制当前内容" : intermediate ? "复制进展" : "复制回答"} ariaLabel={streaming ? "复制当前已生成内容" : intermediate ? "复制完整进展" : "复制完整回答"} className="agent-entry-copy" />
           </div> : null}
         </div>
       );
@@ -153,7 +159,7 @@ export const AgentEntryView = memo(function AgentEntryView({
         </div>
       );
     case "error":
-      return <div className={`agent-error${newEntryClass}`}>{entry.text}</div>;
+      return <div className={`agent-error${newEntryClass}`} title={entry.text}>{agentFailureLabel(entry.text)}</div>;
     case "approval":
       return <ApprovalCard approval={entry.approval} onApproval={onApproval} busy={approvalBusy} status={approvalStatus} />;
   }
@@ -165,20 +171,54 @@ function ToolCard({ entry, isNewEntry = false }: { entry: Extract<Entry, { kind:
   return (
     <details className={`tool-card tool-card-${result ? result.status : "running"}${isNewEntry ? " is-new-entry" : ""}`}>
       <summary className="tool-card-heading">
-        <span className="tool-card-label">工具</span>
-        <span className="tool-name"><KeywordText text={entry.toolName} /></span>
+        <Icon name={result?.status === "failed" ? "warning" : "terminal"} size="xs" />
+        <span className="tool-name" title={entry.toolName}>{entry.purpose ?? toolActionLabel(entry.toolName)}</span>
         <span className="tool-target-preview" title={entry.target}>{entry.target}</span>
-        <span className={`tool-status tool-status-${result ? result.status : "running"}`}>
-          {result ? `${resultLabel(result.status)} · ${result.durationMs}ms` : "执行中…"}
+        <span className={`tool-status tool-status-${result ? result.status : "running"}`} title={result?.status === "failed" ? result.error ?? result.summary : undefined}>
+          {result ? resultLabel(result.status) : "执行中…"}
         </span>
       </summary>
+      <div className="tool-card-disclosure">
+      <code className="tool-call-name">{entry.toolName}</code>
       <div className="tool-card-meta">
         <code><KeywordText text={entry.target} /></code>
         <span className={`risk-badge risk-${entry.riskLevel}`}>风险：{riskLabel(entry.riskLevel)}</span>
         <span className={`decision-badge decision-${entry.decision}`}>{decisionLabel(entry.decision)}</span>
         {entry.approvedBy ? <span className="decision-badge decision-source">{approvalSourceLabel(entry.approvedBy)}</span> : null}
+        {result ? <span className="tool-duration">{result.durationMs} ms</span> : null}
       </div>
-      {result ? <code className="tool-result-copy"><KeywordText text={result.summary} /></code> : null}
+      {result?.status === "failed" ? <p className="tool-failure-reason">{result.error || result.summary || "工具执行失败"}</p> : null}
+      {result ? <ToolResultBody toolName={entry.toolName} summary={result.summary} failed={result.status === "failed"} /> : null}
+      {result?.errorCode ? <code className="tool-error-code">{result.errorCode}</code> : null}
+      </div>
     </details>
   );
 }
+
+function ToolResultBody({ toolName, summary, failed }: { toolName: string; summary: string; failed: boolean }) {
+  let output: { stdout: string; stderr?: string; exitCode?: number; stdoutTruncated?: boolean; stderrTruncated?: boolean } | undefined;
+  if (toolName === "server.exec") {
+    try {
+      const parsed: unknown = JSON.parse(summary);
+      if (parsed && typeof parsed === "object" && "stdout" in parsed && typeof parsed.stdout === "string") {
+        output = parsed as typeof output;
+      }
+    } catch { /* Partial summaries and unknown formats retain the original text. */ }
+  }
+  if (!output) return failed ? null : <code className="tool-result-copy"><KeywordText text={summary} /></code>;
+  return <div className="tool-command-output">
+    {typeof output.exitCode === "number" ? <p className="tool-output-label">退出状态 {output.exitCode}</p> : null}
+    {output.stdout ? <pre className="tool-result-copy">{output.stdout}</pre> : null}
+    {typeof output.stderr === "string" && output.stderr ? <><p className="tool-output-label">错误输出</p><pre className="tool-result-copy">{output.stderr}</pre></> : null}
+    {output.stdoutTruncated === true || output.stderrTruncated === true ? <p className="tool-output-label">输出已截断</p> : null}
+    <details className="tool-raw-output"><summary>原始摘要</summary><code className="tool-result-copy">{summary}</code></details>
+  </div>;
+}
+
+const TOOL_ACTION_LABELS: Record<string, string> = {
+  "server.exec": "执行服务器操作", "filesystem.read": "读取文件", "filesystem.write": "写入文件", "filesystem.edit": "编辑文件", "filesystem.list": "查看目录", "filesystem.backup": "备份文件",
+  "package.inspect": "检查软件包", "package.install": "安装软件包", "server.info": "读取服务器信息", "server.services": "检查服务", "server.logs": "读取日志",
+  "ssh.disk_usage": "读取磁盘用量", "ssh.exec": "运行终端命令", "server.processes": "检查进程",
+  "server.containers": "检查容器", "server.files": "读取文件",
+};
+export function toolActionLabel(name: string): string { return TOOL_ACTION_LABELS[name] ?? name; }

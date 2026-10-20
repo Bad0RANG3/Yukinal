@@ -80,7 +80,7 @@ class Turn:
 
     @property
     def prompt(self):
-        return encoded({"control": self.identifier, "scope": self.scope})
+        return encoded({"instruction": "Coordinate independent workstreams", "control": self.identifier, "scope": self.scope})
 
 
 class Oracle:
@@ -176,7 +176,7 @@ class ScriptedModel:
         self.tools, self.cursor, self.pending = set(), 0, None
 
     def bind_tools(self, tools, *, parallel_tool_calls):
-        self.oracle.check(parallel_tool_calls is False, "Provider tool parallelism stays disabled")
+        self.oracle.check(parallel_tool_calls is True, "Provider can propose batches; only safe reads may overlap")
         self.tools = {item["function"]["name"] for item in tools}
         return self
 
@@ -212,14 +212,19 @@ class ScriptedModel:
             turn = self.oracle.turns[prompt]
             self.oracle.check(self.route == turn.route, f"Foreground model route changed in {turn.identifier}")
             for value in humans:
+                if value.startswith("本轮状态快照，仅供参考"):
+                    snapshot = json.loads(value.rsplit("\n", 1)[-1])
+                    self.oracle.check(isinstance(snapshot.get("tasks"), list) and isinstance(snapshot.get("roles"), list),
+                                      "Coordinator status is structured reference data outside the stable system prefix")
+                    continue
                 if value.startswith("Historical incomplete turn ("):
                     # Failed calls intentionally replay as non-authorizing
                     # references. Validate their original public turn identity.
                     header, source = value.split("\n", 1)
                     self.oracle.check("no approval is granted by this record" in header,
                                       "An incomplete historical call cannot grant approval")
-                    self.oracle.check(source.startswith("User: "), "Historical references retain their public user source")
-                    value = source.removeprefix("User: ").split("\n", 1)[0]
+                    self.oracle.check(source.startswith(("User: ", "User goal: ")), "Historical references retain their public user source")
+                    value = source.removeprefix("User: ").removeprefix("User goal: ").split("\n", 1)[0]
                 public = json.loads(value)
                 self.oracle.check(public.get("scope") == turn.scope and "control" in public,
                                   "Foreground history must not contain another session or worker's brief")

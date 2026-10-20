@@ -12,7 +12,7 @@
 [English](README.md) · [**中文**](README.zh-CN.md)
 
 [![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](./LICENSE)
-[![Version](https://img.shields.io/badge/interface-2.0.0-informational.svg)](./packages/shared/src/version.ts)
+[![Version](https://img.shields.io/badge/interface-2.0.0--preview.2-informational.svg)](./packages/shared/src/version.ts)
 [![Platform](https://img.shields.io/badge/platform-Windows%20%7C%20macOS%20%7C%20Linux-6f42c1.svg)](#构建与运行)
 [![Python](https://img.shields.io/badge/python-3.11%2B-3776ab.svg)](./agent/README.md)
 [![Node](https://img.shields.io/badge/node-%3E%3D24-339933.svg)](package.json)
@@ -23,11 +23,12 @@
 ---
 
 > **状态：** Yukinal `2.0.0` 于 2026-10-20 发布，包含 Windows NSIS、macOS DMG
-> 和 Debian Linux 安装包。已发布版本存在首次启动时读取模型配置失败的问题；
-> 修复在 [PR #11](https://github.com/Bad0RANG3/Yukinal/pull/11) 中，尚未进入公开的
-> 2.0.0 安装包。真实 Provider/MCP/SSH 任务、三平台安装版
-> GUI 与文件传输验收、代码签名和公证仍待完成。详见
-> [重写状态](./docs/rewrite-cpp-python.md)与[交付与发布](./docs/release.md)。
+> 和 Debian Linux 安装包。`2.0.0-preview.2` 是 C++ WebView 宿主、结构化 SSH 服务、
+> Python Agent 与 React 界面的当前预览。已发布的稳定安装包存在首次启动时读取
+> Provider 配置失败的问题；[PR #11 的修复](https://github.com/Bad0RANG3/Yukinal/pull/11)
+> 已包含在本预览中。预览安装包正在验收；真实 Provider/MCP/SSH 任务、安装版 GUI
+> 与文件传输、代码签名和公证仍是发布限制。详见[重写状态](./docs/rewrite-cpp-python.md)
+> 与[交付与发布](./docs/release.md)。
 
 ## 目录
 

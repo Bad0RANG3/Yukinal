@@ -41,6 +41,29 @@ const ApprovalRequestSchema = z.strictObject({
   }
 });
 
+const TokenCountSchema = z.number().int().nonnegative().max(Number.MAX_SAFE_INTEGER);
+const AgentTokenUsageSchema = z.strictObject({
+  inputTokens: TokenCountSchema,
+  outputTokens: TokenCountSchema,
+  reportedRequests: TokenCountSchema.optional(),
+  unreportedRequests: TokenCountSchema.optional(),
+  reasoningTokens: TokenCountSchema.optional(),
+  reasoningReportedRequests: TokenCountSchema.optional(),
+  cacheReadTokens: TokenCountSchema.optional(),
+  cacheMissTokens: TokenCountSchema.optional(),
+  cacheReportedRequests: TokenCountSchema.optional(),
+  lastRequest: z.strictObject({
+    durationMs: z.number().finite().nonnegative(),
+    firstChunkMs: z.number().finite().nonnegative().optional(),
+    firstAnswerMs: z.number().finite().nonnegative().optional(),
+    model: z.string().max(256).optional(),
+    systemFingerprint: z.string().max(256).optional(),
+    finishReason: z.string().max(256).optional(),
+    effort: z.enum(["none", "low", "high", "max"]).optional(),
+    routing: z.enum(["auto", "manual", "provider"]).optional(),
+  }).optional(),
+});
+
 export const AgentTeamTaskSchema = z.strictObject({
   id: RunIdSchema, runId: RunIdSchema, sessionId: RunIdSchema, parentRunId: RunIdSchema,
   roleId: RunIdSchema,
@@ -52,18 +75,8 @@ export const AgentTeamTaskSchema = z.strictObject({
   createdAt: TimestampSchema, updatedAt: TimestampSchema,
   revision: z.number().int().nonnegative(), lastTool: z.string().max(256).optional(),
   result: z.string().max(12000).optional(), error: z.string().max(4000).optional(),
-  usage: z.strictObject({ inputTokens: z.number().int().nonnegative(), outputTokens: z.number().int().nonnegative(), reportedRequests: z.number().int().nonnegative().optional(), unreportedRequests: z.number().int().nonnegative().optional() }).optional(),
+  usage: AgentTokenUsageSchema.optional(),
   approval: ApprovalRequestSchema.optional(),
-});
-
-const TokenCountSchema = z.number().int().nonnegative().max(Number.MAX_SAFE_INTEGER);
-
-/** Cumulative totals for one run, not just the latest Provider turn. */
-const AgentTokenUsageSchema = z.strictObject({
-  inputTokens: TokenCountSchema,
-  outputTokens: TokenCountSchema,
-  reportedRequests: TokenCountSchema.optional(),
-  unreportedRequests: TokenCountSchema.optional(),
 });
 
 /**

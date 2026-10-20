@@ -5,8 +5,9 @@ import { resolveAgentModels } from "../agent/useAgentModels.js";
 import { useWorkspaceStore, type WorkspaceState } from "../../stores/workspace-store.js";
 
 export const AGENT_NIST_STORAGE_KEY = "yukinal.agent-nist.v1";
-const ROLE_CATALOG_VERSION = 2;
-export const AGENT_TEAMS = [
+const ROLE_CATALOG_VERSION = 3;
+/** Retained for persisted task labels and older @ mentions. */
+export const HISTORICAL_AGENT_TEAMS = [
   { id: "blue", label: "蓝队", englishName: "Blue Team", description: "防守与响应", purpose: "系统加固、日志监测、威胁狩猎与入侵事件处置，维护日常运行安全。" },
   { id: "red", label: "红队", englishName: "Red Team", description: "授权攻击测试", purpose: "在授权范围内模拟攻击者，寻找可利用的薄弱点，验证防线与攻击目标。" },
   { id: "purple", label: "紫队", englishName: "Purple Team", description: "红蓝协作", purpose: "把红队方法转化为蓝队的检测与防护能力，再复测效果；可作为协作方式参与任务。" },
@@ -16,7 +17,24 @@ export const AGENT_TEAMS = [
   { id: "green", label: "绿队", englishName: "Green Team", description: "蓝队与建设者协作", purpose: "防守人员与开发者协作，完善日志和安全设计，让产品更易监控、检测、响应与取证。" },
 ] as const;
 
-export type AgentTeam = (typeof AGENT_TEAMS)[number]["id"];
+export type AgentTeam = (typeof HISTORICAL_AGENT_TEAMS)[number]["id"];
+export const AGENT_TEAMS = [
+  { id: "yellow", label: "执行", englishName: "Builder", description: "部署、开发与修复", purpose: "设计方案、实施变更并完成交付。" },
+  { id: "blue", label: "运维", englishName: "Operations", description: "监测、排障与响应", purpose: "检查资源、服务和日志，处理运行故障。" },
+  { id: "purple", label: "验证", englishName: "Reviewer", description: "测试、审查与验收", purpose: "核对范围、风险和结果，验证变更效果。" },
+] as const;
+
+const ROLE_ALIASES: Readonly<Record<string, string>> = {
+  "blue-logs": "blue-guardian", "green-observability": "blue-guardian", "green-response": "blue-guardian",
+  "yellow-architecture": "yellow-engineering", "orange-incident": "yellow-engineering", "orange-retrospective": "yellow-engineering",
+  "red-review": "purple-retest", "red-validation": "purple-retest", "purple-detection": "purple-retest",
+  "white-scope": "purple-retest", "white-control": "purple-retest",
+};
+export function currentAgentRoleId(id: string): string { return ROLE_ALIASES[id] ?? id; }
+export function agentTeamLabel(team: string): string | undefined {
+  return AGENT_TEAMS.find((item) => item.id === team)?.label
+    ?? HISTORICAL_AGENT_TEAMS.find((item) => item.id === team)?.label;
+}
 export interface AgentRole {
   id: string;
   team: AgentTeam;
@@ -37,7 +55,7 @@ const LEGACY_ROLE_DEFAULTS = [
   { id: "orange-retrospective", team: "orange", name: "复盘整理", responsibility: "汇总故障和处置记录，整理事实时间线、已确认原因、恢复过程与遗留风险。将改进项写成可验证的行动建议，对证据不足的部分明确标注待确认。", providerId: null, model: null },
 ];
 
-const DEFAULT_ROLES: readonly AgentRole[] = [
+const PREVIOUS_ROLES: readonly AgentRole[] = [
   { id: "blue-guardian", team: "blue", name: "防守与响应", responsibility: "检查服务器、服务、权限与安全配置，提出系统加固建议。结合日志和运行证据开展威胁狩猎与入侵事件响应，区分事实、假设和待确认影响；实际变更遵循当前批准要求。", providerId: null, model: null },
   { id: "blue-logs", team: "blue", name: "日志分析", responsibility: "围绕故障时间段关联日志、错误与资源变化，定位异常链路。引用可复核的证据，列出可能原因及下一步验证方式，不把相关性直接当作根因。", providerId: null, model: null },
   { id: "red-review", team: "red", name: "授权攻击测试", responsibility: "先确认目标、授权范围、攻击目标与停止条件，再模拟攻击者分析可利用的薄弱点。仅在明确授权范围内验证攻击路径与防线，记录证据和影响；角色身份不扩大工具权限或自动批准任何操作。", providerId: null, model: null },
@@ -52,6 +70,12 @@ const DEFAULT_ROLES: readonly AgentRole[] = [
   { id: "orange-retrospective", team: "orange", name: "安全开发改进", responsibility: "从已确认的攻击经验和漏洞成因提炼安全编码、代码审查与开发流程改进。给出具体可验证的规则和测试建议，说明适用边界，帮助避免同类问题再次出现。", providerId: null, model: null },
   { id: "green-observability", team: "green", name: "可观测性共建", responsibility: "协调防守人员与开发者，完善日志、指标、告警与安全事件设计。明确检测所需字段、关联标识、敏感信息处理及验证方式，让产品更易监控与检测。", providerId: null, model: null },
   { id: "green-response", team: "green", name: "响应与取证设计", responsibility: "把防守与事件响应需求转化为产品和运维能力，完善审计轨迹、证据留存、隔离恢复与故障交接设计。说明采集范围、权限与保留策略，并验证响应和取证流程。", providerId: null, model: null },
+];
+
+const DEFAULT_ROLES: readonly AgentRole[] = [
+  { id: "blue-guardian", team: "blue", name: "运维", responsibility: "检查资源、服务、日志、权限与安全配置，负责监测、排障和事件响应。先收集证据，再定位原因并处理已授权的问题；完善监测与告警，验证恢复结果。", providerId: null, model: null },
+  { id: "yellow-engineering", team: "yellow", name: "执行", responsibility: "负责方案设计、环境部署、开发实现和问题修复。检查前置条件，安装缺少且任务所需的依赖，执行已授权变更，持续推进到部署、功能验证和交付完成；保留回滚路径。", providerId: null, model: null },
+  { id: "purple-retest", team: "purple", name: "验证", responsibility: "负责测试、代码与安全审查、风险核对和最终验收。依据目标检查功能、部署与恢复结果，主动寻找遗漏和反例；安全测试限定在已授权范围，记录证据、未通过项与复测结果。", providerId: null, model: null },
 ];
 
 export function defaultAgentRoles(): AgentRole[] {
@@ -70,14 +94,14 @@ function text(value: unknown, max: number): string | null {
 export function parseAgentRoles(value: unknown): AgentRole[] {
   const saved = record(value);
   if (saved?.version !== 1 || !Array.isArray(saved.roles)) throw new Error("本机角色配置版本或格式无法识别。");
-  if (saved.catalogVersion !== undefined && saved.catalogVersion !== ROLE_CATALOG_VERSION) throw new Error("本机角色目录版本无法识别。");
-  const legacy = saved.catalogVersion === undefined;
+  if (saved.catalogVersion !== undefined && saved.catalogVersion !== 2 && saved.catalogVersion !== ROLE_CATALOG_VERSION) throw new Error("本机角色目录版本无法识别。");
   const roles = saved.roles.map(record);
   return DEFAULT_ROLES.map((base) => {
     const role = roles.find((candidate) => candidate?.id === base.id);
     if (!role) return { ...base };
     const providerId = text(role.providerId, 512);
-    const previous = legacy ? LEGACY_ROLE_DEFAULTS.find((candidate) => candidate.id === base.id) : undefined;
+    const previous = saved.catalogVersion === undefined ? LEGACY_ROLE_DEFAULTS.find((candidate) => candidate.id === base.id)
+      : saved.catalogVersion === 2 ? PREVIOUS_ROLES.find((candidate) => candidate.id === base.id) : undefined;
     const name = text(role.name, 60);
     const responsibility = text(role.responsibility, 4000);
     return {
@@ -136,8 +160,8 @@ export function draftProtection(state: Pick<WorkspaceState, "agentDraft" | "agen
 }
 
 export function rolePersona(role: AgentRole): AgentPersona {
-  const team = AGENT_TEAMS.find((candidate) => candidate.id === role.team)?.label ?? "运维队伍";
-  const label = `${team} · ${role.name.trim()}`;
+  const team = agentTeamLabel(role.team) ?? "团队";
+  const label = team === role.name.trim() ? team : `${team} · ${role.name.trim()}`;
   return { id: role.id, label, systemPrompt: `你是「${label}」。\n${role.responsibility.trim()}\n基于当前任务和共享对话中的证据协作。区分事实、假设和待验证项；没有基线、时间窗或阈值时，不凭单次读数判断系统整体正常或异常。展示简短依据、下一步行动与工具结果。角色职责不改变当前运行模式、工具权限或批准要求。` };
 }
 
@@ -160,11 +184,11 @@ export function handoffAgentRole(role: AgentRole, providers: readonly AiProvider
 }
 
 const TEAM_ROUTES: ReadonlyArray<{ team: AgentTeam; pattern: RegExp }> = [
-  { team: "white", pattern: /授权范围|演习规则|停止条件|评分|裁判|scope|rules of engagement/gi },
+  { team: "purple", pattern: /授权范围|演习规则|停止条件|评分|裁判|测试|审查|验收|scope|rules of engagement|review|test/gi },
   { team: "purple", pattern: /红蓝|防护复测|检测覆盖|purple|retest/gi },
-  { team: "orange", pattern: /漏洞修复|安全编码|攻击成因|安全开发|orange/gi },
-  { team: "green", pattern: /可观测|日志设计|指标设计|审计设计|取证设计|告警设计|observability/gi },
-  { team: "red", pattern: /授权攻击|授权渗透|渗透测试|攻击验证|pentest|exploit validation|red team/gi },
+  { team: "yellow", pattern: /漏洞修复|安全编码|攻击成因|安全开发|orange/gi },
+  { team: "blue", pattern: /可观测|日志设计|指标设计|审计设计|取证设计|告警设计|observability/gi },
+  { team: "purple", pattern: /授权攻击|授权渗透|渗透测试|攻击验证|pentest|exploit validation|red team/gi },
   { team: "yellow", pattern: /部署|安装|环境搭建|配置环境|实现|开发|编码|架构|修复|接口|设计|deploy|install|setup|implement|code|architecture/gi },
   { team: "blue", pattern: /日志|故障|异常|排查|防守|加固|入侵|服务|响应|运维|logs|incident|defen/gi },
 ];
@@ -173,18 +197,21 @@ const TEAM_ROUTES: ReadonlyArray<{ team: AgentTeam; pattern: RegExp }> = [
 export function resolveAgentRole(prompt: string, roles: readonly AgentRole[], selectedRoleId: string | null = null): { role: AgentRole; source: "mention" | "selected" | "auto" } {
   const mentions = [...prompt.matchAll(/(?:^|\s)@([^\s，。,:：]+)/g)].map((match) => match[1]!.toLocaleLowerCase());
   for (const mention of mentions) {
-    const role = roles.find((candidate) => [candidate.id, candidate.name].some((value) => value.toLocaleLowerCase() === mention));
+    const role = roles.find((candidate) => [candidate.id, candidate.name].some((value) => value.toLocaleLowerCase() === mention)
+      || candidate.id === currentAgentRoleId(mention));
     if (role) return { role, source: "mention" };
-    const team = AGENT_TEAMS.find((candidate) => [candidate.id, candidate.label, `${candidate.id}-team`, candidate.englishName.replaceAll(" ", "")].some((value) => value.toLocaleLowerCase() === mention));
-    const teamRole = team && roles.find((candidate) => candidate.team === team.id);
+    const previous = PREVIOUS_ROLES.find((candidate) => candidate.name.toLocaleLowerCase() === mention);
+    const previousMatch = previous && roles.find((candidate) => candidate.id === currentAgentRoleId(previous.id));
+    if (previousMatch) return { role: previousMatch, source: "mention" };
+    const team = [...AGENT_TEAMS, ...HISTORICAL_AGENT_TEAMS].find((candidate) => [candidate.id, candidate.label, `${candidate.id}-team`, candidate.englishName.replaceAll(" ", "")].some((value) => value.toLocaleLowerCase() === mention));
+    const previousRole = team && PREVIOUS_ROLES.find((candidate) => candidate.team === team.id);
+    const teamRole = team && (roles.find((candidate) => candidate.team === team.id)
+      ?? roles.find((candidate) => candidate.id === currentAgentRoleId(previousRole?.id ?? "")));
     if (teamRole) return { role: teamRole, source: "mention" };
   }
-  const selected = roles.find((role) => role.id === selectedRoleId);
+  const selected = roles.find((role) => role.id === currentAgentRoleId(selectedRoleId ?? ""));
   if (selected) return { role: selected, source: "selected" };
   const ranked = TEAM_ROUTES.map((route) => ({ ...route, score: [...prompt.matchAll(route.pattern)].length })).sort((left, right) => right.score - left.score);
   const team = isWatchRequest(prompt) ? "blue" : ranked[0]?.score ? ranked[0].team : "blue";
-  const preferred = team === "blue" && /日志|logs/i.test(prompt) ? "blue-logs"
-    : team === "yellow" && /部署|安装|环境搭建|配置环境|实现|开发|编码|修复|deploy|install|setup|implement|code/i.test(prompt) ? "yellow-engineering"
-      : team === "white" && /评分|裁判/i.test(prompt) ? "white-control" : null;
-  return { role: roles.find((role) => role.id === preferred) ?? roles.find((role) => role.team === team) ?? roles[0] ?? defaultAgentRoles()[0]!, source: "auto" };
+  return { role: roles.find((role) => role.team === team) ?? roles[0] ?? defaultAgentRoles()[0]!, source: "auto" };
 }

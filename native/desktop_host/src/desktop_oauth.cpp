@@ -1603,7 +1603,8 @@ TokenBundle authorization_code_flow(FlowState& state, const OAuthConnectCallback
         response.status = error.empty() ? 200 : 400;
         response.set_content(error.empty() ? kCallbackSuccessHtml : kCallbackFailureHtml,
                              "text/html; charset=utf-8");
-        listener.server.stop();
+        // wait_for_callback owns shutdown after observing the slot. Concurrent
+        // Server::stop calls race its listening socket exchange in cpp-httplib.
       });
   listener.thread = std::thread([&listener] { listener.server.listen_after_bind(); });
 

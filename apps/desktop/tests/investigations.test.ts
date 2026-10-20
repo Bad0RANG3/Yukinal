@@ -160,7 +160,7 @@ test("schedule controls keep persisted intervals and expose localized policy lab
   assert.equal(scheduleIntervalLabel(300), "每 5 分钟");
   assert.equal(scheduleIntervalLabel(90), "每 90 秒");
   assert.equal(scheduleIntervalLabel(86_400), "每 1 天");
-  assert.deepEqual(scheduleIntervalOptions(300).map((option) => option.seconds), [60, 300, 900, 1_800, 3_600, 21_600, 86_400]);
+  assert.deepEqual(scheduleIntervalOptions(300).map((option) => option.seconds), [30, 60, 300, 900, 1_800, 3_600, 21_600, 86_400]);
   assert.equal(scheduleIntervalOptions(42)[0]?.label, "每 42 秒（自定义）");
   assert.equal(notificationPolicyLabel("on_change"), "仅有变化");
   assert.equal(scheduleStatusLabel("revoked"), "已撤销");

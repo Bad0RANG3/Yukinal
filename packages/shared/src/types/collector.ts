@@ -64,6 +64,28 @@ export interface CollectorSample {
   error?: string;
 }
 
+export interface GpuSample {
+  status: "available" | "unavailable" | "error";
+  message?: string;
+  devices: Array<{
+    index: number;
+    name: string;
+    usagePercent?: number;
+    memoryUsedBytes?: number;
+    memoryTotalBytes?: number;
+    temperatureCelsius?: number;
+  }>;
+}
+
+export interface SecuritySample {
+  checks: Array<{
+    id: string;
+    label: string;
+    status: "info" | "warning" | "unknown";
+    detail: string;
+  }>;
+}
+
 /** One row of the `snapshots` table. */
 export interface ServerSnapshot {
   id: string;
@@ -77,6 +99,9 @@ export interface ServerSnapshot {
   uptimeSeconds?: number;
   network?: NetworkInterfaceSample[];
   networkDetails?: NetworkDetails;
+  gpu?: GpuSample;
+  security?: SecuritySample;
+  toolkit?: { version: string; modules: string[] };
   docker?: { available: boolean; containers: ContainerInfo[] };
   capabilities: ServerCapabilities;
   /** Per-collector health so a failing collector degrades one card, not the page. */

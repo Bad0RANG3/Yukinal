@@ -12,7 +12,7 @@ controlled AI Agent with a hardened, structured SSH service.
 [**English**](README.md) · [中文](README.zh-CN.md)
 
 [![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](./LICENSE)
-[![Version](https://img.shields.io/badge/interface-2.0.0-informational.svg)](./packages/shared/src/version.ts)
+[![Version](https://img.shields.io/badge/interface-2.0.0--preview.2-informational.svg)](./packages/shared/src/version.ts)
 [![Platform](https://img.shields.io/badge/platform-Windows%20%7C%20macOS%20%7C%20Linux-6f42c1.svg)](#build-and-run)
 [![Python](https://img.shields.io/badge/python-3.11%2B-3776ab.svg)](./agent/README.md)
 [![Node](https://img.shields.io/badge/node-%3E%3D24-339933.svg)](package.json)
@@ -23,12 +23,13 @@ controlled AI Agent with a hardened, structured SSH service.
 ---
 
 > **Status:** Yukinal `2.0.0` was published on 2026-10-20 with Windows NSIS, macOS
-> DMG, and Debian Linux installers. The published build has a first-run provider
-> loading defect; [PR #11](https://github.com/Bad0RANG3/Yukinal/pull/11) contains
-> the fix. It is not in the public 2.0.0
-> installers. Real Provider/MCP/SSH tasks, installed GUI and file-transfer
-> acceptance across all platforms, code signing, and notarization remain pending.
-> See [rewrite status](./docs/rewrite-cpp-python.md) and
+> DMG, and Debian Linux installers. `2.0.0-preview.2` is the current preview of the
+> C++ WebView host, structured SSH service, Python Agent, and React interface. The
+> public stable installers have a first-run Provider loading defect; the [PR #11
+> fix](https://github.com/Bad0RANG3/Yukinal/pull/11) is included in this preview.
+> Preview installers are being validated. Real Provider/MCP/SSH tasks, installed
+> GUI and file-transfer acceptance, signing, and notarization remain release
+> limitations. See [rewrite status](./docs/rewrite-cpp-python.md) and
 > [release status](./docs/release.md).
 
 ## Contents
