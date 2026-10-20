@@ -896,12 +896,12 @@ test("session titles come from the prompt with leading markdown headings removed
   assert.equal(sessionTitleFromPrompt("x".repeat(80)).length, 48);
 });
 
-test("file bodies never reach the transcript, and other tool output is bounded", () => {
+test("file bodies never reach the transcript, and other tool output preserves the bounded server summary", () => {
   assert.equal(
     toolResultSummary("filesystem.read", "SECRET=1"),
     "文件内容已返回给 Agent（正文不在动态中保存）",
   );
-  assert.equal(toolResultSummary("docker.ps", "a".repeat(400)).length, 240);
+  assert.equal(toolResultSummary("docker.ps", "a".repeat(400)).length, 400);
 });
 
 test("tool targets prefer the server id and fall back to the host scope", () => {

@@ -1,8 +1,14 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { ServerSnapshotSchema } from "./collector.js";
+import { ContainerInfoSchema, ServerSnapshotSchema } from "./collector.js";
 
 const legacy = { id: "snap_test", serverId: "srv_test", collectedAt: "2026-10-17T00:00:00Z", health: "unknown", capabilities: {} };
+test("empty legacy container state is unknown without discarding its actual status", () => {
+  const container = { name: "web", image: "web:test", state: "", status: "Up 2 minutes", restartCount: 0 };
+  assert.deepEqual(ContainerInfoSchema.parse(container), { ...container, state: "unknown" });
+  assert.equal(ContainerInfoSchema.parse({ ...container, state: "running" }).state, "running");
+  assert.equal(ContainerInfoSchema.safeParse({ ...container, state: null }).success, false);
+});
 test("network configuration extends snapshots without breaking legacy or partial results", () => {
   assert.doesNotThrow(() => ServerSnapshotSchema.parse(legacy));
   const snapshot = ServerSnapshotSchema.parse({ ...legacy, networkDetails: {

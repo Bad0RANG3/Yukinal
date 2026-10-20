@@ -8,18 +8,22 @@ import re
 import sys
 import uuid
 from collections import OrderedDict
-from dataclasses import asdict, dataclass
+from dataclasses import asdict, dataclass, replace
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any, BinaryIO, Callable
 from urllib.error import HTTPError, URLError
 from urllib.request import HTTPRedirectHandler, ProxyHandler, Request, build_opener
 
+from langchain_core.messages import HumanMessage
+
 from yukinal_ssh import SshServiceClient
 
 from .audit import JsonlAuditSink
 from .conversation_store import ConversationStore, message_bytes
 from .coordination import CoordinationRuntime, COORDINATOR_TOOLS, parse_coordination
+from .work_routing import delegation_allowed, user_request_text
+from .goal_loop import long_goal_requested
 from .host_rpc import HostRpcClient
 from .host_tools import (
     HOST_APPROVAL_TOOLS,
@@ -29,7 +33,8 @@ from .host_tools import (
     register_mcp_catalog,
 )
 from .model_agent import AgentBudget, ModelDrivenAgent
-from .models import ModelConfig, ModelFactory, ModelFactoryError, with_reasoning_effort
+from .inference_policy import select_inference
+from .models import ModelConfig, ModelFactory, ModelFactoryError
 from .provider_store import ProviderStore, ProviderStoreError, validate_provider_save
 from .ssh_tools import (
     _parse_docker_logs,
@@ -584,7 +589,9 @@ class PythonSidecar:
         api_key = await self._provider_key(provider)
         config = self._provider_runtime_config(provider, api_key, 120_000)
         config["model"] = model_name
-        return self._create_runtime_model(config)
+        # A connection probe's tiny completion budget can truncate tool JSON.
+        # Real runs need room for commands/code even when public prose is short.
+        return self._create_runtime_model(config, max_output_tokens=8192)
 
     async def _reclaim_provider_credential(self, reference: str) -> bool:
         if self._host_rpc is None:
@@ -603,8 +610,8 @@ class PythonSidecar:
         except _RpcFault:
             pass
 
-    def _create_runtime_model(self, params: object) -> tuple[Any, int]:
-        config, api_key, timeout_ms = _parse_runtime_model_config(params)
+    def _create_runtime_model(self, params: object, *, max_output_tokens: int = 256) -> tuple[Any, int]:
+        config, api_key, timeout_ms = _parse_runtime_model_config(params, max_output_tokens=max_output_tokens)
         try:
             model = self._model_factory.create_with_api_key(config, api_key)
         except ModelFactoryError as error:
@@ -680,11 +687,12 @@ class PythonSidecar:
         model, _timeout_ms = await self._run_provider_model(
             request.get("providerId"), request.get("model")
         )
-        if "reasoningEffort" in request:
-            try:
-                model = with_reasoning_effort(model, request["reasoningEffort"])
-            except ModelFactoryError as error:
-                raise _RpcFault(RPC_INVALID_PARAMS, str(error)) from None
+        try:
+            inference = select_inference(model, request)
+            model = inference.model
+            request["agentBudget"] = replace(request["agentBudget"], max_model_output_tokens=inference.output_tokens)
+        except ModelFactoryError as error:
+            raise _RpcFault(RPC_INVALID_PARAMS, str(error)) from None
         if request.get("coordination"):
             self._coordination.activate(request)
         try:
@@ -692,6 +700,9 @@ class PythonSidecar:
                 self._registry,
                 model,
                 request["agentBudget"],
+                inference_profile={"effort": inference.effort, "source": inference.source,
+                                   "model": getattr(model, "model_name", None)},
+                goal_loop=_sustained_goal(request),
                 tool_names=_allowed_tools_for_run(self._registry, request.get("mode", "goal"), request),
                 event_sink=self._emit,
                 checkpointer=self._checkpointer,
@@ -1074,10 +1085,12 @@ class PythonSidecar:
             # Freeze a fresh coordinator projection each turn. Worker results become
             # visible without adding worker transcripts to the foreground session.
             persona = request.get("persona")
+            task_snapshot = []
             if request.get("coordination"):
-                persona = {"id": "coordinator", "label": "协调助手", "systemPrompt": self._coordination.context(request) +
+                persona = {"id": "coordinator", "label": "协调助手", "systemPrompt": self._coordination.context(request, include_tasks=False) +
                            "\n当前界面参考：\n" + (request.get("persona") or {}).get("systemPrompt", "")[:4000]}
-            available_bytes = agent.conversation_budget_bytes(request["promptText"], persona)
+                task_snapshot = [HumanMessage(content="本轮状态快照，仅供参考；用户请求以最后一条消息为准。\n" + self._coordination.turn_context(request))]
+            available_bytes = max(0, agent.conversation_budget_bytes(request["promptText"], persona) - message_bytes(task_snapshot))
             memory_budget = min(16 * 1024, available_bytes // 8)
             context = self._conversations.context(request["sessionId"], request.get("targetId"), exclude_run=run_id,
                                                   max_bytes=available_bytes - memory_budget, query_text=request["promptText"])
@@ -1112,7 +1125,7 @@ class PythonSidecar:
                 checkpoint_binding=_run_checkpoint_binding(request),
                 require_checkpoint=request["requireCheckpoint"],
                 persona=persona,
-                conversation_messages=[*memories, *context.messages],
+                conversation_messages=[*memories, *context.messages, *task_snapshot],
             )
             while result.status == "awaiting_approval":
                 result = await self._await_approval(request, run_id, agent, result)
@@ -1602,7 +1615,7 @@ def _parser_result(
     return {"ok": True, "output": output}
 
 
-def _parse_runtime_model_config(params: object) -> tuple[ModelConfig, str | None, int]:
+def _parse_runtime_model_config(params: object, *, max_output_tokens: int = 256) -> tuple[ModelConfig, str | None, int]:
     fields = {"kind", "baseUrl", "model", "apiKey", "customHeaders", "apiVersion", "timeoutMs", "wireApi"}
     parsed = _strict_object(params, fields)
     kind = parsed.get("kind")
@@ -1638,7 +1651,7 @@ def _parse_runtime_model_config(params: object) -> tuple[ModelConfig, str | None
             temperature=0,
             timeout_seconds=timeout_ms / 1000,
             max_retries=0,
-            max_output_tokens=256,
+            max_output_tokens=max_output_tokens,
             base_url=base_url,
             custom_headers=custom_headers,
             api_version=api_version,
@@ -1934,7 +1947,7 @@ def _parse_run_request(value: object) -> dict[str, Any]:
     prompt_text = _prompt_text(prompt, parsed.get("parts"))
     if not prompt_text.strip() or len(prompt_text.encode("utf-8")) > 64 * 1024:
         raise _RpcFault(RPC_INVALID_PARAMS, "prompt is empty or exceeds the Python Agent input limit")
-    task_budget = _run_budget(parsed.get("taskBudget"))
+    task_budget = _run_budget(parsed.get("taskBudget"), goal_mode=parsed.get("mode", "goal") == "goal", sustained_goal=_sustained_goal(parsed))
     return {
         **parsed,
         "runId": run_id.strip(),
@@ -1971,11 +1984,15 @@ def _allowed_tools_for_run(
 ) -> frozenset[str]:
     if request.get("toolAccess") == "none":
         return frozenset()
-    if request.get("coordination"):
-        return COORDINATOR_TOOLS
+    # A saved role roster does not replace the normal execution tools. Keep
+    # their existing target, plan and approval checks for foreground work too.
     allowed = set(_allowed_tool_names(registry, mode)) - COORDINATOR_TOOLS
     if not _host_action_has_plan_binding(request):
         allowed.difference_update(PLAN_BOUND_HOST_ACTION_TOOLS)
+    if request.get("coordination"):
+        allowed.update({"teams.status", "teams.cancel"})
+        if request.get("_dispatchAllowed", delegation_allowed(request)):
+            allowed.add("teams.dispatch")
     return frozenset(allowed)
 
 
@@ -2023,9 +2040,15 @@ def _prompt_text(prompt: str, parts: object) -> str:
     return "\n\n".join([prompt_text, *file_blocks]).strip()
 
 
-def _run_budget(value: object) -> AgentBudget:
-    max_steps = 8
-    max_run_ms = 120_000
+def _sustained_goal(request: dict[str, Any]) -> bool:
+    return (request.get("mode", "goal") == "goal" and request.get("toolAccess") != "none"
+            and not request.get("taskId") and not request.get("planBinding")
+            and long_goal_requested(user_request_text(request)))
+
+
+def _run_budget(value: object, *, goal_mode: bool = False, sustained_goal: bool = False) -> AgentBudget:
+    max_steps = 24 if goal_mode else 8
+    max_run_ms = 1_800_000 if sustained_goal else 600_000 if goal_mode else 120_000
     if value is not None:
         parsed = _strict_object(value, {"maxSteps", "maxRunMs", "maxAttempts"})
         max_steps = parsed.get("maxSteps")
@@ -2035,11 +2058,14 @@ def _run_budget(value: object) -> AgentBudget:
             raise _RpcFault(RPC_INVALID_PARAMS, "invalid taskBudget")
         if not 1 <= max_steps <= 10_000 or not 1 <= max_run_ms <= 86_400_000 or not 1 <= max_attempts <= 32:
             raise _RpcFault(RPC_INVALID_PARAMS, "invalid taskBudget")
-    steps = min(max_steps, 8)
+    # Execution has no default call/round quota. Preserve explicit host task
+    # budgets; planning and readonly requests retain their bounded probes.
+    unlimited_steps = goal_mode and value is None
+    steps = None if unlimited_steps else min(max_steps, 128 if sustained_goal else 32)
     return AgentBudget(
-        max_tool_calls=min(12, steps),
+        max_tool_calls=None if unlimited_steps else min(100 if sustained_goal else 64, max_steps),
         max_model_rounds=steps,
-        max_total_seconds=max(0.01, min(120.0, max_run_ms / 1000)),
+        max_total_seconds=max(0.01, min(1800.0 if sustained_goal else 900.0, max_run_ms / 1000)),
         max_output_bytes=200_000,
     )
 

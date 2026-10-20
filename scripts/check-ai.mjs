@@ -11,6 +11,8 @@ const localPython = join(root, "agent", ".venv", process.platform === "win32" ? 
 const python = process.env.YUKINAL_AGENT_PYTHON ?? process.env.YUKINAL_PYTHON
   ?? (existsSync(localPython) ? localPython : process.platform === "win32" ? "python" : "python3");
 const modules = [
+  "test_agent_execution_routing", "test_agent_performance", "test_sustained_goal_loop",
+  "test_tool_schema_repair", "test_tool_repetition_guard", "test_runtime_output_budget", "test_model_shell_policy",
   "test_agent_streaming", "test_agent_model_loop", "test_agent_conversation_context", "test_coordinator_runtime",
   "test_agent_run_finalization", "test_provider_store", "test_agent_sidecar",
   "test_reasoning_effort", "test_agent_moe_routing", "test_agent_reasoning_loop",

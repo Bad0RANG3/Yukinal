@@ -11,6 +11,7 @@ import type { AgentContextUsage, AgentTokenUsage } from "@yukinal/shared";
 
 import { Icon } from "../../components/Icon.js";
 import { runStateLabel } from "./transcript.js";
+import { REASONING_LABELS } from "./reasoning.js";
 
 export function AgentHeader({
   running,
@@ -88,7 +89,7 @@ export function AgentHeader({
   );
 }
 
-/** Shared status content can live inside the composer without duplicating state. */
+/** Shared diagnostics for the header and the collapsed conversation settings. */
 export function AgentRunStatus({ running, runState, tokenUsage, contextUsage, agentReady, shell, compact = false, preview = false }: {
   running: boolean;
   runState: string | null;
@@ -138,6 +139,11 @@ export function AgentRunStatus({ running, runState, tokenUsage, contextUsage, ag
             : "模型用量尚未上报"}</dd></div>
           {tokenUsage?.reportedRequests !== undefined ? <div><dt>已上报请求</dt><dd>{tokenUsage.reportedRequests} 次</dd></div> : null}
           {tokenUsage?.unreportedRequests ? <div><dt>缺失用量</dt><dd>{tokenUsage.unreportedRequests} 次模型请求未上报用量，累计不含这些请求。</dd></div> : null}
+          {tokenUsage?.lastRequest?.effort ? <div><dt>本次推理</dt><dd>{tokenUsage.lastRequest.routing === "auto" ? "自动 · " : ""}{REASONING_LABELS[tokenUsage.lastRequest.effort]}</dd></div> : null}
+          {tokenUsage?.lastRequest?.firstAnswerMs !== undefined ? <div><dt>最近请求首段正文</dt><dd>{(tokenUsage.lastRequest.firstAnswerMs / 1000).toFixed(2)} 秒</dd></div> : null}
+          {tokenUsage?.lastRequest ? <div><dt>最近请求耗时</dt><dd>{(tokenUsage.lastRequest.durationMs / 1000).toFixed(2)} 秒</dd></div> : null}
+          {tokenUsage?.reasoningTokens !== undefined ? <div><dt>已上报推理用量</dt><dd>{tokenUsage.reasoningTokens.toLocaleString()} tokens · {tokenUsage.reasoningReportedRequests ?? 0} 次请求</dd></div> : null}
+          {tokenUsage?.cacheReadTokens !== undefined ? <div><dt>已上报缓存命中</dt><dd>{tokenUsage.cacheReadTokens.toLocaleString()} tokens · {tokenUsage.cacheReportedRequests ?? 0} 次请求</dd></div> : null}
           {contextUsage?.memorySources?.length ? <div><dt>使用记忆</dt><dd>{contextUsage.memorySources.map((source) => source.title).join("、")}</dd></div> : null}
         </dl>
         <p className="agent-context-note">KiB 为文本大小；token 用量由模型上报。</p>

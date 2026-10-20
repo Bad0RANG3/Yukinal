@@ -174,7 +174,10 @@ export function ServerOverview({ active = true }: { active?: boolean }) {
   }
 
   return <>
-    {snapshotQuery.isError ? <p className="settings-notice" role="alert">最近一次刷新失败，当前仍显示上次成功采集的快照。{errorMessage(snapshotQuery.error)}</p> : null}
+    {snapshotQuery.isError ? <div className="settings-notice overview-refresh-error" role="status">
+      <p>资源更新失败，正在保留上次采集结果。</p>
+      <details><summary>查看错误详情</summary><pre>{errorMessage(snapshotQuery.error)}</pre></details>
+    </div> : null}
     <OverviewContent
       key={server.id}
       active={active}

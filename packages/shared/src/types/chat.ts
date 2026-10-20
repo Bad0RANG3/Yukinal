@@ -389,6 +389,21 @@ export interface AgentTokenUsage {
   outputTokens: number;
   reportedRequests?: number;
   unreportedRequests?: number;
+  reasoningTokens?: number;
+  reasoningReportedRequests?: number;
+  cacheReadTokens?: number;
+  cacheMissTokens?: number;
+  cacheReportedRequests?: number;
+  lastRequest?: {
+    durationMs: number;
+    firstChunkMs?: number;
+    firstAnswerMs?: number;
+    model?: string;
+    systemFingerprint?: string;
+    finishReason?: string;
+    effort?: AgentReasoningEffort;
+    routing?: "auto" | "manual" | "provider";
+  };
 }
 
 export interface AgentRunResult {

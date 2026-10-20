@@ -38,7 +38,9 @@ def _sse_round(*deltas: dict[str, Any], finish: str = "stop") -> bytes:
                    "choices": [{"index": 0, "delta": {}, "finish_reason": finish}]})
     frames.append({"id": "fixture-completion", "object": "chat.completion.chunk",
                    "created": 1, "model": "deepseek-flash", "choices": [],
-                   "usage": {"prompt_tokens": 12, "completion_tokens": 7, "total_tokens": 19}})
+                   "usage": {"prompt_tokens": 12, "completion_tokens": 7, "total_tokens": 19,
+                             "prompt_cache_hit_tokens": 8, "prompt_cache_miss_tokens": 4,
+                             "completion_tokens_details": {"reasoning_tokens": 5}}})
     return ("".join("data: " + json.dumps(frame) + "\n\n" for frame in frames)
             + "data: [DONE]\n\n").encode("ascii")
 
@@ -228,6 +230,9 @@ class AgentReasoningLoopTests(unittest.IsolatedAsyncioTestCase):
                 self.assertEqual(response["result"]["result"]["state"], "completed")
                 self.assertEqual(response["result"]["result"]["text"], "Local read complete.")
                 self.assertEqual(executions, [{"value": "local"}])
+                usage = [event["usage"] for event in first.events if event["type"] == "agent.usage"][-1]
+                self.assertEqual((usage["cacheReadTokens"], usage["cacheMissTokens"], usage["cacheReportedRequests"]), (16, 8, 2))
+                self.assertEqual((usage["reasoningTokens"], usage["reasoningReportedRequests"]), (10, 2))
                 self.assertEqual(len(transport.requests), 2)
                 self.assert_replayed_exchange(transport.requests[1])
                 self.assertEqual([event["type"] for event in first.events

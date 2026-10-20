@@ -21,3 +21,5 @@
 @import "./styles/dashboard.css";
 @import "./styles/agent-conversation.css";
 @import "./styles/conversation-widgets.css";
+@import "./styles/conversation-visuals.css";
+@import "./styles/conversation-navigation.css";

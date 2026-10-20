@@ -1,0 +1,53 @@
+/* Scoped, bounded drawing surfaces stay inside both compact chat and detached windows. */
+.conversation-visual { min-width: 0; max-width: 100%; margin: 10px 0; padding: 12px; border: 1px solid var(--edge-normal); border-radius: var(--radius-detail, 8px); background: var(--surface-1); overflow: hidden; font-size: var(--text-caption); }
+.conversation-visual > figcaption { display: flex; flex-wrap: wrap; align-items: baseline; justify-content: space-between; gap: 4px 12px; }
+.conversation-visual > figcaption > strong { min-width: 0; overflow-wrap: anywhere; font-weight: 550; color: var(--text); }
+.conversation-visual > figcaption > span, .visual-description, .visual-interaction-hint { color: var(--faint); }
+.visual-description { margin: 6px 0 0; white-space: pre-wrap; overflow-wrap: anywhere; }
+.visual-canvas { display: block; width: 100%; max-width: 100%; height: auto; margin-top: 8px; overflow: hidden; }
+.conversation-visual svg text { font: 11px var(--font-sans, sans-serif); fill: var(--muted); }
+.visual-grid line { stroke: var(--edge-normal); stroke-width: 1; }
+.visual-zero-axes line { stroke: var(--faint); stroke-width: 1; stroke-dasharray: 4 4; }
+.conversation-visual [data-color="blue"] { --visual-color: #78a8de; }
+.conversation-visual [data-color="green"] { --visual-color: #88baa1; }
+.conversation-visual [data-color="amber"] { --visual-color: #d3b076; }
+.conversation-visual [data-color="purple"] { --visual-color: #b4a0d4; }
+.conversation-visual [data-color="red"] { --visual-color: #d18b8b; }
+.conversation-visual [data-color="cyan"] { --visual-color: #83bfc6; }
+.visual-series { color: var(--visual-color); }
+.visual-series polyline { fill: none; stroke: currentColor; stroke-width: 2; stroke-linejoin: round; stroke-linecap: round; vector-effect: non-scaling-stroke; }
+.visual-series circle, .visual-series rect { fill: currentColor; }
+.visual-legend { display: flex; flex-wrap: wrap; gap: 5px 14px; margin: 6px 0 0; padding: 0; list-style: none; }
+.visual-legend > li { display: flex; align-items: center; min-width: 0; gap: 6px; color: var(--muted); overflow-wrap: anywhere; }
+.visual-legend i { flex: 0 0 auto; width: 7px; height: 7px; border-radius: 50%; background: var(--visual-color); }
+.visual-data { margin-top: 9px; border-top: 1px solid var(--edge-normal); padding-top: 7px; }
+.visual-data > summary, .visual-fallback summary { cursor: pointer; color: var(--faint); }
+.visual-data-scroll { overflow: auto; max-height: 240px; margin-top: 8px; }
+.visual-data table { width: 100%; border-collapse: collapse; font-variant-numeric: tabular-nums; }
+.visual-data th, .visual-data td { padding: 5px 8px; text-align: start; border-bottom: 1px solid var(--edge-normal); overflow-wrap: anywhere; max-width: 240px; }
+.visual-data th { font-weight: 500; }
+.visual-relations { margin: 8px 0; padding-inline-start: 18px; max-height: 180px; overflow: auto; overflow-wrap: anywhere; }
+.visual-flow-scroll { overflow: auto; max-height: 460px; }
+.visual-flow-canvas { display: block; width: 100%; min-width: 440px; height: auto; margin-top: 8px; }
+.visual-edge line, .visual-scene-edge line { stroke: var(--faint); stroke-width: 1.2; }
+.visual-edge text, .visual-scene-edge text { paint-order: stroke; stroke: var(--surface-1); stroke-width: 4px; stroke-linejoin: round; }
+.visual-arrow { fill: var(--faint); }
+.visual-node rect { fill: var(--surface-2); stroke: var(--visual-color); stroke-width: 1.2; }
+.visual-node text { fill: var(--text); }
+.visual-interaction-hint { margin: 7px 0 0; font-size: 10px; }
+.visual-scene { background: var(--surface-0, transparent); border-radius: 6px; cursor: grab; touch-action: none; }
+.visual-scene:active { cursor: grabbing; touch-action: none; }
+.visual-scene:focus-visible { outline: var(--focus-width, 2px) solid var(--focus-line); outline-offset: -2px; }
+.visual-scene-node circle { fill: var(--visual-color); stroke: var(--surface-1); stroke-width: 1.2; }
+.visual-scene-labels text { fill: var(--text); paint-order: stroke; stroke: var(--surface-1); stroke-width: 4px; stroke-linejoin: round; }
+.visual-scene-box polygon { fill: var(--surface-2); stroke: var(--visual-color); stroke-width: 1.3; }
+.visual-scene-axes { opacity: .7; }
+.visual-scene-axes line { stroke: var(--faint); stroke-width: 1; }
+.visual-controls { display: flex; flex-wrap: wrap; gap: 5px; align-items: center; margin-top: 6px; }
+.visual-controls button { min-height: 26px; min-width: 28px; padding: 2px 7px; border: 1px solid var(--edge-normal); border-radius: 5px; background: var(--surface-2); color: var(--muted); font: inherit; cursor: pointer; }
+.visual-controls button:disabled { opacity: .35; cursor: default; }
+.visual-controls button[aria-pressed="true"] { color: var(--text); border-color: var(--focus-line); }
+.visual-controls label { display: inline-flex; gap: 6px; align-items: center; color: var(--faint); }
+.visual-controls input { width: 90px; accent-color: var(--accent-strong); }
+.visual-fallback > p { margin: 0 0 6px; color: var(--muted); }
+.visual-fallback pre { max-height: 180px; overflow: auto; white-space: pre-wrap; overflow-wrap: anywhere; }

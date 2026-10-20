@@ -189,7 +189,7 @@ class ModelLoopTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(result.answer, "The service is active.")
         self.assertEqual(result.tool_calls, 1)
         self.assertEqual(seen, [{"target_id": "stage-1"}])
-        self.assertFalse(model.parallel_tool_calls)
+        self.assertTrue(model.parallel_tool_calls)
         self.assertEqual(model.max_tokens, 2048)
         self.assertEqual(model.tools[0]["function"]["name"], "ops__read")
         self.assertIn("untrusted data", model.seen_messages[0][0].content)
@@ -214,7 +214,7 @@ class ModelLoopTests(unittest.IsolatedAsyncioTestCase):
 
         registry = _server_exec_registry(handler)
         fingerprint = approval_fingerprint(
-            "server.exec", None, {"command": "check-config"},
+            "server.exec", None, {"command": "set -e\ncheck-config"},
             task_id="task-nonzero-exec", tenant_id="tenant-1", user_id="user-1",
         )
         model = ScriptedModel([
@@ -247,7 +247,7 @@ class ModelLoopTests(unittest.IsolatedAsyncioTestCase):
             raise ToolCallError("transport", "the remote result is unknown")
 
         registry = _server_exec_registry(handler)
-        arguments = {"command": "check-config"}
+        arguments = {"command": "set -e\ncheck-config"}
         fingerprint = approval_fingerprint(
             "server.exec", None, arguments,
             task_id="task-unknown-exec", tenant_id="tenant-1", user_id="user-1",
@@ -512,7 +512,7 @@ class ModelLoopTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(rejected.status, "succeeded")
         self.assertEqual(
             rejected.answer,
-            "I stopped without making the requested change because approval was rejected.",
+            "已拒绝当前操作，后续执行已停止。此前已完成的操作未撤销。",
         )
         self.assertEqual(executions, [])
         self.assertEqual(rejected.tool_results[-1]["status"], "failed")
@@ -550,7 +550,7 @@ class ModelLoopTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(expired.status, "succeeded")
         self.assertEqual(
             expired.answer,
-            "I stopped without making the requested change because approval expired.",
+            "审批已过期，当前操作未执行。此前已完成的操作未撤销。",
         )
         self.assertEqual(expired.tool_results[-1]["error_code"], "approval_timeout")
         self.assertEqual(len(model.responses), 1, "the model must not be called again after expiration")

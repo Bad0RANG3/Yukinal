@@ -17,6 +17,8 @@ from langchain_core.messages import AIMessage, HumanMessage, ToolMessage, messag
 
 DEFAULT_CONTEXT_BYTES = 128 * 1024
 _SUMMARY_BYTES = 24 * 1024
+COMPACTION_TRIGGER_RATIO = 0.80
+COMPACTION_TARGET_RATIO = 0.60
 
 
 def _json(value: Any) -> str:
@@ -420,10 +422,12 @@ class ConversationStore:
         if max_bytes < 1024:
             return ConversationContext([], {"totalTurns": total, "includedTurns": 0, "compactedTurns": total,
                                             "inputBytes": 0, "maxInputBytes": max_bytes})
-        # Reserve a bounded digest independently so a very large last turn can be
-        # compacted as a whole instead of leaving a dangling tool response.
-        summary_budget = min(_SUMMARY_BYTES, max_bytes // 4)
-        recent_budget = max_bytes - summary_budget - 1024
+        # Compact before the projection reaches its working limit, leaving
+        # room for the next tool exchange. Small conversations stay verbatim.
+        trigger = int(max_bytes * COMPACTION_TRIGGER_RATIO)
+        target = int(max_bytes * COMPACTION_TARGET_RATIO)
+        summary_budget = min(_SUMMARY_BYTES, target // 3)
+        recent_budget = max(0, target - summary_budget - 1024)
         selected: list[tuple[int, list[Any]]] = []
         selected_bytes = 0
         rows = self._connection.execute(
@@ -432,10 +436,19 @@ class ConversationStore:
         for row in rows:
             messages = _project_messages(json.loads(row["messages_json"]), json.loads(row["metadata_json"]), row["status"])
             size = message_bytes(messages)
-            if selected_bytes + size > recent_budget:
+            if selected_bytes + size > trigger:
                 break
             selected.insert(0, (int(row["ordinal"]), messages))
             selected_bytes += size
+        if len(selected) == total:
+            projected = [message for _, messages in selected for message in messages]
+            return ConversationContext(projected, {
+                "totalTurns": total, "includedTurns": total, "compactedTurns": 0,
+                "inputBytes": message_bytes(projected), "maxInputBytes": max_bytes,
+            })
+        while selected and selected_bytes > recent_budget:
+            _ordinal, removed = selected.pop(0)
+            selected_bytes -= message_bytes(removed)
         included = len(selected)
         compacted = total - included
         projected: list[Any] = []
@@ -473,6 +486,29 @@ class ConversationStore:
                     "ORDER BY (SELECT rank FROM conversation_search WHERE conversation_search.rowid = conversation_turns.ordinal AND conversation_search MATCH ?) ASC, ordinal DESC LIMIT 16",
                     (*archive_args, expression, expression),
                 ).fetchall()
+                # Ranking alone can favor an old, short statement over a later
+                # correction. Reserve candidates for the newest mentions of
+                # selective query terms, then present all excerpts in chronology.
+                selective = []
+                for term in terms:
+                    if term.isdecimal():
+                        continue
+                    match = '"' + term.replace('"', '""') + '"'
+                    count = self._connection.execute(
+                        "SELECT count(*) " + archive_query +
+                        " AND ordinal IN (SELECT rowid FROM conversation_search WHERE conversation_search MATCH ?)",
+                        (*archive_args, match),
+                    ).fetchone()[0]
+                    if count:
+                        selective.append((count, term))
+                newest = []
+                for _count, term in sorted(selective)[:8]:
+                    newest.extend(self._connection.execute(
+                        columns + archive_query +
+                        " AND ordinal IN (SELECT rowid FROM conversation_search WHERE conversation_search MATCH ?) ORDER BY ordinal DESC LIMIT 2",
+                        (*archive_args, '"' + term.replace('"', '""') + '"'),
+                    ).fetchall())
+                relevant = [*newest, *relevant]
             recent = self._connection.execute(columns + archive_query + " ORDER BY ordinal DESC LIMIT 16", archive_args).fetchall()
             header = (
                 f"Conversation archive excerpts: {compacted} earlier turns were compacted. "
@@ -493,7 +529,13 @@ class ConversationStore:
                     text = f"[turn {ordinal}; {actor}; {row['status']}; {row['run_id']}] {row['summary_text']}"
                     size = len(_json(text).encode("utf-8"))
                     if category_bytes + size > share:
-                        continue
+                        room = share - category_bytes - len(_json(f"[turn {ordinal}; {actor}; {row['status']}; {row['run_id']}] ").encode("utf-8")) - 16
+                        if room < 100:
+                            continue
+                        text = f"[turn {ordinal}; {actor}; {row['status']}; {row['run_id']}] " + _context_excerpt(row["summary_text"], room)
+                        size = len(_json(text).encode("utf-8"))
+                        if category_bytes + size > share:
+                            continue
                     proposed = {**excerpts, ordinal: text}
                     archive = HumanMessage(content=header + "\n".join(proposed[key] for key in sorted(proposed)))
                     if message_bytes([archive]) > summary_budget:
@@ -523,17 +565,51 @@ class ConversationStore:
 def _turn_summary(messages: list[Any]) -> str:
     users = [message for message in messages if isinstance(message, HumanMessage)]
     answers = [message for message in messages if isinstance(message, AIMessage) and message.content]
-    items = ["User: " + _excerpt(str(users[0].content), 1200)] if users else []
+    items = ["User goal: " + _head_tail(str(users[0].content), 1000)] if users else []
+    # Carry explicit constraints and late corrections before verbose results.
+    # These are source excerpts, never inferred facts or a new authorization.
+    important = []
+    for message in users:
+        for line in str(message.content).splitlines():
+            if re.search(r"不要|必须|保留|改为|更正|纠正|追加|未完成|下一步|do not|must|keep|instead|correction|remaining|next step", line, re.I):
+                important.append(_head_tail(line, 250))
+    if important:
+        items.append("Constraints/corrections (source excerpts): " + " | ".join(important[-4:]))
     if answers:
-        items.append("Final assistant: " + _excerpt(str(answers[-1].content), 1800))
+        items.append("Assistant report: " + _head_tail(str(answers[-1].content), 1200))
     exchanges: list[str] = []
     for message in messages:
         if isinstance(message, AIMessage):
-            exchanges.extend("Tool call: " + _excerpt(_json(call), 350) for call in message.tool_calls)
+            exchanges.extend("Tool call: " + _head_tail(_json(call), 220) for call in message.tool_calls)
         elif isinstance(message, ToolMessage):
-            exchanges.append("Tool result " + message.tool_call_id + ": " + _excerpt(str(message.content), 550))
-    items.extend(exchanges)
+            exchanges.append("Tool evidence " + message.tool_call_id + ": " + _head_tail(str(message.content), 400))
+    if len(exchanges) > 7:
+        items.extend([*exchanges[:2], f"[{len(exchanges) - 7} intermediate records omitted; retained in local transcript]", *exchanges[-5:]])
+    else:
+        items.extend(exchanges)
     return _excerpt("\n".join(items), 6000)
+
+
+def _head_tail(value: str, limit: int) -> str:
+    encoded = value.encode("utf-8")
+    if len(encoded) <= limit:
+        return value
+    half = max(0, (limit - 40) // 2)
+    return encoded[:half].decode("utf-8", errors="ignore") + " … [excerpt] … " + encoded[-half:].decode("utf-8", errors="ignore")
+
+
+def _context_excerpt(value: str, limit: int) -> str:
+    """Keep sections of the digest rather than only its opening request."""
+    lines = [line for line in value.splitlines() if line.strip()]
+    def priority(line: str) -> int:
+        if line.startswith("Constraints/corrections"): return 0
+        if line.startswith(("Assistant report:", "Final assistant:", "Result / unresolved")): return 1
+        if line.startswith(("User goal:", "User:")): return 2
+        if line.startswith(("Tool evidence", "Tool result")): return 3
+        return 4
+    chosen = sorted(enumerate(lines), key=lambda item: (priority(item[1]), -item[0]))[:4]
+    allowance = max(40, limit // max(1, len(chosen)) - 4)
+    return "\n".join(_head_tail(line, allowance) for _, line in sorted(chosen))
 
 
 def _search_terms(text: str) -> list[str]:

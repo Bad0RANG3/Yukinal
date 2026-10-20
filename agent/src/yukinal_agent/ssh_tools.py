@@ -506,6 +506,7 @@ def register_desktop_ssh_tools(
             handler=lambda arguments, context, tool_name=name, operation=operation: execute(
                 tool_name, operation, arguments, context
             ),
+            parallel_safe=True,
             target_id_argument=None,
             target_required=True,
             origin={"kind": "builtin"},

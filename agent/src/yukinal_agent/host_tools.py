@@ -623,6 +623,7 @@ def register_host_tools(
             risk_level="read",
             requires_approval=False,
             handler=_host_tool_handler(host, name, _FILESYSTEM_OUTPUT_VALIDATORS.get(name)),
+            parallel_safe=True,
             target_id_argument=None,
             target_required=True,
             origin={"kind": "builtin"},
@@ -770,6 +771,7 @@ def register_host_tools(
             risk_level="read",
             requires_approval=False,
             handler=_evidence_tool_handler(host, name, host_method, result_key, output_validator),
+            parallel_safe=True,
             target_id_argument=None,
             target_required=False,
             origin={"kind": "builtin"},
@@ -1317,6 +1319,7 @@ def register_desktop_backup_metadata_tools(
             handler=lambda arguments, context, tool_handler=handler: tool_handler(
                 host, arguments, context
             ),
+            parallel_safe=True,
             target_id_argument=None,
             target_required=True,
             origin={"kind": "builtin"},

@@ -38,6 +38,14 @@ export class FeedFollowIntent {
     else if (!this.pointerActive && atBottom(current)) this.following = true;
   }
 
+  /** A turn index is an explicit request to read history, including keyboard activation. */
+  navigateToTurn(metrics: FeedFollowMetrics): void {
+    this.following = false;
+    this.pointerActive = false;
+    this.input = null;
+    this.previous = geometry(metrics);
+  }
+
   beginPointer(metrics: FeedFollowMetrics): void {
     this.pointerActive = true;
     this.following = false;

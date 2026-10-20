@@ -1,0 +1,39 @@
+/* One marker per real user turn; the rail is a conversation index, not a ruler. */
+.conversation-scroll-rail { position: absolute; z-index: 4; top: 14px; right: 4px; bottom: 14px; display: flex; flex-direction: column; align-items: center; width: 26px; min-height: 0; border: 0; background: transparent; cursor: default; touch-action: pan-y; user-select: none; }
+.conversation-turn-count { display: flex; flex: 0 0 auto; align-items: center; justify-content: center; gap: 1px; height: 20px; width: 34px; margin-bottom: 4px; color: var(--faint); font-size: 10px; font-variant-numeric: tabular-nums; white-space: nowrap; opacity: .85; }
+.conversation-turn-count > span { opacity: .5; }
+.conversation-turn-list { position: relative; width: 100%; min-height: 0; padding: 0; overflow-y: auto; overflow-x: hidden; scrollbar-width: none; }
+.conversation-turn-list::-webkit-scrollbar { width: 0; height: 0; }
+.conversation-turn-mark { display: flex; width: 100%; height: 20px; min-height: 20px; padding: 0; border: 0; align-items: center; justify-content: center; background: transparent; color: var(--faint); cursor: pointer; }
+.conversation-turn-mark > span { width: 6px; height: 2px; border-radius: 2px; background: currentColor; opacity: .45; transition: width var(--motion-fast) var(--motion-ease), opacity var(--motion-fast) linear; }
+.conversation-turn-mark[aria-current="step"] { color: var(--text); }
+.conversation-turn-mark[aria-current="step"] > span { width: 12px; opacity: 1; }
+.conversation-turn-mark:is(:hover, :focus-visible) > span { width: 12px; opacity: 1; }
+.conversation-turn-mark:focus-visible { outline: 1px solid var(--focus-line); outline-offset: -2px; border-radius: 3px; }
+.conversation-turn-preview { position: absolute; right: calc(100% + 5px); display: grid; gap: 4px; width: min(230px, calc(100vw - 84px)); max-height: 100px; overflow: hidden; padding: 9px 11px; border: 1px solid var(--edge-emphasis); border-radius: var(--radius-control); background: var(--workspace-content-surface); box-shadow: var(--shadow-floating); color: var(--muted); font-size: 11px; line-height: 1.45; pointer-events: none; }
+.conversation-turn-preview > strong { color: var(--faint); font-size: 10px; font-weight: 500; }
+.conversation-turn-preview > span { display: -webkit-box; -webkit-line-clamp: 3; -webkit-box-orient: vertical; overflow: hidden; overflow-wrap: anywhere; }
+.agent-entry-user[data-conversation-turn] { scroll-margin-block-start: 12px; }
+
+/* Call/result details remain available without spending a card per read operation. */
+.tool-card { display: block; min-width: 0; margin: -4px 0; padding: 0; border: 0; border-radius: 0; background: transparent; }
+.tool-card > .tool-card-heading { display: flex; flex-wrap: nowrap; gap: 7px; min-width: 0; min-height: 28px; padding: 3px 0; border: 0; border-radius: 4px; color: var(--faint); font-size: 11px; line-height: 1.4; list-style: none; cursor: pointer; }
+.tool-card-heading::-webkit-details-marker { display: none; }
+.tool-card-heading > .icon { flex: 0 0 12px; width: 12px; height: 12px; }
+.tool-card .tool-name { flex: 0 1 auto; min-width: 0; max-width: 60%; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: var(--muted); font-size: 11px; font-weight: 400; }
+.tool-card .tool-target-preview { flex: 1 1 0; min-width: 0; max-width: none; font-size: 10px; opacity: .6; }
+.tool-card .tool-status { flex: 0 0 auto; margin-left: auto; font-size: 10px; }
+.tool-card > .tool-card-heading::after { flex: 0 0 auto; margin-left: 1px; font-size: 11px; }
+.tool-card[open] { padding-bottom: 4px; }
+.tool-card-disclosure { min-width: 0; margin: 3px 0 0 18px; padding: 8px 10px; border-left: 1px solid var(--edge-normal); color: var(--faint); font-size: 10px; }
+.tool-card-disclosure .tool-card-meta { gap: 5px; }
+.tool-card-disclosure .tool-card-meta > code { font-size: 10px; }
+.tool-card-disclosure :is(.risk-badge, .decision-badge) { padding: 2px 4px; font-size: 10px; border-color: var(--edge-normal); background: transparent; color: var(--faint); }
+.tool-card-disclosure .tool-result-copy { max-height: min(220px, 35svh); margin-top: 7px; color: var(--muted); font-family: var(--font-terminal); font-size: 10px; line-height: 1.5; }
+.tool-card-disclosure .tool-call-name { display: inline-block; margin-bottom: 6px; color: var(--muted); font-family: var(--font-terminal); font-size: 10px; }
+.tool-card-disclosure .tool-duration { margin-left: auto; white-space: nowrap; }
+@media (forced-colors: active) { .conversation-turn-mark > span { forced-color-adjust: none; background: CanvasText; } .conversation-turn-mark[aria-current="step"] > span { background: Highlight; } }
+@media (prefers-reduced-motion: reduce) { .conversation-turn-mark > span { transition: none; } }
+
+.tool-failure-reason { max-height: 180px; overflow: auto; margin: 7px 0 0; color: var(--danger); font-size: 11px; line-height: 1.5; white-space: pre-wrap; overflow-wrap: anywhere; user-select: text; }
+.tool-error-code { display: block; margin-top: 6px; color: var(--faint); font: 10px var(--font-terminal); }

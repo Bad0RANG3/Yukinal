@@ -87,7 +87,8 @@ export const NetworkDetailsSchema = z.strictObject({
 export const ContainerInfoSchema = z.strictObject({
   name: z.string().min(1),
   image: z.string().min(1),
-  state: z.string().min(1),
+  // Older Docker collectors can omit State while still returning Status.
+  state: z.string().transform((value) => value.trim() || "unknown"),
   status: z.string().min(1),
   restartCount: z.number().int().nonnegative(),
 });

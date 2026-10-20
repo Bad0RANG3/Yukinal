@@ -28,6 +28,10 @@ class DeepSeekChatModel(ChatOpenAI):
         reasoning = delta.get("reasoning_content") if isinstance(delta, dict) else None
         if result is not None and isinstance(result.message, AIMessageChunk) and isinstance(reasoning, str):
             result.message.additional_kwargs["reasoning_content"] = reasoning
+        if result is not None and isinstance(result.message, AIMessageChunk):
+            usage = _cache_usage(chunk.get("usage"))
+            if usage:
+                result.message.response_metadata["deepseek_usage"] = usage
         return result
 
     def _create_chat_result(self, response: Any, generation_info: dict[str, Any] | None = None) -> Any:
@@ -37,6 +41,8 @@ class DeepSeekChatModel(ChatOpenAI):
             reasoning = choice.get("message", {}).get("reasoning_content")
             if isinstance(generation.message, AIMessage) and isinstance(reasoning, str):
                 generation.message.additional_kwargs["reasoning_content"] = reasoning
+            if isinstance(generation.message, AIMessage) and (usage := _cache_usage(raw.get("usage"))):
+                generation.message.response_metadata["deepseek_usage"] = usage
         return result
 
     def _get_request_payload(self, input_: Any, *, stop: list[str] | None = None, **kwargs: Any) -> dict[str, Any]:
@@ -51,3 +57,10 @@ class DeepSeekChatModel(ChatOpenAI):
                 if isinstance(reasoning, str):
                     outgoing["reasoning_content"] = reasoning
         return payload
+
+
+def _cache_usage(raw: Any) -> dict[str, int]:
+    # ChatOpenAI normalizes standard usage but drops DeepSeek's cache counters.
+    # Retain only actual, bounded counts, including a reported zero.
+    return {key: raw[key] for key in ("prompt_cache_hit_tokens", "prompt_cache_miss_tokens")
+            if isinstance(raw, dict) and type(raw.get(key)) is int and 0 <= raw[key] <= 2**53 - 1}
