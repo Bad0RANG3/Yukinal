@@ -55,7 +55,7 @@ import { AGENT_TEAMS, resolveAgentRole } from "../agent-nist/agent-nist.js";
 import { CoordinatorStatus, CoordinatorTasks } from "./CoordinatorTasks.js";
 import { coordinatorConfig, coordinatorScope, coordinatorEntries } from "./coordinator-state.js";
 import { useCoordinatorTasks } from "./useCoordinatorTasks.js";
-import { ConversationWatchStatus } from "../agent-nist/TeamWatchPane.js";
+import { useWatchActivity } from "../agent-nist/watch-activity.js";
 import { attentionReference } from "../agent-nist/team-operations.js";
 import { useTeamRuntimeStore } from "../agent-nist/team-runtime-store.js";
 import { useWorkpagesStore } from "../workpages/workpages-store.js";
@@ -81,7 +81,7 @@ function restartId(restart: RestartRecord | undefined): string | null {
   return restart ? `${restart.attempt}:${restart.at}` : null;
 }
 
-export function AgentPanel({ onCloseStart, onCloseEnd, workspace = false, workspaceControls, workspaceWorkpages, onAttentionRequested, onOpenTeam }: {
+export function AgentPanel({ onCloseStart, onCloseEnd, workspace = false, workspaceControls, workspaceWorkpages, onAttentionRequested }: {
   onCloseStart?: () => void;
   onCloseEnd?: () => void;
   workspace?: boolean;
@@ -92,6 +92,7 @@ export function AgentPanel({ onCloseStart, onCloseEnd, workspace = false, worksp
 }) {
   const agentStatus = useAgentStatus({ poll: true });
   useNativeTaskRunEvents(agentStatus.data?.running, restartId(agentStatus.data?.restart));
+  useWatchActivity(agentStatus.data?.running);
   const spawnAgent = useSpawnAgent();
   const selectedServerId = useWorkspaceStore((state) => state.selectedServerId);
   const selectedTaskId = useWorkspaceStore((state) => state.selectedTaskId);
@@ -465,7 +466,6 @@ export function AgentPanel({ onCloseStart, onCloseEnd, workspace = false, worksp
       </div> : null}
         <WorkspaceLayers tools={workspaceWorkpages}>
           <WorkspaceConversation enabled={Boolean(workspaceWorkpages)} empty={run.entries.length === 0}>
-            <ConversationWatchStatus onOpen={onOpenTeam} />
             <AgentFeed
               entries={coordinatorEntries(run.entries)}
               running={run.running}

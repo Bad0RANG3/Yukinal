@@ -111,6 +111,8 @@
 .team-watch-list { min-width: 0; margin: 0; padding: 0; list-style: none; }
 .team-watch-list > li { padding: 18px 0; border-bottom: 1px solid var(--edge-normal); }
 .team-watch-list > li:first-child { border-top: 1px solid var(--edge-normal); }
+.team-watch-list > li.team-watch-operation { position: relative; padding-inline: 10px; border-radius: 8px; }
+.team-watch-unread { display: inline-flex; align-items: center; justify-content: center; min-width: 16px; height: 16px; margin-left: 6px; padding-inline: 4px; border-radius: 8px; color: var(--text); background: var(--material-active); font-size: var(--text-caption); }
 .team-watch-heading { display: flex; align-items: baseline; justify-content: space-between; gap: 8px; }
 .team-watch-heading > strong { color: var(--text); font-size: var(--text-label); font-weight: 500; }
 .team-watch-heading > span { flex-shrink: 0; color: var(--faint); font-size: var(--text-caption); }

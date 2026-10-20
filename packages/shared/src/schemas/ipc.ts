@@ -956,6 +956,15 @@ export const IPC_SCHEMAS = {
  * transport cannot produce.
  */
 export const EVENT_SCHEMAS = {
+  "investigation.schedule_activity": z.strictObject({
+    scheduleId: z.string().min(1).max(256), runId: z.string().min(1).max(256),
+    taskId: z.string().min(1).max(256), sessionId: z.string().min(1).max(256),
+    serverId: IpcServerIdSchema.nullable(), goal: z.string().max(500),
+    stage: z.enum(["starting", "thinking", "running_tool", "waiting_approval", "completed", "failed", "interrupted"]),
+    tool: z.strictObject({ callId: z.string().min(1).max(256), name: z.string().min(1).max(256), finished: z.boolean() }).optional(),
+    usage: AGENT_EVENT_MEMBER_SCHEMAS["agent.usage"].shape.usage.optional(),
+    at: z.string().min(1).max(80),
+  }),
   "agent.started": AGENT_EVENT_MEMBER_SCHEMAS["agent.started"],
   "agent.team_task": AGENT_EVENT_MEMBER_SCHEMAS["agent.team_task"],
   "agent.thinking": AGENT_EVENT_MEMBER_SCHEMAS["agent.thinking"],
