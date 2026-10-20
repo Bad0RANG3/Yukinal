@@ -633,6 +633,19 @@ def register_host_tools(
         for name, description, schema in definitions
         if name not in excluded_names
     ])
+    if "watch.status" not in excluded_names:
+        registry.register(ToolSpec(
+            name="watch.status",
+            description=("Read saved monitoring schedules, latest results, errors and timestamps for the current server. "
+                         "Use when the user asks for watch/值守 status. This reads local records without starting a new inspection. "
+                         "用简短自然中文回报，不要输出 JSON、内部字段名或错误码。区分正在执行的巡检与上次结果。"
+                         "and never present saved results as a fresh live probe."),
+            input_schema=_BASE_SCHEMA,
+            risk_level="read", requires_approval=False,
+            handler=_watch_status_handler(host),
+            parallel_safe=True, target_id_argument=None, target_required=True,
+            origin={"kind": "builtin"}, timeout_ms=10_000, cancellable=True,
+        ))
     if "investigation.plan" not in excluded_names:
         registry.register(ToolSpec(
             name="investigation.plan",
@@ -861,6 +874,48 @@ def _host_tool_handler(
     return execute
 
 
+def _watch_status_handler(host: HostRpcClient):
+    async def execute(arguments: dict[str, Any], context: ExecutionContext) -> dict[str, Any]:
+        server_id = context.context_target_id
+        if (not isinstance(server_id, str) or not server_id.startswith("srv_")
+                or not context.host_target or context.host_target.get("serverId") != server_id):
+            raise ToolCallError("target_required", "Select a server before reading watch status")
+        try:
+            response = await host.request("host.context.fetch", {"kind": "watch", "id": server_id}, timeout_seconds=8.0)
+        except asyncio.CancelledError:
+            raise
+        except Exception:
+            raise ToolCallError("host_unavailable", "The desktop host could not read watch status") from None
+        data = response.get("data") if isinstance(response, dict) else None
+        if (not isinstance(data, dict) or response.get("status") != "success"
+                or data.get("serverId") != server_id or not isinstance(data.get("schedules"), list)
+                or len(data["schedules"]) > 20):
+            raise ToolCallError("invalid_host_response", "The desktop host returned invalid watch status")
+        result = dict(data)
+        schedules = []
+        labels = {"active": "已启用", "paused": "已暂停", "revoked": "已撤销", "running": "正在巡检",
+                  "claimed": "等待启动", "succeeded": "已完成", "failed": "未完成", "interrupted": "已中断",
+                  "baseline": "已建立对照结果", "changed": "发现变化", "no_change": "未发现新增变化",
+                  "insufficient_evidence": "本轮证据不足"}
+        errors = {"inspection_timeout": "连接或执行超时，本轮取证未完成", "inspection_failed": "本轮巡检未完成",
+                  "inspection_tool_denied": "巡检工具未通过任务范围检查", "inspection_plan_invalid": "巡检计划包含无法识别的工具",
+                  "inspection_start_failed": "巡检未能启动", "app_restarted": "应用重启导致上轮中断",
+                  "cancelled": "本轮巡检已停止", "schedule_paused": "值守已暂停", "task_stopped": "原任务已停止"}
+        for row in data["schedules"]:
+            if not isinstance(row, dict):
+                raise ToolCallError("invalid_host_response", "The desktop host returned invalid watch status")
+            item = dict(row)
+            for field in ("status", "lastRunStatus", "outcome"):
+                if isinstance(item.get(field), str):
+                    item[field] = labels.get(item[field], "状态待确认")
+            if isinstance(item.get("lastError"), str):
+                item["lastError"] = errors.get(item["lastError"], "本轮巡检未完成，详情见值守面板")
+            schedules.append(item)
+        result["schedules"] = schedules
+        return result
+    return execute
+
+
 def _investigation_plan_handler(host: HostRpcClient, registry: ToolRegistry):
     async def execute(arguments: dict[str, Any], context: ExecutionContext) -> dict[str, Any]:
         task_id = context.host_task_id
@@ -875,12 +930,19 @@ def _investigation_plan_handler(host: HostRpcClient, registry: ToolRegistry):
         registered_tools = {
             spec.name for spec in registry.list() if spec.name != "investigation.plan"
         }
+        # Nested references need the same exact provider-name mapping as outer calls.
+        provider_tools = {name.replace(".", "__"): name for name in registered_tools}
+        normalized_steps = []
         for step in steps:
-            if not isinstance(step, dict) or any(tool not in registered_tools for tool in step["allowedTools"]):
+            tools = [tool if tool in registered_tools else provider_tools.get(tool)
+                     for tool in step.get("allowedTools", [])] if isinstance(step, dict) else []
+            if not tools or any(tool is None for tool in tools):
                 raise ToolCallError(
                     "unknown_plan_tool",
                     "Every plan step must name tools registered by the desktop host",
                 )
+            normalized_steps.append({**step, "allowedTools": list(dict.fromkeys(tools))})
+        steps = normalized_steps
 
         plan_id = "plan_" + hashlib.sha256(
             f"{task_id}\x1f{context.call_id}".encode("utf-8")

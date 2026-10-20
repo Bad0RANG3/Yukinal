@@ -69,9 +69,9 @@ export const EVENT_NAMES = [
   // （ActivityFeed / InfrastructureDashboard / ServerOverview / useWorkpageOperations），
   // 它们各自轮询兜底，所以缺的不是消费者而是生产者。
   "activity.created",
-  // 无生产者：调度器只在 `investigation_schedule_*` 的响应里回话，从不推事件；
-  // `InvestigationsPane.tsx:102` 的订阅目前收不到任何东西。
+  // 原生值守调度器发布通知及操作元数据，正文留在独立巡检会话。
   "investigation.schedule_notification",
+  "investigation.schedule_activity",
   "file.local_dropped",
   "file.transfer_updated",
 ] as const;
@@ -196,6 +196,20 @@ export interface InvestigationScheduleNotificationEvent {
   at: string;
 }
 
+/** Background operation metadata; no transcript text or foreground navigation. */
+export interface InvestigationScheduleActivityEvent {
+  scheduleId: string;
+  runId: string;
+  taskId: string;
+  sessionId: string;
+  serverId: string | null;
+  goal: string;
+  stage: "starting" | "thinking" | "running_tool" | "waiting_approval" | "completed" | "failed" | "interrupted";
+  tool?: { callId: string; name: string; finished: boolean };
+  usage?: import("../types/chat.js").AgentTokenUsage;
+  at: string;
+}
+
 export type { LocalFileDropEvent };
 
 export interface FileTransferUpdatedEvent {
@@ -215,6 +229,7 @@ export type YukinalEvent =
   | { name: "terminal.output_lost"; payload: TerminalOutputLostEvent }
   | { name: "activity.created"; payload: Activity }
   | { name: "investigation.schedule_notification"; payload: InvestigationScheduleNotificationEvent }
+  | { name: "investigation.schedule_activity"; payload: InvestigationScheduleActivityEvent }
   | { name: "file.local_dropped"; payload: LocalFileDropEvent }
   | { name: "file.transfer_updated"; payload: FileTransferUpdatedEvent }
   | { name: "agent.team_task" | "agent.started" | "agent.thinking" | "agent.text" | "agent.usage" | "agent.tool_call" | "agent.tool_result" | "agent.waiting_approval" | "agent.approval_expired" | "agent.completed" | "agent.failed"; payload: AgentStreamEvent };

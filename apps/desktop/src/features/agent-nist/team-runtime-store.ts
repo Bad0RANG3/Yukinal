@@ -4,14 +4,17 @@ import type { AgentTeam } from "./agent-nist.js";
 import { heartbeatSlot, mergeRunUsage } from "./team-operations.js";
 
 export type TeamStage = "starting" | "thinking" | "running_tool" | "waiting_approval" | "completed" | "failed" | "cancelled" | "interrupted";
-export type TeamRun = { source?: "coordinator" | "worker"; id: string; team: AgentTeam; serverId: string | null; sessionId?: string; taskId?: string; goal: string; stage: TeamStage; startedAt: number; updatedAt: number; usage?: AgentTokenUsage };
+export type TeamRun = { source?: "coordinator" | "worker" | "watch"; id: string; team: AgentTeam; serverId: string | null; sessionId?: string; taskId?: string; scheduleId?: string; goal: string; stage: TeamStage; startedAt: number; updatedAt: number; usage?: AgentTokenUsage };
 export type TeamPanelView = "teams" | "watch" | "config";
 export type TeamCue = { runId: string; callId: string; team: AgentTeam; serverId: string | null; tool: string; finished: boolean; until: number; preview?: boolean };
 type RuntimeState = {
   runs: TeamRun[]; cues: TeamCue[]; beat: number; lastBeatAt: number | null; panelView: TeamPanelView;
+  watchUpdates: { scheduleId: string; runId: string; serverId: string | null; at: string }[];
+  noteWatchUpdate(update: RuntimeState["watchUpdates"][number]): void;
+  readWatchUpdates(scheduleIds: string[]): void;
   totals: { inputTokens: number; outputTokens: number; reportedRuns: number; unreportedRuns: number };
   attention: { action: string; serverId: string | null; at: number } | null;
-  begin(input: Pick<TeamRun, "id" | "team" | "serverId" | "goal" | "sessionId" | "taskId" | "source">): void;
+  begin(input: Pick<TeamRun, "id" | "team" | "serverId" | "goal" | "sessionId" | "taskId" | "source" | "scheduleId">): void;
   bind(id: string, sessionId: string, taskId?: string | null): void;
   stage(id: string, stage: TeamStage): void;
   tool(id: string, tool: string, serverId: string | null, finished: boolean, callId: string): void;
@@ -26,6 +29,9 @@ export function teamRunActive(run: TeamRun): boolean { return ["starting", "thin
 
 export const useTeamRuntimeStore = create<RuntimeState>((set) => ({
   runs: [], cues: [], beat: heartbeatSlot(Date.now()), lastBeatAt: null, panelView: "teams",
+  watchUpdates: [],
+  noteWatchUpdate: (update) => set((state) => ({ watchUpdates: [...state.watchUpdates.filter((item) => item.scheduleId !== update.scheduleId), update].slice(-128) })),
+  readWatchUpdates: (scheduleIds) => set((state) => ({ watchUpdates: state.watchUpdates.filter((item) => !scheduleIds.includes(item.scheduleId)) })),
   totals: { inputTokens: 0, outputTokens: 0, reportedRuns: 0, unreportedRuns: 0 }, attention: null,
   begin: (input) => set((state) => {
     const previous = state.runs.find((run) => run.id === input.id);

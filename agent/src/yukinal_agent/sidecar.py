@@ -22,7 +22,7 @@ from yukinal_ssh import SshServiceClient
 from .audit import JsonlAuditSink
 from .conversation_store import ConversationStore, message_bytes
 from .coordination import CoordinationRuntime, COORDINATOR_TOOLS, parse_coordination
-from .work_routing import delegation_allowed, user_request_text
+from .work_routing import delegation_allowed, tools_prohibited, user_request_text
 from .goal_loop import long_goal_requested
 from .host_rpc import HostRpcClient
 from .host_tools import (
@@ -691,6 +691,9 @@ class PythonSidecar:
             inference = select_inference(model, request)
             model = inference.model
             request["agentBudget"] = replace(request["agentBudget"], max_model_output_tokens=inference.output_tokens)
+            if request["sessionId"] == f"watch:{run_id}":
+                # A background inspection must not open several SSH authentications at once.
+                request["agentBudget"] = replace(request["agentBudget"], max_parallel_tools=1)
         except ModelFactoryError as error:
             raise _RpcFault(RPC_INVALID_PARAMS, str(error)) from None
         if request.get("coordination"):
@@ -1982,7 +1985,7 @@ def _allowed_tools_for_run(
     mode: str,
     request: dict[str, Any],
 ) -> frozenset[str]:
-    if request.get("toolAccess") == "none":
+    if request.get("toolAccess") == "none" or tools_prohibited(request):
         return frozenset()
     # A saved role roster does not replace the normal execution tools. Keep
     # their existing target, plan and approval checks for foreground work too.
@@ -2041,7 +2044,7 @@ def _prompt_text(prompt: str, parts: object) -> str:
 
 
 def _sustained_goal(request: dict[str, Any]) -> bool:
-    return (request.get("mode", "goal") == "goal" and request.get("toolAccess") != "none"
+    return (request.get("mode", "goal") == "goal" and request.get("toolAccess") != "none" and not tools_prohibited(request)
             and not request.get("taskId") and not request.get("planBinding")
             and long_goal_requested(user_request_text(request)))
 

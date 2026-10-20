@@ -116,9 +116,10 @@ test("native shutdown skips queued RPC/events while destruction drains without i
   // Compile the real entry gate without depending on the dispatcher body or its local variables.
   const rpcGuard = nativeSource.match(/void rpc_handler\(const char\* id, const char\* request, void\* context_pointer\) \{[\s\S]*?(auto& context = \*static_cast<BridgeContext\*>\(context_pointer\);\s*if \([^\n]+\) return;)/u)?.[1];
   const active = nativeSource.match(/  bool active\(\) const \{[^\n]+\}/u)?.[0];
+  const stopClock = nativeSource.match(/  void stop_schedule_clock\(\) \{[\s\S]*?\n  \}/u)?.[0];
   const destroy = nativeSource.match(/void destroy_bridge_window\(BridgeContext& context\) \{[\s\S]*?\n\}/u)?.[0];
   const retire = nativeSource.match(/std::vector<std::unique_ptr<BridgeContext>> retire_auxiliary_windows\([\s\S]*?\n\}/u)?.[0];
-  assert.ok(lifetime && pendingEvent && queuedEvent && rpcGuard && active && destroy && retire,
+  assert.ok(lifetime && pendingEvent && queuedEvent && rpcGuard && active && stopClock && destroy && retire,
     "native lifecycle must expose its actual queued callback guards and retirement helpers");
   const harness = `
 #include <atomic>
@@ -149,8 +150,10 @@ struct BridgeContext {
   std::shared_ptr<Replies> replies = std::make_shared<Replies>();
   std::shared_ptr<Dispatcher> dispatcher = std::make_shared<Dispatcher>();
   ScheduleClock schedule_clock;
+  ScheduleClock* schedule_clock_control = &schedule_clock;
   Router router;
   ${active}
+  ${stopClock}
 };
 ${pendingEvent}
 std::deque<std::function<void()>> callbacks;
@@ -216,6 +219,7 @@ int main() {
   queue_event(main); queue_event(*child_context);
   auto retired = retire_auxiliary_windows(main, children);
   assert(children.empty() && retired.size() == 1 && !main.active());
+  assert(main.schedule_clock.stopped && main.schedule_clock.joined);
   for (auto& current : retired) destroy_bridge_window(*current);
   assert(invoked == 1 && evaluated == 1 && destroyed == 1);
   // A late queued callback from an already destroyed child owns its gate.

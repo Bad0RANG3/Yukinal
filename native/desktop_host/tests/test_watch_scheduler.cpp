@@ -14,7 +14,7 @@ struct Fixture {
   std::filesystem::path path = std::filesystem::temp_directory_path() /
       ("yukinal-watch-" + std::to_string(std::chrono::steady_clock::now().time_since_epoch().count()));
   std::unique_ptr<DesktopDatabase> database = std::make_unique<DesktopDatabase>(path);
-  std::vector<json> starts, notices;
+  std::vector<json> starts, notices, activity;
   std::vector<std::string> stops;
   bool stop_confirmed = true, start_fails = false;
   std::unique_ptr<WatchScheduler> scheduler;
@@ -27,7 +27,8 @@ struct Fixture {
           if (start_fails) throw std::runtime_error("fixture admission failure");
           return {{"started", true}, {"runId", request.at("runId")}};
         }, [&](const std::string& id) { stops.push_back(id); return stop_confirmed; },
-        [&](const json& event) { notices.push_back(event); });
+        [&](const json& event) { notices.push_back(event); },
+        [&](const json& event) { activity.push_back(event); });
   }
   void create(const std::string& name = "a", const std::string& policy = "on_change") {
     const std::string at = "2026-10-20T00:00:00Z";
@@ -63,10 +64,25 @@ void lifecycle() {
       f.starts[0]["mode"] == "readonly" && f.starts[0]["taskId"] == "task_a",
       "clock must admit an asynchronous scoped readonly inspection");
   const auto first = f.last_id();
+  check(f.activity.size() == 1 && f.activity.back()["stage"] == "starting" &&
+      f.activity.back()["sessionId"] == "watch:" + first && f.activity.back()["serverId"].is_null(),
+      "watch activity must retain its own archived session and target");
+  f.scheduler->on_event({{"type", "agent.tool_call"}, {"runId", first}, {"taskId", "task_a"},
+      {"callId", "logs_1"}, {"toolName", "server.logs"}, {"input", {{"private", "must not enter activity"}}}},
+      "2026-10-20T00:00:01Z");
+  check(f.activity.back()["stage"] == "running_tool" && f.activity.back()["tool"]["callId"] == "logs_1" &&
+      !f.activity.back().contains("input") && !f.activity.back().contains("text"),
+      "watch metadata must drive real tool cues without leaking transcript or tool input");
+  const auto before_foreign = f.activity.size();
+  f.scheduler->on_event({{"type", "agent.started"}, {"runId", first}, {"taskId", "foreign_task"}},
+      "2026-10-20T00:00:01Z");
+  check(f.activity.size() == before_foreign, "foreign task activity cannot enter the watch");
   check(f.database->get_investigation_schedule("a")->at("lastRunStatus") == "running", "UI must expose actual running state");
   f.scheduler->tick("2026-10-20T00:00:30Z");
   check(f.starts.size() == 1, "long inspections must not overlap");
   f.complete(first, "baseline");
+  check(f.activity.back()["stage"] == "completed" && f.activity.back()["runId"] == first,
+      "quiet baseline must still update panel status independently of notification policy");
   check(f.notices.empty(), "on_change baseline must remain quiet");
   check(f.database->get_investigation_schedule_run(first)->at("status") == "succeeded", "completion must persist");
   check(f.database->get_investigation_schedule("a")->at("lastOutcome").get<std::string>().find("baseline") != std::string::npos,
@@ -75,6 +91,10 @@ void lifecycle() {
   check(f.starts.size() == 2, "next deadline must resume without another user prompt");
   check(f.starts.back().at("prompt").get<std::string>().find("Fixture baseline") != std::string::npos,
       "fresh inspection must receive the previous result for comparison");
+  const auto next_prompt = f.starts.back().at("prompt").get<std::string>();
+  const auto reference = json::parse(next_prompt.substr(next_prompt.find('\n') + 1));
+  check(reference.at("baseline").is_object() && reference.at("baseline").at("runId") == first,
+      "an existing successful inspection must supply a real comparison baseline");
   f.complete(f.last_id(), "changed");
   check(f.notices.size() == 1 && f.notices[0]["outcome"] == "changed", "changed evidence must notify");
   f.complete(first, "changed");
@@ -84,6 +104,14 @@ void lifecycle() {
   f.scheduler->tick("2026-10-20T00:01:30Z");
   f.complete(f.last_id(), "no_change");
   check(f.notices.size() == 1, "unchanged inspection must stay quiet");
+  f.scheduler->tick("2026-10-20T00:02:00Z");
+  f.scheduler->on_event({{"type", "agent.failed"}, {"runId", f.last_id()}, {"error", "timeout"}}, "2026-10-20T00:02:01Z");
+  check(f.database->get_investigation_schedule("a")->at("lastError") == "inspection_timeout",
+      "a transport timeout must retain a useful failure reason");
+  f.scheduler->tick("2026-10-20T00:02:30Z");
+  const auto retry_prompt = f.starts.back().at("prompt").get<std::string>();
+  const auto retry_reference = json::parse(retry_prompt.substr(retry_prompt.find('\n') + 1));
+  check(!retry_reference.at("baseline").is_null(), "a failed attempt must not erase the comparison baseline");
 }
 void pause_and_recover() {
   Fixture f; f.create(); f.scheduler->tick("2026-10-20T00:00:00Z");

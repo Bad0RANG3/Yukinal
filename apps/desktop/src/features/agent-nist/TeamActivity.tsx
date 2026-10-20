@@ -42,6 +42,10 @@ export function TeamOperationOutline(target: OperationTarget) {
 
 export function TeamActionCue(target: OperationTarget) {
   const cues = useTeamRuntimeStore((state) => state.cues);
+  return <TeamActionCueView {...target} cues={cues} />;
+}
+
+export function TeamActionCueView({ cues, ...target }: OperationTarget & { cues: TeamCue[] }) {
   const matches = matchingCues(cues, target);
   const cue = matches[0];
   if (!cue) return null;
@@ -55,13 +59,15 @@ export function TeamActionCue(target: OperationTarget) {
 export function TeamBoardNavFeedback() {
   const runs = useTeamRuntimeStore((state) => state.runs);
   const cues = useTeamRuntimeStore((state) => state.cues);
+  const updates = useTeamRuntimeStore((state) => state.watchUpdates);
   const working = runs.filter((run) => run.source !== "coordinator" && ["starting", "thinking", "running_tool"].includes(run.stage));
   const previews = cues.filter((cue) => cue.preview && !cue.finished && cue.until > Date.now());
   const recent = cues.find((cue) => cue.finished && cue.until > Date.now());
   const count = working.length + previews.length;
   const team = working[0]?.team ?? previews[0]?.team ?? recent?.team;
-  if (!team) return null;
-  return <><span key={count ? `${team}:active` : `${recent?.runId}:${recent?.callId}:recent`} aria-hidden="true" className={`team-operation-outline team-color-${team}`} data-operation={count ? "working" : "recent"} />{count ? <span className={`team-board-nav-count team-color-${team}`} title={previews.length ? "模拟操作反馈" : `${count} 个 AI 正在处理`} aria-label={previews.length ? `${count} 项模拟操作` : `${count} 个 AI 正在处理`}>{count}</span> : null}</>;
+  const unread = updates.length ? <span className="team-watch-unread" title="值守有最新状态" aria-label="值守有最新状态">新</span> : null;
+  if (!team) return unread;
+  return <><span key={count ? `${team}:active` : `${recent?.runId}:${recent?.callId}:recent`} aria-hidden="true" className={`team-operation-outline team-color-${team}`} data-operation={count ? "working" : "recent"} />{count ? <span className={`team-board-nav-count team-color-${team}`} title={previews.length ? "模拟操作反馈" : `${count} 个 AI 正在处理`} aria-label={previews.length ? `${count} 项模拟操作` : `${count} 个 AI 正在处理`}>{count}</span> : null}{unread}</>;
 }
 
 /** Explicit fixture-only preview: no connection, tool call, transcript or token record. */
