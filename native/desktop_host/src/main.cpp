@@ -44,6 +44,17 @@ struct WindowEventLifetime {
   std::atomic_bool alive{true};
 };
 
+struct ScheduleClockControl {
+  std::atomic_bool stop_requested{false};
+  std::mutex mutex;
+  std::condition_variable wake;
+
+  void request_stop() {
+    stop_requested.store(true);
+    wake.notify_all();
+  }
+};
+
 struct BridgeContext {
   webview_t view = nullptr;
   std::shared_ptr<WindowEventLifetime> lifetime;
@@ -51,7 +62,9 @@ struct BridgeContext {
   std::shared_ptr<yukinal::desktop_host::IpcRouter> shared_router;
   yukinal::desktop_host::IpcRouter& router;
   std::shared_ptr<yukinal::desktop_host::IpcDispatcher> dispatcher;
-  std::jthread schedule_clock;
+  std::shared_ptr<ScheduleClockControl> schedule_clock_control =
+      std::make_shared<ScheduleClockControl>();
+  std::thread schedule_clock;
   std::shared_ptr<yukinal::desktop_host::IpcReplyTarget> replies;
   std::function<yukinal::desktop_host::IpcReply(const nlohmann::json&)> open_workpage;
 #ifdef _WIN32
@@ -76,6 +89,11 @@ struct BridgeContext {
         dispatcher(std::move(shared_dispatcher)) {}
 
   bool active() const { return lifetime->alive.load() && window_alive->load(); }
+
+  void stop_schedule_clock() {
+    schedule_clock_control->request_stop();
+    if (schedule_clock.joinable()) schedule_clock.join();
+  }
 
   void initialize_replies() {
     const auto current = view;
@@ -133,8 +151,7 @@ void destroy_bridge_window(BridgeContext& context) {
 std::vector<std::unique_ptr<BridgeContext>> retire_auxiliary_windows(
     BridgeContext& context, std::vector<std::unique_ptr<BridgeContext>>& auxiliary_windows) {
   context.lifetime->alive.store(false);
-  context.schedule_clock.request_stop();
-  if (context.schedule_clock.joinable()) context.schedule_clock.join();
+  context.stop_schedule_clock();
   context.dispatcher->close();
   if (context.replies) context.replies->close();
   context.router.set_event_sink({});
@@ -581,18 +598,18 @@ int run(const std::vector<std::string>& arguments) {
     // Warm the local Agent once per app session, without blocking the window.
     // Use the same serialized lane as explicit startup and subsequent queries.
     (void)context.dispatcher->submit("agent_spawn", nlohmann::json::object(), {});
-    context.schedule_clock = std::jthread([dispatcher = context.dispatcher](std::stop_token stop) {
+    context.schedule_clock = std::thread(
+        [dispatcher = context.dispatcher, clock = context.schedule_clock_control] {
       auto pending = std::make_shared<std::atomic_bool>(false);
-      std::mutex mutex;
-      std::condition_variable_any wake;
-      std::unique_lock lock(mutex);
-      while (!stop.stop_requested()) {
+      std::unique_lock lock(clock->mutex);
+      while (!clock->stop_requested.load()) {
         if (!pending->exchange(true)) {
           const auto result = dispatcher->submit("__watch_tick", nlohmann::json::object(),
               [pending](auto) { pending->store(false); });
           if (result != yukinal::desktop_host::IpcSubmitResult::accepted) pending->store(false);
         }
-        wake.wait_for(lock, stop, std::chrono::seconds(1), [] { return false; });
+        clock->wake.wait_for(lock, std::chrono::seconds(1),
+                             [&] { return clock->stop_requested.load(); });
       }
     });
     const auto result = webview_run(context.view);

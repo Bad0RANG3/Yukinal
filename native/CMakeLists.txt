@@ -257,9 +257,15 @@ if(YUKINAL_BUILD_TESTS)
         NAME python_agent_tests
         COMMAND ${Python3_EXECUTABLE} -m unittest discover -s ${CMAKE_CURRENT_SOURCE_DIR}/../agent/tests -p test_*.py -v
       )
+      set(YUKINAL_AGENT_TEST_TIMEOUT 300)
+      if(WIN32)
+        # Hosted Windows runners execute the full async Agent suite substantially
+        # slower than Linux/macOS, especially the long durable-context workflow.
+        set(YUKINAL_AGENT_TEST_TIMEOUT 600)
+      endif()
       set_tests_properties(python_agent_tests PROPERTIES
         ENVIRONMENT "PYTHONPATH=${CMAKE_CURRENT_SOURCE_DIR}/../agent/src;YUKINAL_SSH_SERVICE_BINARY=$<TARGET_FILE:yukinal-ssh-service>"
-        TIMEOUT 300
+        TIMEOUT ${YUKINAL_AGENT_TEST_TIMEOUT}
       )
     else()
       message(STATUS "Agent dependencies are not installed; python_agent_tests is not registered (install agent[agent])")
