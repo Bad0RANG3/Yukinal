@@ -18,7 +18,7 @@ std::string deadline(const std::string& now, std::int64_t milliseconds) {
 #else
   const auto epoch = timegm(&parsed);
 #endif
-  auto end = epoch + (milliseconds + 999) / 1000;
+  const std::time_t end = static_cast<std::time_t>(epoch + (milliseconds + 999) / 1000);
   std::tm result{};
 #ifdef _WIN32
   gmtime_s(&result, &end);
