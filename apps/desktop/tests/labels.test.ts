@@ -182,6 +182,7 @@ test("every event the UI subscribes to has a gate", () => {
     "mcp.oauth_device_code",
     "activity.created",
     "investigation.schedule_notification",
+    "investigation.schedule_activity",
     "file.local_dropped",
     "file.transfer_updated",
   ] as const;

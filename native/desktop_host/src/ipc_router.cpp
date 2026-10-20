@@ -3201,16 +3201,38 @@ nlohmann::json handle_context_request(DesktopDatabase& database, const nlohmann:
                            true);
   }
   if (kind != "server" && kind != "snapshot" && kind != "workspace" &&
-      kind != "investigation") {
+      kind != "investigation" && kind != "watch") {
     return context_failure("invalid_input", "invalid host context request", false);
   }
-  if ((kind == "server" || kind == "snapshot") && id.rfind("srv_", 0) != 0) {
+  if ((kind == "server" || kind == "snapshot" || kind == "watch") && id.rfind("srv_", 0) != 0) {
     return context_failure("invalid_input", "server context requires an opaque srv_ id", false);
   }
   const auto context_success = [](nlohmann::json data) {
     return nlohmann::json{{"status", "success"}, {"data", std::move(data)}};
   };
   try {
+    if (kind == "watch") {
+      nlohmann::json rows = nlohmann::json::array();
+      const auto schedules = database.list_investigation_schedules(100).at("schedules");
+      for (const auto& schedule : schedules) {
+        const auto detail = database.get_investigation_task(schedule.at("taskId"));
+        if (!detail || json_text_field(detail->at("task").at("scope"), "serverId") != id) continue;
+        nlohmann::json row = {{"scheduleId", schedule.at("id")}, {"status", schedule.at("status")},
+            {"objective", detail->at("task").at("objective")}, {"intervalSeconds", schedule.at("intervalSeconds")},
+            {"nextRunAt", schedule.at("nextRunAt")}};
+        for (const auto* field : {"lastRunAt", "lastRunStatus", "lastError", "updatedAt"})
+          if (schedule.contains(field)) row[field] = schedule.at(field);
+        const auto report = nlohmann::json::parse(schedule.value("lastOutcome", ""), nullptr, false);
+        if (report.is_object()) {
+          for (const auto* field : {"outcome", "summary"})
+            if (report.contains(field) && report.at(field).is_string()) row[field] = report.at(field);
+        }
+        rows.push_back(std::move(row));
+        if (rows.size() == 20) break;
+      }
+      return context_success({{"serverId", id}, {"asOf", iso8601_now()},
+          {"source", "saved_watch_results"}, {"schedules", rows}});
+    }
     if (kind == "server") {
       const auto servers = database.list_servers().at("servers");
       for (const auto& server : servers) {
@@ -6403,6 +6425,10 @@ IpcRouter::IpcRouter(DesktopDatabase* database, const CredentialStore* credentia
         std::function<void(const std::string&, const nlohmann::json&)> sink;
         { std::lock_guard lock(mutex_); sink = event_sink_; }
         if (sink) sink("investigation.schedule_notification", event);
+      }, [this](const nlohmann::json& event) {
+        std::function<void(const std::string&, const nlohmann::json&)> sink;
+        { std::lock_guard lock(mutex_); sink = event_sink_; }
+        if (sink) sink("investigation.schedule_activity", event);
       });
 }
 

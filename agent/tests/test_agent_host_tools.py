@@ -133,7 +133,7 @@ class HostActionToolTests(unittest.IsolatedAsyncioTestCase):
                     "kind": "evidence",
                     "title": "Inspect server health",
                     "purpose": "Collect current server status before deciding what to do.",
-                    "allowedTools": ["server.info"],
+                    "allowedTools": ["server__info"],
                     "successCriteria": ["The host returns a structured status snapshot."],
                     "requiresApproval": False,
                 }]},
@@ -167,6 +167,7 @@ class HostActionToolTests(unittest.IsolatedAsyncioTestCase):
         plan_request = host.calls[0][1]["plan"]
         self.assertEqual(plan_request["taskId"], "task-durable-1")
         self.assertEqual(plan_request["steps"][0]["attempts"], 0)
+        self.assertEqual(plan_request["steps"][0]["allowedTools"], ["server.info"])
         self.assertEqual(plan_request["steps"][0]["status"], "pending")
         tool_request = host.calls[1][1]
         self.assertEqual(tool_request["planId"], plan_request["id"])

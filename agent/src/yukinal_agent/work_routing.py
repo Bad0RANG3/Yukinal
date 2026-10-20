@@ -43,6 +43,16 @@ _DOMAINS = (
 )
 
 
+def tools_prohibited(request: dict[str, Any]) -> bool:
+    """A direct current-turn no-tools instruction also closes continuation loops."""
+    text = user_request_text(request)
+    return bool(re.search(
+        r"(?:^|[。！？\n；;])\s*(?:本轮|这轮|本次|此次)?\s*(?:不用|不要|无需|禁止)"
+        r"(?:再|任何|一切)?(?:调用|使用)?(?:任何)?工具|"
+        r"\b(?:do not|don't|never)\s+(?:use|call)\s+(?:any\s+)?tools\b|"
+        r"(?:^|[.!?\n;])\s*(?:this turn[:,]?\s*)?no tools\b", text))
+
+
 def delegation_allowed(request: dict[str, Any], *, has_prior_work: bool = False) -> bool:
     """Admit explicit delegation or a broad, multi-part workflow; default direct.
 
@@ -50,7 +60,7 @@ def delegation_allowed(request: dict[str, Any], *, has_prior_work: bool = False)
     irrelevant. A long health-check request still uses server.info directly.
     A short continuation may inherit only this conversation's actual job scope.
     """
-    if not request.get("coordination") or request.get("toolAccess") == "none":
+    if not request.get("coordination") or request.get("toolAccess") == "none" or tools_prohibited(request):
         return False
     text = user_request_text(request)
     if _NO_DELEGATION.search(text):

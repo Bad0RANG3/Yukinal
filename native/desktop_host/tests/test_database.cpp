@@ -3133,6 +3133,18 @@ int main(int argc, char** argv) {
       const std::string schedule_id =
           created.value.at("schedule").at("id").get<std::string>();
 
+      const auto watch_context = router.handle_host_request(
+          "host.context.fetch", {{"kind", "watch"}, {"id", "srv_01abc"}});
+      check(watch_context.at("data").at("source") == "saved_watch_results" &&
+                watch_context.at("data").at("schedules").size() == 1 &&
+                watch_context.at("data").at("schedules").at(0).at("scheduleId") == schedule_id &&
+                !watch_context.at("data").at("schedules").at(0).contains("transcript"),
+            "watch context must expose bounded saved status without a remote probe or transcript");
+      const auto other_watch = router.handle_host_request(
+          "host.context.fetch", {{"kind", "watch"}, {"id", "srv_other"}});
+      check(other_watch.at("data").at("schedules").empty(),
+            "watch context must not include another server's schedules");
+
       const auto listed = router.invoke("investigation_schedule_list", nlohmann::json::object());
       check(listed.ok && listed.value.at("schedules").size() == 1 &&
                 listed.value.at("schedules").at(0).at("id") == schedule_id,
