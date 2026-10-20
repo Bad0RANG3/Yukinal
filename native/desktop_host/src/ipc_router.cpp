@@ -6390,9 +6390,25 @@ IpcRouter::IpcRouter(DesktopDatabase* database, const CredentialStore* credentia
     if (sink) sink(event, payload);
   });
   mcp_ = std::make_unique<McpSupervisor>(database_, credentials_);
+  watch_scheduler_ = std::make_unique<WatchScheduler>(*database_,
+      [this](const nlohmann::json& request) {
+        auto result = agent_run_command("agent_run_start", request);
+        if (!result.ok) throw std::runtime_error("inspection_start_failed");
+        return result.value;
+      }, [this](const std::string& id) {
+        const auto result = agent_run_command("agent_run_stop", {{"runId", id}});
+        // true means no task exists anymore; an accepted cancellation waits for its terminal event.
+        return result.ok && !result.value.value("stopped", true);
+      }, [this](const nlohmann::json& event) {
+        std::function<void(const std::string&, const nlohmann::json&)> sink;
+        { std::lock_guard lock(mutex_); sink = event_sink_; }
+        if (sink) sink("investigation.schedule_notification", event);
+      });
 }
 
 IpcRouter::~IpcRouter() {
+  // Stop/join the notification reader before destroying the scheduler it calls.
+  if (sidecar_) sidecar_->stop();
   std::unique_ptr<TransferManager> transfers;
   std::size_t subscription = 0;
   {
@@ -6405,6 +6421,15 @@ IpcRouter::~IpcRouter() {
   if (subscription != 0) transfers->unsubscribe(subscription);
   // Blocks until every active transfer has stopped and its staging cleanup ran.
   transfers->shutdown();
+}
+
+IpcReply IpcRouter::poll_schedules() {
+  try {
+    if (watch_scheduler_) watch_scheduler_->tick(iso8601_now());
+    return {true, nlohmann::json::object()};
+  } catch (...) {
+    return failure("WATCH_UNAVAILABLE", "值守调度暂不可用");
+  }
 }
 
 void IpcRouter::set_transfer_manager(std::unique_ptr<TransferManager> manager) {
@@ -7421,10 +7446,10 @@ IpcReply IpcRouter::invoke(const std::string& method, nlohmann::json params) {
         {"intervalSeconds", input.at("intervalSeconds").get<std::int64_t>()},
         {"cooldownSeconds", input.contains("cooldownSeconds")
                                 ? input.at("cooldownSeconds").get<std::int64_t>()
-                                : kDefaultScheduleCooldownSeconds},
+                                : std::min(kDefaultScheduleCooldownSeconds, input.at("intervalSeconds").get<std::int64_t>())},
         {"dedupeWindowSeconds", input.contains("dedupeWindowSeconds")
                                     ? input.at("dedupeWindowSeconds").get<std::int64_t>()
-                                    : kDefaultScheduleDedupeSeconds},
+                                    : std::min(kDefaultScheduleDedupeSeconds, input.at("intervalSeconds").get<std::int64_t>())},
         {"maxConcurrentRuns", input.contains("maxConcurrentRuns")
                                   ? input.at("maxConcurrentRuns").get<std::int64_t>()
                                   : kDefaultScheduleMaxConcurrentRuns},
@@ -9497,6 +9522,7 @@ void IpcRouter::configure_sidecar() {
     }
     if (method == "agent.stream" && database_ != nullptr) {
       try {
+        if (watch_scheduler_) watch_scheduler_->on_event(params, iso8601_now());
         persist_investigation_agent_event(*database_, params);
       } catch (const std::exception&) {
         // A malformed notification must not tear down the sidecar transport or
@@ -9683,7 +9709,8 @@ IpcReply IpcRouter::agent_run_command(const std::string& method,
   // synchronous start waits for the run's bounded model/tool budget to finish,
   // while stop and approval responses answer immediately.
   const auto timeout = method == "agent_run_start"
-                           ? std::chrono::minutes(15)
+                           ? (params.value("delivery", std::string("async")) == "sync"
+                                  ? std::chrono::seconds(900) : std::chrono::seconds(15))
                            : std::chrono::seconds(30);
   if (method != "agent_approval_respond") {
     try {

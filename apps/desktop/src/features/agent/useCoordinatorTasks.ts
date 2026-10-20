@@ -16,7 +16,7 @@ export function useCoordinatorTasks(sidecarRunning: boolean | undefined, onAtten
   const [decisions, setDecisions] = useState<Record<string, string>>({});
   const locks = useRef(new Set<string>());
   const snapshot = useQuery({ queryKey: ["agent-team-tasks"], enabled: isDesktopShell() && sidecarRunning === true,
-    staleTime: 25_000, retry: false, queryFn: () => callDesktop(IPC_COMMANDS.agentTeamTasks, {}),
+    staleTime: 2_000, refetchInterval: 5_000, retry: false, queryFn: () => callDesktop(IPC_COMMANDS.agentTeamTasks, {}),
   });
   const sync = useRef({ running: sidecarRunning, refetch: snapshot.refetch });
   sync.current = { running: sidecarRunning, refetch: snapshot.refetch };

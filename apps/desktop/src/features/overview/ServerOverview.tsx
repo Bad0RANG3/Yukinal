@@ -132,7 +132,7 @@ export function ServerOverview({ active = true }: { active?: boolean }) {
 
   const snapshotQuery = useQuery({
     ...serverSnapshotQueryOptions(selectedServerId ?? ""),
-    refetchInterval: active ? 15_000 : false,
+    refetchInterval: active ? 5_000 : false,
     refetchIntervalInBackground: false,
     retry: false,
     enabled: active && Boolean(selectedServerId) && shell && server?.status === "connected" && !busy,

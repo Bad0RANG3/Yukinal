@@ -5,6 +5,7 @@ import {
 } from "@yukinal/shared";
 
 export const SCHEDULE_INTERVAL_OPTIONS = [
+  { seconds: 30, label: "每 30 秒" },
   { seconds: 60, label: "每 1 分钟" },
   { seconds: 300, label: "每 5 分钟" },
   { seconds: 900, label: "每 15 分钟" },
@@ -22,7 +23,7 @@ export const NOTIFICATION_POLICY_LABEL: Record<InvestigationNotificationPolicy, 
 };
 
 export const SCHEDULE_STATUS_LABEL: Record<InvestigationSchedule["status"], string> = {
-  active: "运行中",
+  active: "已启用",
   paused: "已暂停",
   revoked: "已撤销",
 };

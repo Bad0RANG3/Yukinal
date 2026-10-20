@@ -24,6 +24,7 @@ export const InvestigationScheduleSchema = z.strictObject({
   nextRunAt: timestamp,
   baselineRunId: OPAQUE_ID.optional(),
   lastRunAt: timestamp.optional(),
+  lastRunStatus: z.enum(INVESTIGATION_SCHEDULE_RUN_STATUSES).optional(),
   lastOutcome: z.string().max(INVESTIGATION_LIMITS.maxFailureMessageChars).optional(),
   lastError: z.string().max(INVESTIGATION_LIMITS.maxFailureMessageChars).optional(),
   createdAt: timestamp,

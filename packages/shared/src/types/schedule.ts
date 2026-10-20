@@ -32,6 +32,8 @@ export interface InvestigationSchedule {
   /** Host-validated successful run used as the explicit comparison baseline. */
   baselineRunId?: string;
   lastRunAt?: string;
+  /** Actual latest admitted run, independent of the plan's enabled/paused state. */
+  lastRunStatus?: InvestigationScheduleRunStatus;
   lastOutcome?: string;
   lastError?: string;
   createdAt: string;

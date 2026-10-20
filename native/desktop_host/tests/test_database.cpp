@@ -3174,12 +3174,12 @@ int main(int argc, char** argv) {
       check(!router.invoke("investigation_schedule_runs", nlohmann::json::object()).ok,
             "investigation_schedule_runs requires a scheduleId");
 
-      // The last skipped outcome is persisted on the trigger.
+      // A skipped overlapping deadline must not replace the inspection result.
       const auto after_skip =
           router.invoke("investigation_schedule_list", nlohmann::json::object());
-      check(after_skip.value.at("schedules").at(0).at("lastOutcome") == "concurrency_limit" &&
+      check(!after_skip.value.at("schedules").at(0).contains("lastOutcome") &&
                 after_skip.value.at("schedules").at(0).at("lastRunAt").is_string(),
-            "a skipped trigger should record its terminal outcome");
+            "a concurrency skip should preserve the trigger's inspection outcome");
 
       const auto paused = router.invoke(
           "investigation_schedule_update",

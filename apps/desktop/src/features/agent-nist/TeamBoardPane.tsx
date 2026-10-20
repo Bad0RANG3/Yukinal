@@ -8,7 +8,6 @@ import { isPreviewFixture } from "../../lib/preview-fixtures.js";
 import { useServers } from "../../lib/servers.js";
 import { useWorkspaceStore } from "../../stores/workspace-store.js";
 import { AGENT_TEAMS, agentTeamLabel } from "./agent-nist.js";
-import { TEAM_HEARTBEAT_MS } from "./team-operations.js";
 import { useTeamRuntimeStore } from "./team-runtime-store.js";
 import { BOARD_COLUMNS, boardCardFeedback, boardPreviewCards, teamBoardCards, type TeamBoardCard } from "./team-board.js";
 import { TeamFeedbackPreview } from "./TeamActivity.js";
@@ -27,7 +26,7 @@ export function TeamBoardPane({ serverId }: { serverId: string | null; expanded?
   const [selectedId, setSelectedId] = useState<string | null>(null);
   const servers = useServers({ enabled: false });
   const names = new Map(servers.data?.map((server) => [server.id, server.name]));
-  const query = useQuery({ queryKey: ["team-board-tasks"], enabled: isDesktopShell() && !goalsOpen, staleTime: TEAM_HEARTBEAT_MS,
+  const query = useQuery({ queryKey: ["team-board-tasks"], enabled: isDesktopShell() && !goalsOpen, staleTime: 2_000, refetchInterval: goalsOpen ? false : 2_000,
     queryFn: async () => (await callDesktop(IPC_COMMANDS.investigationTaskList, { limit: 100 })).tasks,
   });
   const allCards = [...(isPreviewFixture() ? boardPreviewCards(cues) : []), ...teamBoardCards(query.data ?? [], runs)];

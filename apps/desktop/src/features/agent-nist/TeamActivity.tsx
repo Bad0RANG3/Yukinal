@@ -1,13 +1,11 @@
 import { useEffect, useRef, useState, type MouseEvent, type FocusEvent } from "react";
-import { useQueryClient } from "@tanstack/react-query";
 import { agentTeamLabel } from "./agent-nist.js";
 import { useTeamRuntimeStore, TEAM_STAGE_LABEL, teamRunActive, type TeamCue } from "./team-runtime-store.js";
 import { nextHeartbeatAt, toolSurface } from "./team-operations.js";
 import type { WorkpageTool } from "../workpages/workpage-model.js";
 
-/** The main window owns one UI refresh clock. This does not dispatch scheduled work. */
+/** AI accounting clock only. Data subscriptions and queries update independently. */
 export function TeamHeartbeat() {
-  const queryClient = useQueryClient();
   const cues = useTeamRuntimeStore((state) => state.cues);
   useEffect(() => {
     let timer: ReturnType<typeof setTimeout>;
@@ -16,14 +14,11 @@ export function TeamHeartbeat() {
       if (disposed) return;
       const now = Date.now();
       useTeamRuntimeStore.getState().pulse(now);
-      void queryClient.invalidateQueries({ queryKey: ["team-watch"] });
-      void queryClient.invalidateQueries({ queryKey: ["team-board-tasks"] });
-      void queryClient.invalidateQueries({ queryKey: ["agent-team-tasks"] });
       timer = setTimeout(tick, Math.max(100, nextHeartbeatAt(now) - now));
     };
     tick();
     return () => { disposed = true; clearTimeout(timer); };
-  }, [queryClient]);
+  }, []);
   useEffect(() => {
     const until = Math.min(...cues.filter((cue) => cue.finished).map((cue) => cue.until));
     if (!Number.isFinite(until)) return;

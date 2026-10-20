@@ -128,6 +128,27 @@ class ExecutionRoutingTests(unittest.IsolatedAsyncioTestCase):
         self.sidecar = LocalSidecar()
         self.addAsyncCleanup(self.sidecar.close)
 
+    async def test_watch_admission_runs_async_with_original_task_and_readonly_target(self):
+        params = request("服务器只读巡检", runId="schedrun_fixture", sessionId="watch:schedrun_fixture",
+                         delivery="async", resume=True, mode="readonly", taskId="task_watch",
+                         taskBudget={"maxSteps": 10, "maxRunMs": 60000, "maxAttempts": 3},
+                         target={"host": "remote", "serverId": "srv_fixture", "environment": "staging"},
+                         persona={"id": "blue-guardian", "label": "运维", "systemPrompt": "只读取证，简短回复。"},
+                         participant={"id": "blue-guardian", "label": "运维", "kind": "agent"})
+        params.pop("coordination")
+        response = await self.sidecar.handle_async({"jsonrpc": "2.0", "id": 2,
+            "method": "agent.run.start", "params": params})
+        self.sidecar.assert_response(response)
+        self.assertTrue(response["result"]["started"])
+        self.assertNotIn("result", response["result"], "AI inspection must not block its scheduling/data lane")
+        await asyncio.gather(*list(self.sidecar._active_runs.values()))
+        self.assertEqual(len(self.sidecar.snapshots), 1)
+        context = self.sidecar.snapshots[0]
+        self.assertEqual(context.host_task_id, "task_watch")
+        self.assertEqual(context.host_target, {"host": "remote", "serverId": "srv_fixture", "environment": "staging"})
+        self.assertEqual(context.allowed_target_ids, {"srv_fixture"})
+        self.assertNotIn("teams.dispatch", context.allowed_tools)
+
     async def test_server_snapshot_executes_in_foreground_with_original_target_scope(self):
         result = await self.sidecar.run("检查服务器状态", "health")
         self.assertEqual(result["state"], "completed")

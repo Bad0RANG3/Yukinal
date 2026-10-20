@@ -136,12 +136,19 @@ using webview_t = Window*;
 struct Router { void set_event_sink(std::nullptr_t) {} };
 struct Replies { bool closed = false; void close() { closed = true; } };
 struct Dispatcher { bool closed = false; void close() { closed = true; } };
+struct ScheduleClock {
+  bool stopped = false, joined = false;
+  void request_stop() { stopped = true; }
+  bool joinable() const { return !joined; }
+  void join() { assert(stopped); joined = true; }
+};
 struct BridgeContext {
   webview_t view = nullptr;
   std::shared_ptr<WindowEventLifetime> lifetime;
   std::shared_ptr<std::atomic_bool> window_alive = std::make_shared<std::atomic_bool>(true);
   std::shared_ptr<Replies> replies = std::make_shared<Replies>();
   std::shared_ptr<Dispatcher> dispatcher = std::make_shared<Dispatcher>();
+  ScheduleClock schedule_clock;
   Router router;
   ${active}
 };

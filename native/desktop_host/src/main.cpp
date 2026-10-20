@@ -4,6 +4,7 @@
 
 #include <atomic>
 #include <csignal>
+#include <condition_variable>
 #include <filesystem>
 #include <functional>
 #include <mutex>
@@ -50,6 +51,7 @@ struct BridgeContext {
   std::shared_ptr<yukinal::desktop_host::IpcRouter> shared_router;
   yukinal::desktop_host::IpcRouter& router;
   std::shared_ptr<yukinal::desktop_host::IpcDispatcher> dispatcher;
+  std::jthread schedule_clock;
   std::shared_ptr<yukinal::desktop_host::IpcReplyTarget> replies;
   std::function<yukinal::desktop_host::IpcReply(const nlohmann::json&)> open_workpage;
 #ifdef _WIN32
@@ -64,6 +66,7 @@ struct BridgeContext {
         shared_router(std::make_shared<yukinal::desktop_host::IpcRouter>(&database)), router(*shared_router),
         dispatcher(std::make_shared<yukinal::desktop_host::IpcDispatcher>(
             [retained = shared_router](const std::string& method, nlohmann::json params) {
+              if (method == "__watch_tick") return retained->poll_schedules();
               return retained->invoke(method, std::move(params));
             })) {}
   BridgeContext(std::shared_ptr<yukinal::desktop_host::IpcRouter> shared,
@@ -130,6 +133,8 @@ void destroy_bridge_window(BridgeContext& context) {
 std::vector<std::unique_ptr<BridgeContext>> retire_auxiliary_windows(
     BridgeContext& context, std::vector<std::unique_ptr<BridgeContext>>& auxiliary_windows) {
   context.lifetime->alive.store(false);
+  context.schedule_clock.request_stop();
+  if (context.schedule_clock.joinable()) context.schedule_clock.join();
   context.dispatcher->close();
   if (context.replies) context.replies->close();
   context.router.set_event_sink({});
@@ -576,6 +581,20 @@ int run(const std::vector<std::string>& arguments) {
     // Warm the local Agent once per app session, without blocking the window.
     // Use the same serialized lane as explicit startup and subsequent queries.
     (void)context.dispatcher->submit("agent_spawn", nlohmann::json::object(), {});
+    context.schedule_clock = std::jthread([dispatcher = context.dispatcher](std::stop_token stop) {
+      auto pending = std::make_shared<std::atomic_bool>(false);
+      std::mutex mutex;
+      std::condition_variable_any wake;
+      std::unique_lock lock(mutex);
+      while (!stop.stop_requested()) {
+        if (!pending->exchange(true)) {
+          const auto result = dispatcher->submit("__watch_tick", nlohmann::json::object(),
+              [pending](auto) { pending->store(false); });
+          if (result != yukinal::desktop_host::IpcSubmitResult::accepted) pending->store(false);
+        }
+        wake.wait_for(lock, stop, std::chrono::seconds(1), [] { return false; });
+      }
+    });
     const auto result = webview_run(context.view);
     cleanup.close();
     return result == WEBVIEW_ERROR_OK ? 0 : 3;

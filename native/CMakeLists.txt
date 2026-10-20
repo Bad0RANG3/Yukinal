@@ -397,6 +397,7 @@ if(YUKINAL_BUILD_DESKTOP_HOST)
     desktop_host/src/host_trust.cpp
     desktop_host/src/ipc_router.cpp
     desktop_host/src/ipc_dispatcher.cpp
+    desktop_host/src/watch_scheduler.cpp
     desktop_host/src/local_paths.cpp
     desktop_host/src/network_proxy.cpp
     desktop_host/src/remote_drag.cpp
@@ -494,6 +495,9 @@ if(YUKINAL_BUILD_DESKTOP_HOST)
     add_executable(yukinal_ipc_dispatcher_tests desktop_host/tests/test_ipc_dispatcher.cpp)
     target_link_libraries(yukinal_ipc_dispatcher_tests PRIVATE yukinal_desktop_host_core)
     add_test(NAME ipc_dispatcher_tests COMMAND yukinal_ipc_dispatcher_tests)
+    add_executable(yukinal_watch_scheduler_tests desktop_host/tests/test_watch_scheduler.cpp)
+    target_link_libraries(yukinal_watch_scheduler_tests PRIVATE yukinal_desktop_host_core)
+    add_test(NAME watch_scheduler_tests COMMAND yukinal_watch_scheduler_tests)
     set_tests_properties(ipc_dispatcher_tests PROPERTIES TIMEOUT 20)
 
     add_executable(yukinal_desktop_host_transfer_tests

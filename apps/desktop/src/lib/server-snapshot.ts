@@ -6,7 +6,7 @@ import { callDesktop } from "./ipc.js";
 export function serverSnapshotQueryOptions(serverId: string) {
   return queryOptions({
     queryKey: ["serverSnapshot", serverId] as const,
-    staleTime: 15_000,
+    staleTime: 5_000,
     retry: false,
     queryFn: async () => {
       const { snapshot } = await callDesktop(IPC_COMMANDS.serverSnapshot, { serverId });
