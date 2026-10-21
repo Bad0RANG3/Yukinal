@@ -10,7 +10,7 @@
 .workpages-launcher-button[aria-pressed="true"], .workpages-toolbar-actions > button[aria-pressed="true"] { border-color: var(--edge-normal); background: var(--material-active); color: var(--text); }
 .workpages-toolbar-actions { display: flex; flex-shrink: 0; align-items: center; gap: 4px; margin-left: auto; }
 .workpages-toolbar-actions > .workpages-layer-toggle { color: var(--text); font-size: var(--text-caption); }
-.workpages-active-controls { display: flex; flex: 0 0 auto; align-items: center; justify-content: flex-end; min-width: 80px; }
+.workpages-active-controls { display: flex; flex: 1 0 auto; align-items: center; justify-content: flex-end; min-width: 80px; }
 .workpages-toolbar.has-tabs { gap: 6px; }
 .workpages-toolbar.has-tabs .workpages-records-button > span { display: none; }
 .workpages-toolbar.has-tabs .workpages-toolbar-actions { margin-left: 0; padding-left: 6px; border-left: 1px solid var(--line); }
@@ -23,7 +23,7 @@
 .workpages-add-menu .workpages-launcher { display: flex; flex-direction: column; align-items: stretch; gap: 2px; }
 .workpages-add-menu .workpages-launcher-button { justify-content: flex-start; width: 100%; padding: 7px 9px; }
 .workpages-add-menu .workpages-tool-label { display: inline; }
-.workpage-tabs { display: flex; flex: 1 1 auto; align-items: center; gap: 3px; min-width: 0; height: 38px; padding: 3px 0; overflow-x: auto; scrollbar-width: thin; }
+.workpage-tabs { display: flex; flex: 0 1 auto; align-items: center; gap: 3px; min-width: 0; height: 38px; padding: 3px 0; overflow-x: auto; scrollbar-width: thin; }
 .workpage-tabs > button { display: inline-flex; flex-shrink: 0; align-items: center; gap: 6px; max-width: 220px; min-height: 28px; padding: 4px 8px; border: 1px solid transparent; border-radius: var(--radius-control); background: transparent; color: var(--muted); font-size: var(--text-label); }
 .workpage-tabs > button.is-active { border-color: var(--edge-normal); background: var(--material-active); color: var(--text); }
 .workpage-tabs > button > svg { flex-shrink: 0; }
