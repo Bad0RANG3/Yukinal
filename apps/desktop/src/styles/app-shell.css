@@ -1284,3 +1284,5 @@ button:disabled {
 .server-delete-confirm p { margin: 0; font-size: 11px; line-height: 1.6; color: var(--text); overflow-wrap: anywhere; }
 .server-delete-confirm-actions { display: flex; justify-content: flex-end; gap: 6px; }
 .server-delete-confirm-danger { color: var(--text); border-color: var(--danger-line); background: var(--warn-surface); }
+.server-delete-confirm [aria-disabled="true"] { opacity: 0.55; cursor: progress; }
+.server-action-delete[aria-disabled="true"] { opacity: 0.55; cursor: progress; }

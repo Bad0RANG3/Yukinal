@@ -23,4 +23,6 @@
 .memory-confirm p { margin: 0; font-size: 12px; line-height: 1.6; color: var(--text); overflow-wrap: anywhere; }
 .memory-confirm-actions { display: flex; justify-content: flex-end; gap: 8px; }
 .memory-confirm-danger { color: var(--text); border-color: var(--danger-line); background: var(--danger-surface); }
-.memory-library [aria-disabled="true"] { opacity: 0.55; cursor: not-allowed; }
+/* 与 `.agent-history-confirm-actions` 同一条规矩：`aria-disabled` 的元素仍可聚焦、
+   仍会收到点击，所以它必须自己看起来是停住的，否则用户会以为点了没反应。 */
+.memory-library [aria-disabled="true"] { opacity: 0.55; cursor: progress; }
