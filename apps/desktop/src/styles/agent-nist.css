@@ -221,4 +221,26 @@
 .team-board-empty { margin: auto 0; padding: 28px 6px; color: var(--faint); font-size: var(--text-caption); }
 .team-board-footnote { margin: 0; color: var(--faint); font-size: 10px; line-height: 1.65; }
 .team-board-nav-count { display: grid; flex: 0 0 auto; place-items: center; min-width: 18px; height: 18px; margin-left: auto; padding-inline: 5px; border-radius: var(--radius-badge); color: var(--team-color, var(--muted)); background: color-mix(in srgb, var(--team-color, var(--muted)) 12%, transparent); font-size: 10px; font-variant-numeric: tabular-nums; }
+@container team-board (max-width: 900px) {
+  .team-board-lanes { overflow: visible; padding: 0; }
+  .team-board-columns { grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 12px; min-width: 0; }
+  .team-board-column { padding: 0 10px 8px; border: 1px solid var(--edge-subtle); border-radius: var(--radius-card); background: color-mix(in srgb, var(--surface-2) 38%, transparent); }
+  .team-board-column > header { gap: 8px; padding: 10px 0; }
+  .team-board-cards { min-height: 96px; padding: 8px 0 0; }
+  .team-board-card { aspect-ratio: auto; min-height: 118px; }
+  .team-board-card-toggle { padding: 10px; }
+}
+@container team-board (max-width: 460px) {
+  .team-board-columns { gap: 10px; }
+  .team-board-column { padding: 0 8px 8px; }
+  .team-board-column > header { gap: 6px; padding-block: 8px; }
+  .team-board-cards { min-height: 96px; }
+  .team-board-column:has(.team-board-empty) .team-board-cards { min-height: 56px; }
+  .team-board-empty { padding-block: 12px; }
+  .team-board-card { min-height: 154px; }
+  .team-board-card-toggle { gap: 6px; padding: 8px; }
+  .team-board-card-meta { align-items: flex-start; flex-direction: column; gap: 4px; }
+  .team-board-card-meta > span:last-child { display: inline-flex; max-width: 100%; padding: 2px 5px; border: 1px solid var(--edge-subtle); border-radius: var(--radius-badge); }
+}
+@container reference (max-width: 460px) { .team-board { gap: 16px; } }
 @media (prefers-reduced-motion: reduce) { .team-board-working > i { animation: none; } }

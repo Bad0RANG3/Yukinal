@@ -3,6 +3,7 @@ import type { AgentReasoningEffort } from "@yukinal/shared";
 import { Icon } from "../../components/Icon.js";
 import { usePresence } from "../../hooks/usePresence.js";
 import { useDismissOnOutsidePointer } from "../../hooks/useDismissOnOutsidePointer.js";
+import { useAnchoredPopover } from "../../hooks/useAnchoredPopover.js";
 import { ModelPicker, shortModelLabel, type ModelPickerChoice } from "./ModelPicker.js";
 import { REASONING_LABELS } from "./reasoning.js";
 
@@ -25,6 +26,7 @@ export function ReasoningPicker({ choices, selectedModelKey, selectedModelTitle,
   const trigger = useRef<HTMLButtonElement>(null);
   const menu = useRef<HTMLDivElement>(null);
   const range = useRef<HTMLInputElement>(null);
+  useAnchoredPopover(presence.mounted, trigger, menu, 320);
   const model = choices.find((choice) => choice.key === selectedModelKey);
   const modelLabel = model?.label ?? "选择模型";
   const selected = value !== null && levels.includes(value) ? value : null;
@@ -46,7 +48,7 @@ export function ReasoningPicker({ choices, selectedModelKey, selectedModelTitle,
       {levels.length ? <span className="agent-effort-value">{effortLabel}</span> : null}
       <Icon name="chevronDown" size="xs" />
     </button>
-    {presence.mounted ? <div ref={menu} id={menuId} className={`agent-effort-menu${!menuOpen ? " is-closing" : ""}`} role="dialog" aria-label="模型与推理强度" aria-hidden={!menuOpen} inert={!menuOpen} onAnimationEnd={presence.onAnimationEnd}>
+    {presence.mounted ? <div ref={menu} id={menuId} popover="manual" className={`agent-effort-menu anchored-popover${!menuOpen ? " is-closing" : ""}`} role="dialog" aria-label="模型与推理强度" aria-hidden={!menuOpen} inert={!menuOpen} onAnimationEnd={presence.onAnimationEnd}>
       <ModelPicker inline choices={choices} selectedKey={selectedModelKey} selectedTitle={selectedModelTitle} onSelect={onSelectModel} disabled={disabled || !menuOpen} />
       {levels.length ? <div className="agent-effort-heading">
         <div className="agent-effort-selection">

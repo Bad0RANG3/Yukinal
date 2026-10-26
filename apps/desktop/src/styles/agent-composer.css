@@ -433,7 +433,7 @@
 .agent-composer .agent-composer-status .agent-status { display: inline-flex; min-height: 28px; padding: 0 4px; border: 0; background: transparent; font-size: inherit; }
 .agent-composer .agent-composer-status .agent-status.is-icon::before { display: none; }
 .agent-composer-status .agent-context-usage { display: inline-flex; align-items: center; gap: 4px; font-size: inherit; }
-.agent-composer-status .agent-token-usage { display: inline; }
+.agent-composer-status .agent-token-usage { display: inline-flex; }
 .agent-settings-readonly { display: flex; align-items: center; gap: 8px; font-size: var(--text-caption); color: var(--muted); }
 .agent-settings-readonly input { accent-color: var(--accent); }
 .agent-input-notices:empty { display: none; }

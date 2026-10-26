@@ -57,7 +57,7 @@ export function useWorkpageOperations() {
 
   const rows = useMemo(() => {
     const names = new Map((servers.data ?? []).map((server) => [server.id, server.name]));
-    const persisted = executions.data ?? [];
+    const persisted = (executions.data ?? []).filter((record) => !serverId || record.serverId === serverId);
     const merged = new Map(persisted.map((record) => [record.callId, record]));
     // Persisted results include the full redacted output; live events carry summaries.
     for (const item of live) {
@@ -65,7 +65,7 @@ export function useWorkpageOperations() {
       const saved = merged.get(item.record.callId);
       if (!saved || ["running", "pending", "waiting_approval"].includes(saved.status)) merged.set(item.record.callId, item.record);
     }
-    const activityRows = activities.data ?? [];
+    const activityRows = (activities.data ?? []).filter((activity) => !serverId || activity.serverId === serverId);
     const operations: WorkpageOperation[] = [...merged.values()].map((execution) => {
       const activity = activityRows.find((item) => item.traceId === execution.traceId);
       const actor = activity ? actorLabel(activity.actor) : live.some((item) => item.record.callId === execution.callId) ? "Agent" : "执行器";

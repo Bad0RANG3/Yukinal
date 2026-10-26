@@ -2,45 +2,22 @@
 .workspace-layers > .agent-conversation { position: relative; z-index: 1; grid-area: 2 / 1 / 3 / 2; min-width: 0; min-height: 0; }
 .workspace-conversation-placement, .workspace-conversation-resize { display: none; }
 .workpages-dock { position: relative; z-index: 0; grid-area: 1 / 1 / 2 / -1; display: flex; flex-direction: column; width: 100%; min-width: 0; min-height: 0; color: var(--text); }
-.workpages-toolbar { display: flex; flex: 0 0 44px; height: 44px; align-items: center; min-width: 0; gap: 6px; padding: 0 12px; border-bottom: 1px solid var(--line); }
-.workpages-launcher { display: inline-flex; align-items: center; gap: 4px; min-width: 0; }
-.workpages-launcher-button, .workpages-toolbar-actions > button { display: inline-flex; align-items: center; justify-content: center; gap: 6px; min-height: 30px; padding: 5px 9px; border: 1px solid transparent; border-radius: var(--radius-control); background: transparent; color: var(--muted); font-size: var(--text-label); white-space: nowrap; }
-.workpages-launcher-button > svg, .workpages-toolbar-actions > button > svg { flex-shrink: 0; }
-.workpages-launcher-button:hover, .workpages-toolbar-actions > button:hover { color: var(--text); background: var(--material-hover); }
-.workpages-launcher-button[aria-pressed="true"], .workpages-toolbar-actions > button[aria-pressed="true"] { border-color: var(--edge-normal); background: var(--material-active); color: var(--text); }
-.workpages-toolbar-actions { display: flex; flex-shrink: 0; align-items: center; gap: 4px; margin-left: auto; }
-.workpages-toolbar-actions > .workpages-layer-toggle { color: var(--text); font-size: var(--text-caption); }
-.workpages-active-controls { display: flex; flex: 1 0 auto; align-items: center; justify-content: flex-end; min-width: 80px; }
-.workpages-toolbar.has-tabs { gap: 6px; }
-.workpages-toolbar.has-tabs .workpages-records-button > span { display: none; }
-.workpages-toolbar.has-tabs .workpages-toolbar-actions { margin-left: 0; padding-left: 6px; border-left: 1px solid var(--line); }
-.workpages-toolbar-actions > .workpages-layer-toggle { width: 30px; padding-inline: 0; }
-.workpages-layer-toggle > span { display: none; }
-.workpages-add { position: relative; flex: 0 0 auto; }
-.workpages-add-trigger { width: 28px; height: 28px; min-height: 28px; border: 0; background: transparent; color: var(--muted); }
-.workpages-add-trigger:hover, .workpages-add-trigger[aria-expanded="true"] { color: var(--text); background: var(--material-hover); }
-.workpages-add-menu { position: absolute; z-index: 20; top: calc(100% + 8px); left: 0; width: 156px; padding: 5px; border: 1px solid var(--edge-emphasis); border-radius: var(--radius-card); background: var(--workspace-content-surface); box-shadow: var(--shadow-floating); }
-.workpages-add-menu .workpages-launcher { display: flex; flex-direction: column; align-items: stretch; gap: 2px; }
-.workpages-add-menu .workpages-launcher-button { justify-content: flex-start; width: 100%; padding: 7px 9px; }
-.workpages-add-menu .workpages-tool-label { display: inline; }
-.workpage-tabs { display: flex; flex: 0 1 auto; align-items: center; gap: 3px; min-width: 0; height: 38px; padding: 3px 0; overflow-x: auto; scrollbar-width: thin; }
-.workpage-tabs > button { display: inline-flex; flex-shrink: 0; align-items: center; gap: 6px; max-width: 220px; min-height: 28px; padding: 4px 8px; border: 1px solid transparent; border-radius: var(--radius-control); background: transparent; color: var(--muted); font-size: var(--text-label); }
-.workpage-tabs > button.is-active { border-color: var(--edge-normal); background: var(--material-active); color: var(--text); }
-.workpage-tabs > button > svg { flex-shrink: 0; }
-.workpage-tabs > button > span { overflow: hidden; min-width: 0; text-overflow: ellipsis; white-space: nowrap; }
-.workpage-tabs > button.is-fixed { justify-content: center; width: 64px; padding-inline: 6px; }
-.workpage-tabs > button:not(.is-fixed) { border-left-color: var(--edge-subtle); }
-.workpage-tabs small { overflow: hidden; max-width: 100px; text-overflow: ellipsis; white-space: nowrap; color: var(--faint); font-size: var(--text-caption); }
-.workpages-stage { display: grid; flex: 1 1 0; grid-template-columns: repeat(2, minmax(0, 1fr)); grid-template-rows: minmax(0, 1fr); align-content: stretch; gap: 8px; min-height: 0; }
+.workpages-toolbar { display: flex; flex: 0 0 44px; height: 44px; align-items: center; min-width: 0; gap: 12px; padding: 0 12px; border-bottom: 1px solid var(--line); }
+.workpages-launcher { display: inline-flex; flex: 0 0 auto; align-items: center; gap: 4px; }
+.workpages-launcher-button { position: relative; display: inline-flex; align-items: center; justify-content: center; gap: 6px; min-width: 64px; height: 30px; padding: 5px 9px; border: 1px solid transparent; border-radius: var(--radius-control); background: transparent; color: var(--muted); font-size: var(--text-label); line-height: 18px; white-space: nowrap; }
+.workpages-launcher-button > svg { flex-shrink: 0; }
+.workpages-launcher-button:hover { color: var(--text); background: var(--material-hover); }
+.workpages-launcher-button[aria-pressed="true"] { border-color: var(--edge-normal); background: var(--material-active); color: var(--text); }
+.workpages-launcher-button:focus-visible, .workpages-target-switch:focus-visible { outline: var(--focus-width) solid var(--focus-line); outline-offset: var(--focus-offset); }
+.workpages-target-switch { display: inline-flex; flex: 0 1 auto; align-items: center; gap: 6px; max-width: 220px; min-width: 30px; height: 30px; margin-left: auto; padding: 5px 7px; border: 1px solid transparent; border-radius: var(--radius-control); background: transparent; color: var(--faint); font-size: var(--text-caption); }
+.workpages-target-switch > span { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.workpages-target-switch > svg { flex-shrink: 0; }
+.workpages-target-switch:hover { color: var(--text); border-color: var(--edge-subtle); background: var(--material-hover); }
+.workpages-stage { display: grid; flex: 1 1 0; grid-template-columns: minmax(0, 1fr); grid-template-rows: minmax(0, 1fr); min-width: 0; min-height: 0; }
 .workpages-stage.is-empty { display: none; }
-.workpages-stage:has(> .workpage-frame:not([hidden]):only-of-type), .workpages-stage:has(> .workpage-frame:not([hidden])):not(:has(> .workpage-dock-left:not([hidden]))):not(:has(> .workpage-dock-right:not([hidden]))) { grid-template-columns: minmax(0, 1fr); }
-.workpage-frame { display: flex; flex-direction: column; grid-row: 1; min-width: 0; min-height: 0; overflow: hidden; border: 1px solid var(--edge-normal); border-radius: var(--radius-card); background: var(--surface-1); }
+.workpage-frame { position: relative; display: flex; flex-direction: column; grid-area: 1 / 1; min-width: 0; min-height: 0; overflow: hidden; border: 1px solid var(--edge-normal); border-radius: var(--radius-card); background: var(--surface-1); }
 .workpage-frame.workpage-kind-board { border: 0; border-radius: 0; background: transparent; }
 .workpage-frame[hidden] { display: none !important; }
-.workpages-dock[data-compact="true"] .workpage-dock-control { display: none; }
-.workpage-dock-left { grid-column: 1; }
-.workpage-dock-right { grid-column: 2; }
-.workpages-stage:not(:has(> .workpage-dock-left:not([hidden]))) > .workpage-dock-right:not([hidden]), .workpages-stage:not(:has(> .workpage-dock-right:not([hidden]))) > .workpage-dock-left:not([hidden]) { grid-column: 1 / -1; }
 .workpage-heading { display: flex; flex: 0 0 auto; align-items: center; gap: 6px; min-width: 0; min-height: 34px; padding: 3px 7px 3px 10px; border-bottom: 1px solid var(--line); background: var(--material-rest); }
 .workpage-heading > svg { flex-shrink: 0; color: var(--muted); }
 .workpage-heading > strong { overflow: hidden; min-width: 0; flex: 0 1 auto; text-overflow: ellipsis; white-space: nowrap; font-size: var(--text-label); }
@@ -74,7 +51,10 @@
 .workpage-body:has(> .remote-files-page) { overflow: hidden; padding: 0; }
 .workpage-body .section-heading h2 { font-size: var(--text-label); }
 .workpage-empty { display: flex; align-items: center; justify-content: center; min-height: 64px; padding: 16px; color: var(--faint); font-size: var(--text-label); }
-.workpage-unbound { min-height: 100%; }
+.workpage-unbound { display: flex; min-height: 100%; flex-direction: column; align-items: center; justify-content: center; gap: 12px; color: var(--muted); text-align: center; }
+.workpage-unbound > svg { color: var(--faint); }
+.workpage-unbound strong { color: var(--text); font-size: var(--text-subheading); font-weight: 500; }
+.workpage-unbound p { max-width: 30ch; margin: 0; color: var(--faint); line-height: 1.7; }
 .workpage-loading { display: grid; min-height: 72px; place-items: center; }
 .workpage-loading::after { content: ""; width: 16px; height: 16px; border: 2px solid var(--edge-normal); border-top-color: var(--muted); border-radius: 50%; animation: workpage-loading-spin 800ms linear infinite; }
 @keyframes workpage-loading-spin { to { transform: rotate(360deg); } }
@@ -142,7 +122,7 @@
 .workspace-layers.has-information.information-expanded { --workspace-chat-width: clamp(280px, 32%, 340px); }
 .workspace-layers.has-information > .workpages-dock { z-index: 1; grid-area: 1 / 1 / -1 / -1; padding-bottom: 12px; background: var(--surface-1); }
 .workspace-layers.has-information .workpages-dock > :is(.workpages-stage, .workpage-operations) { width: calc(100% - var(--workspace-chat-width) - 36px); margin-left: 12px; }
-.workspace-layers.has-information > .agent-conversation { --ai-content-inset: 16px; z-index: 2; grid-area: 2 / 2 / 3 / 3; margin: 0 12px 12px 0; overflow: hidden; border: 1px solid var(--edge-emphasis); border-radius: var(--radius-card); background: var(--workspace-content-surface); box-shadow: -8px 6px 24px rgb(var(--material-shadow-rgb) / 18%); }
+.workspace-layers.has-information > .agent-conversation { --ai-content-inset: 16px; container: floating-conversation / inline-size; z-index: 2; grid-area: 2 / 2 / 3 / 3; margin: 0 12px 12px 0; overflow: hidden; border: 1px solid var(--edge-emphasis); border-radius: var(--radius-card); background: var(--workspace-content-surface); box-shadow: -8px 6px 24px rgb(var(--material-shadow-rgb) / 18%); }
 .workspace-layers.has-information .workspace-conversation-placement { display: flex; flex: 0 0 auto; align-items: center; justify-content: space-between; gap: 6px; min-height: 44px; padding: 6px 10px; border-bottom: 1px solid var(--edge-normal); }
 .workspace-conversation-grip { display: inline-flex; flex: 1 1 auto; align-items: center; gap: 6px; min-width: 0; min-height: 28px; padding: 0; border: 0; background: transparent; color: var(--muted); font-size: var(--text-label); white-space: nowrap; text-align: left; }
 .workspace-conversation-grip:disabled { opacity: 1; cursor: default; }
@@ -158,6 +138,17 @@
 .ai-first .workspace-layers.has-information .agent-empty strong { font-size: var(--text-heading); }
 .ai-first .workspace-layers.has-information .agent-empty p { font-size: var(--text-small); }
 .ai-first .workspace-layers.has-information .agent-input-region { width: calc(100% - 32px); padding-bottom: 16px; }
+.workspace-layers.has-information .agent-composer-toolbar { display: grid; grid-template-columns: minmax(0, 1fr) auto; align-items: center; gap: 4px; }
+.workspace-layers.has-information .agent-composer-toolbar-left { min-width: 0; flex-wrap: nowrap; gap: 2px; }
+.workspace-layers.has-information .agent-reasoning-picker { flex: 1 1 0; min-width: 0; }
+.workspace-layers.has-information .agent-effort-trigger { width: 100%; min-width: 0; padding-inline: 4px; }
+.workspace-layers.has-information .agent-model-value { flex: 1 1 auto; min-width: 0; max-width: none; text-align: left; }
+.workspace-layers.has-information .agent-settings-trigger .agent-control-label { display: none; }
+.workspace-layers.has-information .agent-composer-toolbar-right { justify-self: end; width: auto; min-width: 0; margin: 0; }
+.workspace-layers.has-information .agent-composer-action { width: 32px; min-width: 32px; min-height: 32px; }
+.workspace-layers.has-information .agent-send-button { width: 32px; min-width: 32px; height: 32px; }
+.workspace-layers.has-information .agent-composer-action > .agent-stop-button { display: grid; place-items: center; width: 32px; height: 32px; min-height: 32px; padding: 0; }
+.workspace-layers.has-information .agent-stop-button > span { display: none; }
 .ai-first .workspace-layers.has-information .agent-entry-user { max-width: 92%; }
 .ai-first .workspace-layers.has-information .agent-recent-conversations { display: none; }
 .workspace-layers:not(.has-information) .workpages-dock > :is(.workpages-stage, .workpage-operations) { display: none; }
@@ -168,14 +159,11 @@
   .workpages-stage { grid-template-columns: minmax(0, 1fr); }
   .workpage-frame:not([data-active="true"]) { display: none !important; }
   .workpage-frame[data-active="true"] { grid-column: 1 / -1; }
-  .workpages-launcher-button { padding-inline: 6px; }
-  .workpages-toolbar > .workpages-launcher .workpages-launcher-button:nth-child(n + 3) > .workpages-tool-label, .workpages-records-button > span { display: none; }
   .workpage-operation-list > li { grid-template-columns: minmax(35px, .5fr) minmax(45px, .8fr) minmax(65px, 1.5fr) auto 30px; gap: 5px; }
   .workpage-target { max-width: 110px; }
 }
 @container agent-workspace (max-width: 680px) {
-  .workspace-layers.has-information { --workspace-chat-height: clamp(190px, 34vh, 330px); grid-template-columns: minmax(0, 1fr); }
-  .workspace-layers.has-information.information-expanded { --workspace-chat-height: clamp(160px, 26vh, 250px); }
+  .workspace-layers.has-information { --workspace-chat-height: clamp(260px, 34svh, 340px); grid-template-columns: minmax(0, 1fr); }
   .workspace-layers.has-information > .workpages-dock { padding-bottom: calc(var(--workspace-chat-height) + 24px); }
   .workspace-layers.has-information .workpages-dock > :is(.workpages-stage, .workpage-operations) { width: calc(100% - 24px); }
   .workspace-layers.has-information > .agent-conversation { grid-area: 1 / 1 / -1 / -1; align-self: end; height: var(--workspace-chat-height); margin: 0 12px 12px; box-shadow: 0 -6px 24px rgb(var(--material-shadow-rgb) / 18%); }
@@ -184,8 +172,14 @@
   .ai-first .workspace-layers.has-information .agent-input-region { padding-bottom: 10px; }
   .ai-first .workspace-layers.has-information .agent-composer-shell { min-height: 80px; }
   .workpages-toolbar { gap: 4px; padding-inline: 8px; }
-  .workpages-toolbar-actions > .workpages-layer-toggle { padding-inline: 5px; }
-  .workpage-dock-control { display: none; }
+}
+@container agent-workspace (max-width: 560px) {
+  .workpages-toolbar { gap: 6px; }
+  .workpages-launcher-button { min-width: 60px; padding-inline: 6px; }
+  .workpages-target-switch > span, .workpages-target-switch > svg:last-child { display: none; }
+  .workpages-target-switch { justify-content: center; width: 30px; padding: 5px; }
+  .ai-first .workspace-layers.has-information .agent-conversation.is-empty .agent-feed-frame { display: none; }
+  .ai-first .workspace-layers.has-information .agent-conversation.is-empty .agent-input-region { margin-top: auto; }
 }
 
 /* Borrow the existing reference column without changing any shell track widths.
@@ -206,7 +200,7 @@
   .ai-first.information-open .agent-conversation[data-floating="true"] .agent-composer-shell { --composer-action-size: 28px; --composer-action-inset: 8px; min-height: 100px; gap: 8px; padding: 10px 8px 8px; border-radius: var(--radius-card); }
   .ai-first.information-open .agent-conversation[data-floating="true"] .agent-composer-input { min-height: 42px; max-height: max(42px, min(120px, calc(var(--conversation-height) - 220px))); padding-inline: 2px; }
   .ai-first.information-open .agent-conversation[data-floating="true"] .agent-composer-toolbar { display: grid; grid-template-columns: minmax(0, 1fr) auto; gap: 4px; min-height: 36px; }
-  .ai-first.information-open .agent-conversation[data-floating="true"] .agent-composer-toolbar-left { flex-wrap: wrap; }
+  .ai-first.information-open .agent-conversation[data-floating="true"] .agent-composer-toolbar-left { flex-wrap: nowrap; }
   .ai-first.information-open .agent-conversation[data-floating="true"] .agent-composer-toolbar-right { width: auto; min-width: 0; gap: 4px; margin-left: 0; justify-self: end; }
   .agent-conversation[data-floating="true"] .agent-reasoning-picker { position: static; flex: 1 1 0; }
   .agent-conversation[data-floating="true"] .agent-effort-trigger { width: 100%; min-width: 0; padding-inline: 2px; }

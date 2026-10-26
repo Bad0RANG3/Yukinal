@@ -13,6 +13,7 @@ import { Icon } from "../../components/Icon.js";
 import { runStateLabel } from "./transcript.js";
 import { agentStageLabel } from "./stage-labels.js";
 import { REASONING_LABELS } from "./reasoning.js";
+import { AgentUsageDetails } from "./AgentUsageDetails.js";
 
 export function AgentHeader({
   running,
@@ -120,21 +121,11 @@ export function AgentRunStatus({ running, runState, stage = null, tokenUsage, co
         {statusLabel}
       </span>
     )}
-    {contextUsage || tokenUsage ? <details className="agent-context-details" onKeyDown={(event) => {
-      if (event.key !== "Escape" || !event.currentTarget.open) return;
-      event.currentTarget.open = false;
-      event.currentTarget.querySelector("summary")?.focus();
-      event.stopPropagation();
-    }}>
-      <summary className={`agent-context-trigger ${contextUsage ? "agent-context-usage" : "agent-token-usage"}`} aria-label="查看上下文与用量">
-        {contextUsage ? <>
+    {contextUsage || tokenUsage ? <AgentUsageDetails className={contextUsage ? "agent-context-usage" : "agent-token-usage"} trigger={contextUsage ? <>
           {compact ? <Icon name="archive" size="xs" /> : <span className="agent-context-caption">上下文 </span>}
           <span>{contextUsage.includedTurns}/{contextUsage.totalTurns}</span>
           {!compact && contextUsage.compactedTurns ? <span className="agent-context-compacted"> · 已压缩</span> : null}
-        </> : usageLabel}
-        <Icon name="chevronDown" size="xs" />
-      </summary>
-      <div className="agent-context-panel" tabIndex={0} role="region" aria-label="上下文与用量详情">
+        </> : usageLabel}>
         <strong>上下文与用量</strong>
         <dl className="agent-context-facts">
           {contextUsage ? <>
@@ -155,7 +146,6 @@ export function AgentRunStatus({ running, runState, stage = null, tokenUsage, co
           {contextUsage?.memorySources?.length ? <div><dt>使用记忆</dt><dd>{contextUsage.memorySources.map((source) => source.title).join("、")}</dd></div> : null}
         </dl>
         <p className="agent-context-note">KiB 为文本大小；token 用量由模型上报。</p>
-      </div>
-    </details> : null}
+    </AgentUsageDetails> : null}
   </>;
 }

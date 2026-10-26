@@ -32,7 +32,7 @@ export function ConversationSettings(props: ConversationSettingsProps) {
   const warning = policyEnvironmentWarning(props.runPolicy, props.targetEnvironment);
   const change = <T,>(callback: (value: T) => void, value: T) => { if (editable) callback(value); };
   return <div ref={props.panelRef} id={props.id}
-    className={`agent-settings-panel${props.closing ? " is-closing" : ""}`}
+    popover="manual" className={`agent-settings-panel anchored-popover${props.closing ? " is-closing" : ""}`}
     role="dialog" aria-labelledby={`${props.id}-title`} aria-hidden={!props.open} inert={!props.open}
     tabIndex={-1} onAnimationEnd={props.onAnimationEnd}>
     <div className="agent-settings-heading">

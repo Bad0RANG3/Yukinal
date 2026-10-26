@@ -13,6 +13,8 @@ import {
   APP_VERSION,
   IPC_COMMANDS,
   type Activity,
+  type AgentContextUsage,
+  type AgentTokenUsage,
   type AiProviderConfig,
   type InvestigationSchedule,
   type InvestigationScheduleRun,
@@ -421,6 +423,17 @@ export function isPreviewFixture(): boolean {
   return import.meta.env?.DEV === true
     && typeof window !== "undefined"
     && new URLSearchParams(window.location.search).get("fixture") === "1";
+}
+
+/** Opt-in sample diagnostics for exercising the real usage UI without a model run. */
+export function previewAgentDiagnostics(): { tokenUsage: AgentTokenUsage; contextUsage: AgentContextUsage | null } | null {
+  if (!isPreviewFixture()) return null;
+  const mode = new URLSearchParams(window.location.search).get("diagnostics");
+  if (mode !== "1" && mode !== "tokens") return null;
+  return {
+    tokenUsage: { inputTokens: 12480, outputTokens: 2360, reportedRequests: 3, unreportedRequests: 1, reasoningTokens: 1840, reasoningReportedRequests: 2, cacheReadTokens: 8192, cacheReportedRequests: 2 },
+    contextUsage: mode === "tokens" ? null : { includedTurns: 18, totalTurns: 32, compactedTurns: 14, inputBytes: 48256, maxInputBytes: 131072 },
+  };
 }
 
 /** A parsed IPC response for the local visual-audit adapter. */

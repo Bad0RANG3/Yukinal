@@ -18,7 +18,7 @@ export function ServerInspectorHeader({ onBack, onClose }: { onBack: () => void;
         {server ? <span className={`inspector-connection inspector-connection-${server.status}`}>
           <span aria-hidden="true" />{SERVER_STATUS_LABEL[server.status]}
         </span> : null}
-        <button type="button" className="icon-button context-close" aria-label="回到对话" onClick={onClose}><Icon name="close" /></button>
+        <button type="button" className="icon-button context-close" aria-label="关闭参考面板" onClick={onClose}><Icon name="close" /></button>
       </div>
       {server ? <div className="inspector-object-identity">
         <h2>{server.name}</h2>

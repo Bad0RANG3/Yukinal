@@ -18,6 +18,7 @@ test("shortModelLabel strips the vendor prefix so the closed control stays reada
 test("shortModelLabel keeps names without a vendor prefix intact", () => {
   assert.equal(shortModelLabel("glm-5.2"), "glm-5.2");
   assert.equal(shortModelLabel("Kimi K3 (2x usage)"), "Kimi K3 (2x usage)");
+  assert.equal(shortModelLabel("Code Reasoning — Diagnostics / Extended Context"), "Code Reasoning — Diagnostics / Extended Context");
 });
 
 test("shortModelLabel takes the segment after the last slash", () => {

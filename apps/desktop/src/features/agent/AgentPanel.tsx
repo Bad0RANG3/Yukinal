@@ -29,7 +29,7 @@ import { Icon } from "../../components/Icon.js";
 import { callDesktop, isDesktopShell, isNativeDesktopShell } from "../../lib/ipc.js";
 import { errorMessage } from "../../lib/format.js";
 import { useDismissOnOutsidePointer } from "../../hooks/useDismissOnOutsidePointer.js";
-import { isPreviewFixture } from "../../lib/preview-fixtures.js";
+import { isPreviewFixture, previewAgentDiagnostics } from "../../lib/preview-fixtures.js";
 import { useAgentStatus, useSpawnAgent } from "../../lib/runtime.js";
 import { useServers } from "../../lib/servers.js";
 import { usePreferencesStore } from "../../stores/preferences-store.js";
@@ -108,9 +108,11 @@ export function AgentPanel({ onCloseStart, onCloseEnd, workspace = false, worksp
   const shell = isDesktopShell();
   const preview = isPreviewFixture();
   const livePreviewChat = preview && isNativeDesktopShell();
+  const diagnostics = livePreviewChat ? null : previewAgentDiagnostics();
   const agentRunning = (!preview || livePreviewChat) && agentStatus.data?.running === true;
   const servers = useServers();
   const focusServer = servers.data?.find((server) => server.id === selectedServerId);
+  const workpagesVisible = useWorkpagesStore((state) => !state.collapsed && (state.pages.length > 0 || state.operationsOpen));
 
   const models = useAgentModels();
   const contextEpoch = useWorkspaceStore((state) => state.agentContextEpoch);
@@ -515,7 +517,7 @@ export function AgentPanel({ onCloseStart, onCloseEnd, workspace = false, worksp
                 status={<>
                   {livePreviewChat ? <span>模拟服务器 · 仅对话</span> : null}
                   <button type="button" className="agent-composer-tool agent-scope-trigger" disabled={run.running || !selectedServerId} aria-label={selectedServerId ? `当前范围：${focusServer?.name ?? selectedServerId}，切换到全局对话` : "当前范围：全局工作区"} title={run.running ? runContext ?? "运行中" : selectedServerId ? `${focusServer?.name ?? selectedServerId} · 切换到全局` : "全局工作区"} onClick={() => useWorkspaceStore.getState().selectServer(null)}><Icon name={selectedServerId ? "servers" : "projects"} size="md" /></button>
-                  <AgentRunStatus preview={preview && !livePreviewChat} running={run.running} runState={run.runState} stage={run.stage} tokenUsage={run.tokenUsage} contextUsage={run.contextUsage} agentReady={agentRunning} shell={shell} />
+                  <AgentRunStatus compact={workspace && workpagesVisible} preview={preview && !livePreviewChat} running={run.running} runState={run.runState} stage={run.stage} tokenUsage={run.tokenUsage ?? diagnostics?.tokenUsage ?? null} contextUsage={run.contextUsage ?? diagnostics?.contextUsage ?? null} agentReady={agentRunning} shell={shell} />
                 </>}
                 prompt={prompt}
                 onPromptChange={setPrompt}

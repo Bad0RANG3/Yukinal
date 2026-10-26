@@ -36,6 +36,7 @@ import {
 import { Icon } from "../../components/Icon.js";
 import { useDismissOnOutsidePointer } from "../../hooks/useDismissOnOutsidePointer.js";
 import { usePresence } from "../../hooks/usePresence.js";
+import { useAnchoredPopover } from "../../hooks/useAnchoredPopover.js";
 import { composerKeyAction } from "./composer-keyboard.js";
 import { ConversationSettings } from "./ConversationSettings.js";
 import { ReasoningPicker } from "./ReasoningPicker.js";
@@ -218,6 +219,7 @@ export function AgentComposer({
      唯一的事实来源）。 */
   const suggestionsPresence = usePresence(open, { exitAnimation: "popover-exit" });
   const settingsPresence = usePresence(menuOpen, { exitAnimation: "popover-exit" });
+  useAnchoredPopover(settingsPresence.mounted, settingsTriggerRef, settingsPanelRef, 340);
   const sendPresence = usePresence(hasContent && !running, { exitAnimation: "pop-exit" });
   const runningPresence = usePresence(running, { exitAnimation: "pop-exit" });
   const showSend = hasContent && !running;

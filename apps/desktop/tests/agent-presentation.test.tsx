@@ -114,18 +114,9 @@ test("context disclosure separates history, text budget and partial model-report
   assert.match(markup, /1 次模型请求未上报用量/);
   assert.match(markup, /用户提供的约定/);
   assert.doesNotMatch(markup, /PRIVATE_|%|role="progressbar"|\bopen=/);
-  const tree = AgentRunStatus({ running: false, runState: null, tokenUsage: null, contextUsage: context, agentReady: true, shell: true });
-  const disclosure = elements(tree).find((element) => element.type === "details");
-  assert.ok(disclosure);
-  let focused = 0;
-  let stopped = 0;
-  const target = { open: true, querySelector: (selector: string) => { assert.equal(selector, "summary"); return { focus: () => { focused += 1; } }; } };
-  const onKeyDown = disclosure.props.onKeyDown as (event: { key: string; currentTarget: typeof target; stopPropagation: () => void }) => void;
-  onKeyDown({ key: "Enter", currentTarget: target, stopPropagation: () => { stopped += 1; } });
-  assert.equal(target.open, true);
-  onKeyDown({ key: "Escape", currentTarget: target, stopPropagation: () => { stopped += 1; } });
-  assert.equal(target.open, false);
-  assert.equal(focused, 1); assert.equal(stopped, 1);
+  assert.match(markup, /popover="manual"/);
+  assert.match(markup, /aria-expanded="false"/);
+  assert.match(markup, /aria-label="关闭上下文与用量"/);
 });
 
 test("missing model usage never becomes zero tokens or a model-capacity percentage", () => {

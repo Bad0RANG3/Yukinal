@@ -12,7 +12,7 @@ import { ServerInspectorHeader } from "./ServerInspectorHeader.js";
 import { isPreviewFixture } from "../lib/preview-fixtures.js";
 import { WorkpagesDock } from "../features/workpages/WorkpagesDock.js";
 import { useWorkpagesStore } from "../features/workpages/workpages-store.js";
-import { openNativeWorkpage } from "../lib/ipc.js";
+import { WORKPAGE_TOOLS, type WorkpageTool } from "../features/workpages/workpage-model.js";
 
 const GettingStarted = lazy(async () => ({ default: (await import("../features/onboarding/GettingStarted.js")).GettingStarted }));
 const RuntimeSettings = lazy(async () => ({ default: (await import("../features/settings/RuntimeSettings.js")).RuntimeSettings }));
@@ -56,7 +56,7 @@ export function AppShell() {
   const inspectorRef = useRef<HTMLElement>(null);
   const aiWorkspaceRef = useRef<HTMLDivElement>(null);
   const previousPrimary = useRef(primary);
-  const choosingWorkpageTarget = useRef(false);
+  const choosingWorkpageTarget = useRef<WorkpageTool | null>(null);
   const closeGuide = () => { useOnboardingStore.getState().dismiss(); setGuideOpen(false); };
   const detail = primary === "servers" && serverDetailOpen;
   const primaryActive = (item: (typeof VISIBLE_PRIMARY_NAV)[number]) => primary === item || (item === "activity" && primary === "servers" && !serverDetailOpen);
@@ -83,7 +83,7 @@ export function AppShell() {
     const frame = requestAnimationFrame(() => sidebar.querySelector<HTMLElement>("button")?.focus());
     const onKey = (event: globalThis.KeyboardEvent) => {
       if (event.target instanceof HTMLElement && event.target.closest("dialog[open]")) return;
-      if (event.key === "Escape") { event.preventDefault(); choosingWorkpageTarget.current = false; setSidebarOpen(false); return; }
+      if (event.key === "Escape") { event.preventDefault(); choosingWorkpageTarget.current = null; setSidebarOpen(false); return; }
       if (event.key !== "Tab") return;
       const items = Array.from(sidebar.querySelectorAll<HTMLElement>("button:not([disabled]), input:not([disabled]), [href]"))
         .filter((item) => item.getClientRects().length > 0);
@@ -101,22 +101,22 @@ export function AppShell() {
     layout.addEventListener("change", resize); navigation.addEventListener("change", closeNavigation);
     return () => { layout.removeEventListener("change", resize); navigation.removeEventListener("change", closeNavigation); };
   }, []);
-  const openContext = () => { useWorkpagesStore.getState().setCollapsed(true); setContextOpen(true); requestAnimationFrame(() => inspectorRef.current?.focus({ preventScroll: true })); };
+  const openContext = () => { if (!compact) useWorkpagesStore.getState().setCollapsed(true); setContextOpen(true); requestAnimationFrame(() => inspectorRef.current?.focus({ preventScroll: true })); };
   const returnToAI = () => {
     setContextOpen(false); setSidebarOpen(false);
-    useWorkpagesStore.getState().setCollapsed(true);
     requestAnimationFrame(() => {
-      if (window.matchMedia("(max-width: 1180px)").matches) contextToggleRef.current?.focus({ preventScroll: true });
+      const input = aiWorkspaceRef.current?.querySelector<HTMLTextAreaElement>('.agent-conversation textarea');
+      if (input && !input.disabled) input.focus({ preventScroll: true });
       else aiWorkspaceRef.current?.focus({ preventScroll: true });
     });
   };
-  const chooseWorkpageTarget = () => {
-    choosingWorkpageTarget.current = true;
+  const chooseWorkpageTarget = (kind: WorkpageTool) => {
+    choosingWorkpageTarget.current = kind;
     if (window.matchMedia("(max-width: 720px)").matches) setSidebarOpen(true);
     else requestAnimationFrame(() => sidebarRef.current?.querySelector<HTMLInputElement>(".server-search input")?.focus());
   };
   const navigate = (item: PrimaryNav) => {
-    choosingWorkpageTarget.current = false;
+    choosingWorkpageTarget.current = null;
     if (item === "board") { useWorkpagesStore.getState().openTeamBoard(null); setContextOpen(false); }
     else useWorkpagesStore.getState().setCollapsed(true);
     setPrimary(item); closeGuide(); setSidebarOpen(false);
@@ -131,17 +131,28 @@ export function AppShell() {
   return (
     <div onClickCapture={recordTeamAttention} onFocusCapture={recordTeamAttention} className={`app-shell ai-first ${sidebarOpen ? "navigation-open" : ""} ${compact && contextOpen ? "context-open" : ""} ${informationOpen && !(compact && contextOpen) ? "information-open" : ""} ${informationExpanded ? "information-expanded" : ""}`} data-primary={primary}>
       <aside className="workspace-sidebar" id="workspace-sidebar" ref={sidebarRef} aria-label="工作区导航">
-        <div className="workspace-brand"><span>Yukinal</span><button type="button" className="icon-button navigation-close" aria-label="关闭导航" onClick={() => { choosingWorkpageTarget.current = false; setSidebarOpen(false); }}><Icon name="close" /></button></div>
+        <div className="workspace-brand"><span>Yukinal</span><button type="button" className="icon-button navigation-close" aria-label="关闭导航" onClick={() => { choosingWorkpageTarget.current = null; setSidebarOpen(false); }}><Icon name="close" /></button></div>
         <nav className="workspace-navigation" aria-label="主导航">{VISIBLE_PRIMARY_NAV.map((item) => <button type="button" key={item} data-attention={`nav:${item}`} className={`workspace-nav-item team-operation-target ${primaryActive(item) ? "is-active" : ""}`} aria-current={primaryActive(item) ? "page" : undefined} onClick={() => navigate(item)}><Icon name={PRIMARY_NAV_META[item].icon} size="md" /><span>{PRIMARY_NAV_META[item].label}</span>{item === "board" ? <TeamBoardNavFeedback /> : null}</button>)}</nav>
-        <ServerList embedded onClose={() => { choosingWorkpageTarget.current = false; setSidebarOpen(false); }} onSelect={() => { setSidebarOpen(false); closeGuide(); if (choosingWorkpageTarget.current) { choosingWorkpageTarget.current = false; returnToAI(); } else { useWorkpagesStore.getState().setCollapsed(true); if (window.matchMedia("(max-width: 1180px)").matches) openContext(); } }} onOpenWorkpage={() => { setContextOpen(false); setSidebarOpen(false); }} />
+        <ServerList embedded onClose={() => { choosingWorkpageTarget.current = null; setSidebarOpen(false); }} onSelect={() => {
+          setSidebarOpen(false); closeGuide();
+          const workpages = useWorkpagesStore.getState();
+          const active = workpages.pages.find((page) => page.id === workpages.activeId);
+          const kind = choosingWorkpageTarget.current ?? (!workpages.collapsed && active && WORKPAGE_TOOLS.includes(active.kind as WorkpageTool) ? active.kind as WorkpageTool : null);
+          choosingWorkpageTarget.current = null;
+          if (kind) {
+            workpages.openTool(kind, { serverId: useWorkspaceStore.getState().selectedServerId });
+            setContextOpen(false);
+            requestAnimationFrame(() => aiWorkspaceRef.current?.querySelector<HTMLButtonElement>(`[data-workspace-view="${kind}"]`)?.focus({ preventScroll: true }));
+          } else {
+            workpages.setCollapsed(true);
+            if (window.matchMedia("(max-width: 1180px)").matches) openContext();
+          }
+        }} onOpenWorkpage={() => { setContextOpen(false); setSidebarOpen(false); }} />
       </aside>
-      {sidebarOpen ? <button type="button" className="navigation-scrim" aria-label="关闭导航" onClick={() => setSidebarOpen(false)} /> : null}
+      {sidebarOpen ? <button type="button" className="navigation-scrim" aria-label="关闭导航" onClick={() => { choosingWorkpageTarget.current = null; setSidebarOpen(false); }} /> : null}
       <div className="ai-workspace-column" ref={aiWorkspaceRef} tabIndex={-1}>
         <AgentPanel workspace onAttentionRequested={returnToAI}
-          workspaceWorkpages={<WorkpagesDock onChooseTarget={chooseWorkpageTarget} onPopOut={async (page) => {
-            if (!page.serverId || page.kind === "evidence" || page.kind === "artifact" || page.kind === "board") throw new Error("该内容可在工作页中展开");
-            await openNativeWorkpage({ kind: page.kind, serverId: page.serverId });
-          }} />} workspaceControls={<>
+          workspaceWorkpages={<WorkpagesDock onChooseTarget={chooseWorkpageTarget} />} workspaceControls={<>
           {import.meta.env.DEV ? <LivePreviewControl /> : null}
           <button type="button" ref={sidebarToggleRef} className="icon-button navigation-toggle" aria-label="打开导航" aria-controls="workspace-sidebar" aria-expanded={sidebarOpen} onClick={() => setSidebarOpen(true)}><Icon name="projects" /></button>
           <button type="button" className="text-button workspace-guide-toggle" aria-label="连接设置" title="连接设置" onClick={() => { setGuideOpen((open) => !open); openContext(); }}><Icon name="settings" size="sm" /><span>连接设置</span></button>
@@ -151,7 +162,7 @@ export function AppShell() {
       <main className="workspace-main workspace-inspector" id="workspace-inspector" ref={inspectorRef} tabIndex={-1} aria-label="动态与参考资料">
         {detail && !guideOpen ? <ServerInspectorHeader onBack={() => setPrimary("activity")} onClose={returnToAI} /> : <header className="workspace-header is-titleless">
           <div className="workspace-header-meta">
-            <button type="button" className="icon-button context-close" aria-label="回到对话" onClick={returnToAI}><Icon name="close" /></button>
+            <button type="button" className="icon-button context-close" aria-label="关闭参考面板" onClick={returnToAI}><Icon name="close" /></button>
           </div>
         </header>}
         {detail && !guideOpen ? <div className="server-tabs" role="tablist" aria-label="服务器视图">{INSPECTOR_PAGES.map((page, index) => <button key={page} type="button" role="tab" data-attention={`view:${page}`} data-server-id={selectedServerId ?? undefined} id={`server-tab-${page}`} aria-controls="server-view" aria-selected={serverPage === page} tabIndex={serverPage === page ? 0 : -1} onKeyDown={(event) => navigateTab(event, index)} onClick={() => setServerPage(page)} className={`server-tab ${serverPage === page ? "server-tab-active" : ""}`}><span>{SERVER_PAGE_LABEL[page]}</span></button>)}</div> : null}

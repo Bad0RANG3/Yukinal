@@ -170,7 +170,7 @@
 .ai-first .navigation-toggle, .ai-first .navigation-close, .ai-first .context-toggle, .ai-first .context-close { display: none; }
 
 @container agent-workspace (max-width: 600px) {
-  .ai-first .agent-token-usage, .ai-first .live-preview-label { display: none; }
+  .ai-first .live-preview-label { display: none; }
   .ai-first .agent-header-actions { gap: 4px; }
 }
 
@@ -195,7 +195,7 @@
   .ai-first .agent-header { padding-inline: 16px; }
   .ai-first .agent-feed { padding-inline: var(--ai-content-inset); }
   .ai-first .agent-input-region { width: calc(100% - 2 * var(--ai-content-inset)); padding-bottom: 16px; }
-  .ai-first .workspace-guide-toggle, .ai-first .agent-token-usage { display: none; }
+  .ai-first .workspace-guide-toggle { display: none; }
   .ai-first .live-preview-label { display: none; }
   .ai-first .agent-header-actions { gap: 4px; }
   .ai-first .agent-empty { gap: 12px; }

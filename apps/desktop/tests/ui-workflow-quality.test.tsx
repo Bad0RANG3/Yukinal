@@ -14,6 +14,8 @@ import { useWorkspaceStore, type WorkspaceState } from "../src/stores/workspace-
 import { AgentFeed } from "../src/features/agent/AgentFeed.js";
 import { AgentHeader } from "../src/features/agent/AgentHeader.js";
 import { appendEntries, type Entry } from "../src/features/agent/transcript.js";
+import { useWorkpagesStore } from "../src/features/workpages/workpages-store.js";
+import { useWorkpageOperations } from "../src/features/workpages/useWorkpageOperations.js";
 
 // Actual React components and QueryClient states, without a DOM, browser, or native host.
 // Effects/focus/layout/real remote behavior are deliberately outside these assertions.
@@ -31,6 +33,7 @@ const { TeamBoardPane } = await import("../src/features/agent-nist/TeamBoardPane
 const { HostKeyGate } = await import("../src/features/servers/HostKeyGate.js");
 const { GettingStarted } = await import("../src/features/onboarding/GettingStarted.js");
 const { WorkpageArtifactView } = await import("../src/features/workpages/WorkpageArtifactView.js");
+const { WorkpagesDock } = await import("../src/features/workpages/WorkpagesDock.js");
 styles.deregister();
 
 const initialWorkspace = useWorkspaceStore.getInitialState();
@@ -76,6 +79,47 @@ function render(node: ReactNode): string { return renderToStaticMarkup(<QueryCli
 function pending(key: QueryKey) { client.getQueryCache().build(client, { queryKey: key }).setState({ status: "pending", fetchStatus: "fetching", data: undefined, error: null }); }
 function failed(key: QueryKey, message = "OFFLINE_FIXTURE_FAILURE") { client.getQueryCache().build(client, { queryKey: key }).setState({ status: "error", fetchStatus: "idle", error: new Error(message) }); }
 function assertAlert(markup: string, text = "OFFLINE_FIXTURE_FAILURE") { assert.match(markup, /role="alert"/); assert.ok(markup.includes(text)); }
+
+test("four tool buttons switch one main view without creating tab or return controls", () => {
+  const initial = useWorkpagesStore.getInitialState();
+  const defaults = { ...initial };
+  try {
+    useWorkpagesStore.setState({ pages: [], retainedTerminals: [], recent: [], activeId: null, expandedId: null, collapsed: false, operationsOpen: false });
+    for (const kind of ["files", "terminal", "logs", "services"] as const) useWorkpagesStore.getState().openTool(kind);
+    Object.assign(initial, useWorkpagesStore.getState());
+    let markup = render(<WorkpagesDock onChooseTarget={() => {}} />);
+    assert.equal((markup.match(/data-workspace-view=/g) ?? []).length, 4);
+    assert.equal((markup.match(/data-active="true"/g) ?? []).length, 1);
+    assert.match(markup, /workpage-kind-services is-active/);
+    assert.match(markup, /选择服务器以使用服务/);
+    assert.doesNotMatch(markup, /role="tablist"|新增工作页|回到对话|移到右侧|展开工作页/);
+    const terminalId = useWorkpagesStore.getState().retainedTerminals[0]!.id;
+    useWorkpagesStore.getState().openTool("terminal");
+    Object.assign(initial, useWorkpagesStore.getState());
+    markup = render(<WorkpagesDock />);
+    assert.match(markup, /workpage-kind-terminal is-active/);
+    assert.equal(useWorkpagesStore.getState().pages.length, 4);
+    assert.equal(useWorkpagesStore.getState().retainedTerminals.length, 1);
+    assert.equal(useWorkpagesStore.getState().activeId, terminalId);
+  } finally {
+    Object.assign(initial, defaults);
+    useWorkpagesStore.setState(defaults, true);
+  }
+});
+
+test("operation records never display another server's cached results under the selected target", () => {
+  const target = "srv_previewapi";
+  workspace({ selectedServerId: target });
+  const executions = IPC_SCHEMAS[IPC_COMMANDS.toolExecutionList].response.parse(previewResponse(IPC_COMMANDS.toolExecutionList, {})).executions;
+  client.setQueryData(["workpage-tool-executions", target], executions);
+  client.setQueryData(["workpage-activities", target], activity());
+  function Operations() { return <output>{useWorkpageOperations().rows.map((row) => row.target).join(",") || "NO_OPERATIONS"}</output>; }
+  assert.match(render(<Operations />), /NO_OPERATIONS/);
+  workspace({ selectedServerId: null });
+  client.setQueryData(["workpage-tool-executions", null], executions);
+  client.setQueryData(["workpage-activities", null], activity());
+  assert.match(render(<Operations />), /Staging Database Cluster/);
+});
 
 test("shared loading and both error layouts expose exactly one live region without changing their structure", () => {
   const loading = render(<LoadingPanel title="Offline loading" hint="fixture" />);

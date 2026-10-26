@@ -19,6 +19,7 @@ import { useCallback, useEffect, useLayoutEffect, useId, useRef, useState, type 
 import { Icon } from "../../components/Icon.js";
 import { useDismissOnOutsidePointer } from "../../hooks/useDismissOnOutsidePointer.js";
 import { usePresence } from "../../hooks/usePresence.js";
+import { useAnchoredPopover } from "../../hooks/useAnchoredPopover.js";
 
 /** 一个可选模型。`key` 是 provider:model 复合键，因为同名模型可能挂在多个 provider 下。 */
 export type ModelPickerChoice = {
@@ -35,6 +36,7 @@ export type ModelPickerChoice = {
  * 没有斜杠时原样返回，避免把 `gpt-4` 之类的名字切坏。
  */
 export function shortModelLabel(label: string): string {
+  if (/\s/.test(label.trim())) return label;
   const tail = label.slice(label.lastIndexOf("/") + 1).trim();
   return tail || label;
 }
@@ -92,12 +94,14 @@ export function ModelPicker({
   const [highlight, setHighlight] = useState<ModelPickerHighlight>(() => ({ choiceKey: selectedKey, selectedKey }));
   const rootRef = useRef<HTMLDivElement>(null);
   const listRef = useRef<HTMLUListElement>(null);
+  const surfaceRef = useRef<HTMLDivElement>(null);
   const listboxId = useId();
   // 逻辑上的 open 驱动全部行为；presence 只决定「还在不在 DOM 里」，
   // 好让 popover-exit 有机会播完。两者绝不能混用。
   const menuOpen = open && !disabled && choices.length > 0;
   const interactive = !disabled && (inline || menuOpen);
   const presence = usePresence(menuOpen, { exitAnimation: "popover-exit" });
+  useAnchoredPopover(!inline && presence.mounted, rootRef, surfaceRef, 300);
 
   useEffect(() => { if (disabled || !choices.length) setOpen(false); }, [disabled, choices.length]);
 
@@ -218,7 +222,7 @@ export function ModelPicker({
       </button>}
 
       {!inline && presence.mounted ? (
-        <div className={`agent-model-popover ${!menuOpen ? "is-closing" : ""}`} aria-hidden={!menuOpen} inert={!menuOpen} onAnimationEnd={presence.onAnimationEnd}>
+        <div ref={surfaceRef} popover="manual" className={`agent-model-popover anchored-popover ${!menuOpen ? "is-closing" : ""}`} aria-hidden={!menuOpen} inert={!menuOpen} onAnimationEnd={presence.onAnimationEnd}>
         <p className="agent-model-menu-title">选择模型</p>
         {list}
         </div>

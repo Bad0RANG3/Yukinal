@@ -6,9 +6,8 @@ import { useWorkpagesStore } from "./workpages-store.js";
 /** The conversation stays mounted as information moves into and out of view. */
 export function WorkspaceLayers({ tools, children }: { tools?: ReactNode; children: ReactNode }) {
   const informationOpen = useWorkpagesStore((state) => !state.collapsed && (state.pages.length > 0 || state.operationsOpen));
-  const expanded = useWorkpagesStore((state) => Boolean(state.expandedId));
   if (!tools) return children;
-  return <div className={`workspace-layers ${informationOpen ? "has-information" : ""} ${expanded ? "information-expanded" : ""}`}>
+  return <div className={`workspace-layers ${informationOpen ? "has-information information-expanded" : ""}`}>
     {tools}
     {children}
   </div>;
@@ -100,16 +99,12 @@ export function WorkspaceConversation({ enabled, empty, children }: { enabled: b
 
   return <div ref={conversationRef} style={style} data-floating={Boolean(bounds && enabled && informationOpen)} data-interacting={interacting} className={`agent-conversation ${empty ? "is-empty" : "has-messages"}`}>
     {enabled ? <header className="workspace-conversation-placement">
-      <button type="button" disabled={!bounds} className="workspace-conversation-grip" aria-label="上下移动临时对话" title="上下拖动；方向键移动，Home 居中" {...gestureProps("move")}><Icon name="agent" size="sm" /><span>临时对话</span></button>
+      <button type="button" disabled={!bounds} className="workspace-conversation-grip" aria-label="上下移动 Agent 对话" title={bounds ? "上下拖动；方向键移动，Home 居中" : "Agent 对话"} {...gestureProps("move")}><Icon name="agent" size="sm" /><span>Agent 对话</span></button>
       <div className="workspace-conversation-actions">
-        <button type="button" className="text-button workspace-conversation-center" title="将临时对话居中" onClick={() => bounds && setPlacement(centerConversationFrame(bounds, frame ?? undefined))}>居中</button>
-        <button type="button" className="text-button" title="结束借用右侧，回到中间对话" onClick={() => {
-          useWorkpagesStore.getState().setCollapsed(true);
-          requestAnimationFrame(() => conversationRef.current?.querySelector("textarea")?.focus({ preventScroll: true }));
-        }}>返回中间<Icon name="chevronRight" size="sm" /></button>
+        {bounds ? <button type="button" className="text-button workspace-conversation-center" title="将 Agent 对话居中" onClick={() => setPlacement(centerConversationFrame(bounds, frame ?? undefined))}>居中</button> : null}
       </div>
     </header> : null}
     {children}
-    {enabled ? <button type="button" className="workspace-conversation-resize" aria-label="调整临时对话大小" title="拖动调整大小；方向键微调，Home 恢复默认大小" {...gestureProps("resize")} /> : null}
+    {enabled ? <button type="button" className="workspace-conversation-resize" aria-label="调整 Agent 对话大小" title="拖动调整大小；方向键微调，Home 恢复默认大小" {...gestureProps("resize")} /> : null}
   </div>;
 }
