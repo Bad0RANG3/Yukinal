@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import tempfile
 import unittest
+import json
 from typing import Any
 
 from langchain_core.messages import AIMessage
@@ -196,6 +197,85 @@ class ModelLoopTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(model.seen_messages[1][-1].type, "tool")
         self.assertEqual(model.seen_messages[1][-1].name, "ops__read")
 
+    async def test_read_tool_failure_returns_to_model_for_self_diagnosis(self) -> None:
+        async def package_check(_arguments: dict[str, Any], _context: ExecutionContext) -> str:
+            raise ToolCallError("unsupported", "package manager apt is unavailable on the target")
+
+        async def inspect_os(_arguments: dict[str, Any], _context: ExecutionContext) -> dict[str, str]:
+            return {"distribution": "Alpine", "packageManager": "apk"}
+
+        registry = ToolRegistry(MemoryAuditSink(), PolicyEngine({
+            ("tenant-1", "user-1"): PrincipalScope(
+                frozenset({"package.inspect", "system.inspect_os"}),
+                frozenset({"stage-1"}),
+                frozenset({"read"}),
+            )
+        }))
+        schema = {
+            "type": "object",
+            "properties": {"target_id": {"type": "string"}},
+            "required": ["target_id"],
+            "additionalProperties": False,
+        }
+        registry.register_many([
+            ToolSpec(
+                name="package.inspect",
+                description="Check package state with a selected package manager.",
+                input_schema=schema,
+                risk_level="read",
+                requires_approval=False,
+                handler=package_check,
+                target_id_argument="target_id",
+                target_required=True,
+            ),
+            ToolSpec(
+                name="system.inspect_os",
+                description="Read the target operating system and available package manager.",
+                input_schema=schema,
+                risk_level="read",
+                requires_approval=False,
+                handler=inspect_os,
+                target_id_argument="target_id",
+                target_required=True,
+            ),
+        ])
+        model = ScriptedModel([
+            AIMessage(content="", tool_calls=[{
+                "name": "package__inspect", "args": {"target_id": "stage-1"},
+                "id": "package-check", "type": "tool_call",
+            }]),
+            AIMessage(content="", tool_calls=[{
+                "name": "package__inspect", "args": {"target_id": "stage-1"},
+                "id": "package-check-repeat", "type": "tool_call",
+            }]),
+            AIMessage(content="The package manager check failed, so I cannot continue."),
+            AIMessage(content="", tool_calls=[{
+                "name": "system__inspect_os", "args": {"target_id": "stage-1"},
+                "id": "inspect-os", "type": "tool_call",
+            }]),
+            AIMessage(content="The target is Alpine Linux, so I will use apk for the package task."),
+        ])
+
+        result = await ModelDrivenAgent(registry, model).run(
+            task_id="task-read-recovery", tenant_id="tenant-1", user_id="user-1",
+            prompt="Install fastfetch on the selected server.",
+            allowed_tools={"package.inspect", "system.inspect_os"},
+            allowed_target_ids={"stage-1"},
+        )
+
+        self.assertEqual(result.status, "succeeded", result)
+        self.assertEqual(result.tool_calls, 3)
+        self.assertEqual([item["status"] for item in result.tool_results], ["failed", "failed", "succeeded"])
+        self.assertEqual(result.tool_results[0]["phase"], "failure_diagnosis")
+        self.assertEqual(result.tool_results[0]["error_code"], "unsupported")
+        self.assertEqual(result.tool_results[1]["phase"], "repetition_guard")
+        self.assertEqual(result.tool_results[1]["error_code"], "tool_repetition_detected")
+        self.assertEqual(json.loads(model.seen_messages[1][-1].content)["errorCode"], "unsupported")
+        self.assertIn("Do not repeat this unchanged call", model.seen_messages[1][-1].content)
+        self.assertEqual(json.loads(model.seen_messages[2][-1].content)["errorCode"], "tool_repetition_detected")
+        self.assertIn("Do not answer yet", model.seen_messages[3][-1].content)
+        self.assertEqual(model.seen_messages[4][-1].type, "tool")
+
     async def test_completed_nonzero_server_exec_result_returns_to_model_for_replanning(self) -> None:
         executed: list[str] = []
         command_result = {
@@ -242,29 +322,61 @@ class ModelLoopTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(model.seen_messages[1][-1].type, "tool")
         self.assertIn("invalid directive", model.seen_messages[1][-1].content)
 
-    async def test_unknown_server_exec_result_stops_without_model_retry(self) -> None:
-        async def handler(_arguments: dict[str, Any], _context: ExecutionContext) -> dict[str, Any]:
+    async def test_unknown_server_exec_result_requires_read_only_diagnosis_before_write(self) -> None:
+        writes: list[str] = []
+
+        async def handler(arguments: dict[str, Any], _context: ExecutionContext) -> dict[str, Any]:
+            writes.append(arguments["command"])
             raise ToolCallError("transport", "the remote result is unknown")
 
         registry = _server_exec_registry(handler)
+        reads: list[bool] = []
+
+        async def read_handler(_arguments: dict[str, Any], _context: ExecutionContext) -> dict[str, str]:
+            reads.append(True)
+            return {"state": "unchanged"}
+
+        registry.register(ToolSpec(
+            name="ops.read",
+            description="Read the actual remote state.",
+            input_schema={"type": "object", "properties": {}, "additionalProperties": False},
+            risk_level="read",
+            requires_approval=False,
+            handler=read_handler,
+        ))
         arguments = {"command": "set -e\ncheck-config"}
         fingerprint = approval_fingerprint(
             "server.exec", None, arguments,
             task_id="task-unknown-exec", tenant_id="tenant-1", user_id="user-1",
         )
-        model = ScriptedModel([AIMessage(content="", tool_calls=[{
-            "name": "server.exec", "args": {"command": "check-config"},
-            "id": "exec-unknown", "type": "tool_call",
-        }])])
+        model = ScriptedModel([
+            AIMessage(content="", tool_calls=[{
+                "name": "server.exec", "args": {"command": "check-config"},
+                "id": "exec-unknown", "type": "tool_call",
+            }]),
+            AIMessage(content="", tool_calls=[{
+                "name": "server.exec", "args": {"command": "repair-config"},
+                "id": "exec-unverified-retry", "type": "tool_call",
+            }]),
+            AIMessage(content="", tool_calls=[{
+                "name": "ops__read", "args": {}, "id": "state-check", "type": "tool_call",
+            }]),
+            AIMessage(content="The command result was unknown. I inspected the remote state and did not repeat the change."),
+        ])
         result = await ModelDrivenAgent(registry, model).run(
             task_id="task-unknown-exec", tenant_id="tenant-1", user_id="user-1",
-            prompt="Validate the service configuration.", allowed_tools={"server.exec"},
+            prompt="Validate the service configuration.", allowed_tools={"server.exec", "ops.read"},
             allowed_target_ids=set(), approved_actions={fingerprint: "approval-1"},
         )
 
-        self.assertEqual(result.status, "failed")
-        self.assertEqual(result.error_code, "transport")
-        self.assertEqual(len(model.seen_messages), 1)
+        self.assertEqual(result.status, "succeeded")
+        self.assertEqual(result.tool_calls, 3)
+        self.assertEqual([item["status"] for item in result.tool_results], ["failed", "failed", "succeeded"], result)
+        self.assertEqual(result.tool_results[1]["error_code"], "read_only_verification_required")
+        self.assertEqual(writes, ["set -e\ncheck-config"])
+        self.assertEqual(reads, [True])
+        self.assertIn("Do not repeat", model.seen_messages[1][-1].content)
+        self.assertEqual(model.seen_messages[3][-1].type, "tool")
 
     async def test_tool_lifecycle_events_share_call_identity_and_redact_secrets(self) -> None:
         events: list[dict[str, Any]] = []
@@ -307,7 +419,14 @@ class ModelLoopTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(result.status, "succeeded")
         usage_events = [event for event in events if event["type"] == "agent.usage"]
         self.assertEqual(usage_events[-1]["usage"]["unreportedRequests"], 2)
-        events = [event for event in events if event["type"] != "agent.usage"]
+        # A read that succeeded moves the visible stage to evidence; that is a
+        # separate observation channel, not part of the call's lifecycle pair.
+        stages = [event for event in events if event["type"] == "agent.stage"]
+        # The final answer then adds exactly one transition into `report`, which the
+        # runtime — not the UI — is now the producer of.
+        self.assertEqual([(event["previous"], event["stage"]) for event in stages],
+                         [("intake", "evidence"), ("evidence", "report")])
+        events = [event for event in events if event["type"] not in {"agent.usage", "agent.stage"}]
         self.assertEqual([event["type"] for event in events], ["agent.tool_call", "agent.tool_result", "agent.text"])
         self.assertEqual(events[-1]["textDelta"], result.answer)
         call_event, result_event, text_event = events
@@ -397,6 +516,8 @@ class ModelLoopTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(executions, [])
         self.assertEqual([event["type"] for event in events], ["agent.tool_call"])
         self.assertEqual(events[0]["decision"], "ask")
+        # A pending approval is not a change: the call has not run yet.
+        self.assertEqual([event["type"] for event in events], ["agent.tool_call"])
         approval = first.approval_requests[0]
         resumed = await agent.resume_after_approval(
             first.checkpoint_id or "",
@@ -411,6 +532,11 @@ class ModelLoopTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(resumed.tool_calls, 1)
         self.assertEqual(len(resumed.tool_results), 1)
         self.assertEqual(resumed.tool_results[0]["status"], "succeeded")
+        # An approved write moves the visible stage to change; the stage is an
+        # observation of the executed result, not part of the call's pair.
+        self.assertEqual([(event["previous"], event["stage"]) for event in events if event["type"] == "agent.stage"],
+                         [("intake", "change"), ("change", "report")])
+        events = [event for event in events if event["type"] != "agent.stage"]
         self.assertEqual([event["type"] for event in events], ["agent.tool_call", "agent.tool_result", "agent.text"])
         self.assertEqual(events[-1]["textDelta"], resumed.answer)
         self.assertEqual(events[1]["callId"], events[0]["callId"])

@@ -19,6 +19,7 @@ import { Icon } from "../../components/Icon.js";
 import { callDesktop, isDesktopShell, subscribeDesktop } from "../../lib/ipc.js";
 import { usePreferencesStore, type TerminalFont } from "../../stores/preferences-store.js";
 import { useWorkspaceStore } from "../../stores/workspace-store.js";
+import { terminalClosedNotice } from "./terminal-exit.js";
 import { pasteFromClipboard, TerminalPasteError } from "./terminal-paste.js";
 
 interface PasteSession {
@@ -186,8 +187,10 @@ export function TerminalPane({ active, serverId }: { active: boolean; serverId?:
       subscribeDesktop("terminal.closed", (payload) => {
         if (disposed || payload.terminalSessionId !== sessionId) return;
         invalidatePasteSession();
-        const suffix = payload.exitCode === null ? "" : ` (exit ${payload.exitCode})`;
-        term.write(`\r\n\x1b[1;31m[会话已关闭${suffix}]\x1b[0m\r\n`);
+        // Unknown, zero and non-zero exit statuses must read differently: a bare
+        // "closed" reads as success, which is the false-green the native fix exists
+        // to prevent. The sentence lives in `terminal-exit.ts` so it can be tested.
+        term.write(terminalClosedNotice(payload.exitCode));
       }).stop,
     );
 

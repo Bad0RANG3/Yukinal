@@ -108,8 +108,11 @@ test("a row is never disabled while a write is in flight, so focus stays in the 
   const source = historyPaneSource();
   // 「新建任务」是唯一可以真的被禁用的东西：它不在列表的焦点流程里，而且它整块换掉
   // 面板的内容。列表里的每一个按钮都只能走 `aria-disabled`。
+  // 只剩两处允许：新建任务（它整块替换面板内容，不在列表的焦点流程里）与「改名标题
+  // 为空时」的保存按钮（此时焦点在输入框，按钮本来就不可用）。表头的「重置上下文」
+  // 曾经是第三个，但它同样在列表焦点流程里，现已改为 `aria-disabled` + 早退。
   const hardDisabled = source.match(/[^-\w]disabled=\{/g)?.length ?? 0;
-  assert.equal(hardDisabled, 3, "new task, context reset and an empty rename title may use disabled");
+  assert.equal(hardDisabled, 2, "only new task and an empty rename title may use disabled");
   assert.ok(
     /className="button-secondary agent-history-new"[^>]*disabled=\{busy\}/.test(source),
     "the new-task button is the one that may be disabled while busy",

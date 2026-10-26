@@ -1,4 +1,5 @@
 import assert from "node:assert/strict";
+import { readFileSync } from "node:fs";
 import { registerHooks } from "node:module";
 import { afterEach, beforeEach, test } from "node:test";
 import { createRef, type ReactNode } from "react";
@@ -108,11 +109,37 @@ test("memory initial loading, successful empty state, and retained rows are dist
   markup = render(<MemoryLibrary onClose={() => {}} />);
   assertAlert(markup); assert.match(markup, /Retained user memory/); assert.doesNotMatch(markup, /暂无记忆/);
 });
-test("memory context reset remains disabled while the current agent run is busy", () => {
+test("memory context reset stays focusable but inert while the agent is busy", () => {
+  // `disabled` on this button used to be the guard. It also dropped keyboard focus to
+  // `body` the moment a run started, so a screen reader stopped announcing the control
+  // and a keyboard user lost their place. The repository already made this decision for
+  // the history rows (`AgentHistoryRow.tsx`): `aria-disabled` + an early return in the
+  // handler. This test pins the same rule here, and pins that nothing is really disabled.
   workspace({ agentBusy: true });
   client.setQueryData(["agent-memories", "global", null, ""], []);
   const markup = render(<MemoryLibrary onClose={() => {}} />);
-  assert.match(markup, /<button[^>]*disabled=""[^>]*>重置全部上下文<\/button>/);
+  const reset = /<button(?:(?!>).)*>重置全部上下文<\/button>/.exec(markup)?.[0] ?? "";
+  assert.ok(reset, "the reset control must be rendered");
+  assert.match(reset, /aria-disabled="true"/);
+  assert.doesNotMatch(reset, /\sdisabled=""/, "a busy run must not remove the control from the tab order");
+  assert.match(reset, /title="对话正在运行，结束后再重置"/);
+});
+
+test("memory deletion and context reset confirm inline instead of blocking the window", () => {
+  // `window.confirm` freezes the WebView, hides the context the decision needs, and is
+  // the only dialog in this UI that is not this UI's own. The confirmation therefore
+  // lives in a row, like the conversation-history delete already does.
+  const source = readFileSync(new URL("../src/features/agent/MemoryLibrary.tsx", import.meta.url), "utf8");
+  assert.doesNotMatch(source, /window\.confirm\s*\(/, "no blocking browser dialog may remain in the memory library");
+  client.setQueryData(["agent-memories", "global", null, ""], [{ id: "memory_fixture", scope: "global", title: "Retained user memory", content: "User-entered body", createdAt: "2026-10-18T00:00:00Z", updatedAt: "2026-10-18T00:00:00Z" }]);
+  const markup = render(<MemoryLibrary onClose={() => {}} />);
+  // The delete action announces exactly what it will delete, and the reset action is a
+  // plain button — the confirmation is a later, inline state, not a browser dialog.
+  assert.match(markup, /aria-label="删除记忆 Retained user memory"/);
+  assert.match(markup, />重置全部上下文<\/button>/);
+  // No confirmation group is rendered until the user asks for one: the panel must not
+  // look like it is already in a destructive flow.
+  assert.doesNotMatch(markup, /确认删除记忆|确认重置上下文/);
 });
 
 test("hidden overview activity observers make no request, activation fetches once, hiding stops invalidation fetches", async () => {

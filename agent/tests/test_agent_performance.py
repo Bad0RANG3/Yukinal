@@ -66,6 +66,68 @@ class PerformanceTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual([m.tool_call_id for m in model.seen_messages[-1] if isinstance(m, ToolMessage)], ["0", "1", "2"])
         self.assertEqual([item["result"] for item in result.tool_results], ["0", "1", "2"])
 
+    async def test_a_failed_read_in_a_batch_returns_to_the_model_instead_of_ending_the_run(self):
+        # Regression: the diagnosis branch used to require a single call, so one
+        # failed read in a model-proposed batch ended the whole run with the model
+        # never asked again. A single task must survive one bad observation.
+        executed = []
+        async def reads(args, context):
+            executed.append(args["value"])
+            return {"observed": args["value"]}
+        async def fails(args, context):
+            executed.append("fail-" + args["value"])
+            raise ToolCallError("execution_failed", "the remote probe returned an unexpected shape")
+        registry = ToolRegistry(MemoryAuditSink())
+        register(registry, "ops.read", reads, True)
+        register(registry, "ops.fail", fails, True)
+        model = ScriptedModel([
+            AIMessage(content="", tool_calls=[call("ops.fail", 0), call("ops.read", 1)]),
+            AIMessage(content="The probe failed; the host is otherwise reachable."),
+        ])
+        result = await ModelDrivenAgent(registry, model, AgentBudget(max_model_rounds=4)).run(
+            task_id="task-test", tenant_id="local", user_id="user-test", prompt="检查并给出结果",
+            allowed_tools={"ops.read", "ops.fail"}, allowed_target_ids=set())
+        self.assertEqual(result.status, "succeeded", result)
+        self.assertEqual(result.answer, "The probe failed; the host is otherwise reachable.")
+        self.assertEqual(result.tool_calls, 2)
+        self.assertEqual([item["status"] for item in result.tool_results], ["failed", "succeeded"])
+        self.assertEqual(result.tool_results[0]["phase"], "failure_diagnosis")
+        # Both tool calls answered: the batch did not drop a sibling message.
+        answered = [message for message in model.seen_messages[1] if isinstance(message, ToolMessage)]
+        self.assertEqual([message.tool_call_id for message in answered], ["0", "1"])
+        self.assertEqual(executed, ["fail-0", "1"])
+
+    async def test_a_failed_batch_read_requires_verification_before_a_later_effectful_call(self):
+        # The diagnosis is only a diagnosis once a read actually succeeded. A
+        # failed read in the batch must keep the recovery guard armed so the model
+        # cannot follow it with an effectful call in the same run.
+        writes = []
+        async def writes_handler(args, context):
+            writes.append(args["value"]); return "changed"
+        async def fails(args, context):
+            raise ToolCallError("execution_failed", "read failed")
+        async def reads(args, context):
+            return {"observed": args["value"]}
+        registry = ToolRegistry(MemoryAuditSink())
+        register(registry, "ops.read", reads, True)
+        register(registry, "ops.fail", fails, True)
+        register(registry, "ops.write", writes_handler, write=True)
+        model = ScriptedModel([
+            AIMessage(content="", tool_calls=[call("ops.fail", 0), call("ops.fail", 1)]),
+            AIMessage(content="", tool_calls=[call("ops.write", 2)]),
+            AIMessage(content="", tool_calls=[call("ops.read", 3)]),
+            AIMessage(content="Inspected the state without repeating the change."),
+        ])
+        fingerprint = approval_fingerprint("ops.write", None, {"value": "2"},
+                                           task_id="task-test", tenant_id="local", user_id="user-test")
+        result = await ModelDrivenAgent(registry, model, AgentBudget(max_model_rounds=6)).run(
+            task_id="task-test", tenant_id="local", user_id="user-test", prompt="检查并给出结果",
+            allowed_tools={"ops.read", "ops.fail", "ops.write"}, allowed_target_ids=set(),
+            approved_actions={fingerprint: "fixture-approval"})
+        self.assertEqual(result.status, "succeeded", result)
+        self.assertEqual(writes, [], "an unverified effectful call must not execute")
+        self.assertEqual(result.tool_results[2]["error_code"], "read_only_verification_required")
+
     async def test_writes_and_unmarked_reads_are_ordering_barriers(self):
         events = []
         async def handler(args, context):

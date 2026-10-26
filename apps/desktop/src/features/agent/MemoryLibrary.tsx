@@ -24,7 +24,17 @@ export function MemoryLibrary({ onClose }: { onClose: () => void }) {
   const [title, setTitle] = useState("");
   const [content, setContent] = useState("");
   const [notice, setNotice] = useState("");
+  // 删除与重置都用行内确认条，而不是 `window.confirm`：系统弹窗会盖住上下文、冻结
+  // WebView2 的动画与事件，也是这套界面里唯一一个不属于它的对话框（同
+  // `AgentHistoryDeleteConfirm` 与 `providers.css` 里已经写下的规矩）。
+  // 一次只确认一件事：点开第二件会替换掉第一件，而不是叠两个确认条。
+  const [confirming, setConfirming] = useState<{ kind: "delete"; memory: AgentMemory } | { kind: "reset" } | null>(null);
+  const confirmCancelRef = useRef<HTMLButtonElement>(null);
   const editorInput = useRef<HTMLInputElement>(null);
+  useEffect(() => {
+    if (!confirming) return;
+    requestAnimationFrame(() => confirmCancelRef.current?.focus());
+  }, [confirming]);
   const editorOrigin = useRef<string>("new");
   function finishEdit() {
     setEditing(null);
@@ -43,12 +53,13 @@ export function MemoryLibrary({ onClose }: { onClose: () => void }) {
   }), onSuccess: () => { finishEdit(); void refresh(); } });
   const remove = useMutation({ mutationFn: (memory: AgentMemory) => callDesktop(IPC_COMMANDS.agentMemoryDelete, {
     id: memory.id, scope: memory.scope, ...(memory.serverId ? { serverId: memory.serverId } : {}),
-  }), onSuccess: refresh });
+  }), onSuccess: () => { setConfirming(null); void refresh(); } });
   const reset = useMutation({ mutationFn: () => callDesktop(IPC_COMMANDS.agentContextResetAll, {}), onSuccess: (result) => {
     const state = useWorkspaceStore.getState();
     state.resetAgentContextView();
-    state.setAgentDraft(""); state.setAgentAttachments([]); state.setAgentRoleId(null); state.selectServer(null);
+    state.setAgentDraft(""); state.setAgentAttachments([]); state.selectServer(null);
     for (const page of useWorkpagesStore.getState().pages) useWorkpagesStore.getState().close(page.id);
+    setConfirming(null);
     setNotice(`已重置 ${result.count} 个上下文，历史和记忆已保留`);
     void client.invalidateQueries({ queryKey: ["agent-chat-sessions"] });
   } });
@@ -62,8 +73,8 @@ export function MemoryLibrary({ onClose }: { onClose: () => void }) {
   return <dialog ref={dialog} aria-label="记忆库" className="memory-library" onCancel={(event) => { event.preventDefault(); onClose(); }}>
       <header><h2>记忆库</h2><button autoFocus type="button" className="icon-button" aria-label="关闭记忆库" onClick={onClose}><Icon name="close" /></button></header>
       <div className="memory-toolbar"><div role="group" aria-label="记忆范围">
-        <button type="button" aria-pressed={scope === "global"} onClick={() => { setScope("global"); setEditing(null); }}>全局</button>
-        <button type="button" disabled={!serverId} aria-pressed={scope === "server"} onClick={() => { setScope("server"); setEditing(null); }}>当前服务器</button>
+        <button type="button" aria-pressed={scope === "global"} onClick={() => { setScope("global"); setEditing(null); setConfirming(null); }}>全局</button>
+        <button type="button" disabled={!serverId} aria-pressed={scope === "server"} onClick={() => { setScope("server"); setEditing(null); setConfirming(null); }}>当前服务器</button>
       </div><button data-memory-add type="button" className="text-button" onClick={() => edit("new")}>添加记忆</button></div>
       <input aria-label="搜索记忆" placeholder="搜索记忆" value={query} onChange={(event) => setQuery(event.target.value)} />
       {error ? <p role="alert" className="inline-error">{errorMessage(error)}</p> : null}
@@ -74,13 +85,27 @@ export function MemoryLibrary({ onClose }: { onClose: () => void }) {
           <div className="memory-actions"><button type="button" className="text-button" onClick={finishEdit}>取消</button><button type="submit" className="button-secondary" disabled={!title.trim() || !content.trim() || save.isPending}>保存</button></div>
         </form> : memories.isLoading ? <p role="status">读取中…</p> : <ul>{memories.data?.map((memory) => <li key={memory.id}>
           <button data-memory-id={memory.id} type="button" className="memory-record" onClick={() => edit(memory)}><strong>{memory.title}</strong><span>{memory.content}</span></button>
-          <button type="button" className="icon-button" aria-label={`删除记忆 ${memory.title}`} disabled={remove.isPending} onClick={() => {
-            if (window.confirm(`删除记忆“${memory.title}”？`)) remove.mutate(memory);
+          <button type="button" className="icon-button" aria-label={`删除记忆 ${memory.title}`} aria-disabled={remove.isPending || undefined} onClick={() => {
+            if (!remove.isPending) setConfirming({ kind: "delete", memory });
           }}><Icon name="trash" size="sm" /></button>
         </li>)}{memories.isSuccess && memories.data.length === 0 ? <li className="compact-empty">暂无记忆</li> : null}</ul>}
       </div>
-      <footer><button type="button" className="text-button text-button-danger" disabled={busy || reset.isPending} onClick={() => {
-        if (window.confirm("重置全部上下文和当前草稿？对话历史、记忆、服务器和连接配置会保留。")) reset.mutate();
+      {confirming?.kind === "delete" ? <div className="memory-confirm" role="group" aria-label="确认删除记忆">
+        <p>删除记忆「{confirming.memory.title}」？删除后无法撤销。</p>
+        <div className="memory-confirm-actions">
+          <button ref={confirmCancelRef} type="button" className="text-button" onClick={() => setConfirming(null)}>取消</button>
+          <button type="button" className="button-secondary memory-confirm-danger" aria-disabled={remove.isPending || undefined} onClick={() => { if (!remove.isPending) remove.mutate(confirming.memory); }}>{remove.isPending ? "删除中…" : "删除"}</button>
+        </div>
+      </div> : null}
+      {confirming?.kind === "reset" ? <div className="memory-confirm" role="group" aria-label="确认重置上下文">
+        <p>重置全部上下文和当前草稿？对话历史、记忆、服务器和连接配置会保留。</p>
+        <div className="memory-confirm-actions">
+          <button ref={confirmCancelRef} type="button" className="text-button" onClick={() => setConfirming(null)}>取消</button>
+          <button type="button" className="button-secondary memory-confirm-danger" aria-disabled={busy || reset.isPending || undefined} onClick={() => { if (!busy && !reset.isPending) reset.mutate(); }}>{reset.isPending ? "重置中…" : "重置"}</button>
+        </div>
+      </div> : null}
+      <footer><button type="button" className="text-button text-button-danger" aria-disabled={busy || reset.isPending || undefined} title={busy ? "对话正在运行，结束后再重置" : undefined} onClick={() => {
+        if (!busy && !reset.isPending) setConfirming({ kind: "reset" });
       }}>重置全部上下文</button>{notice ? <span role="status">{notice}</span> : null}</footer>
   </dialog>;
 }

@@ -14,3 +14,15 @@
  * note has to be updated by hand.
  */
 export const APP_VERSION = "2.0.0-preview.2";
+
+/**
+ * The Python Agent's version, which has its own release cadence.
+ *
+ * `agent/pyproject.toml` is the source of truth for the Python package, and CI builds
+ * the sidecar from it. This constant exists because the desktop UI needs to *show*
+ * that version in offline/preview mode, where no sidecar is running to ask — a
+ * hand-written literal in the fixture is how the preview window ended up claiming
+ * `1.0.0-preview` for a `0.1.0` sidecar. `version.test.ts` compares this literal with
+ * `agent/pyproject.toml`, so the two cannot drift without a red gate.
+ */
+export const AGENT_VERSION = "0.1.0";

@@ -24,7 +24,7 @@ const AgentNistPane = lazy(async () => ({ default: (await import("../features/ag
 const VISIBLE_PRIMARY_NAV = PRIMARY_NAV.filter((item) => item !== "tasks");
 const PRIMARY_NAV_META: Record<(typeof VISIBLE_PRIMARY_NAV)[number], { label: string; icon: IconName }> = {
   board: { label: "看板", icon: "board" },
-  agents: { label: "团队", icon: "agent" },
+  agents: { label: "运维 Agent", icon: "agent" },
   activity: { label: "动态", icon: "activity" }, settings: { label: "设置", icon: "settings" },
 };
 const SERVER_PAGE_LABEL: Record<ServerPage, string> = {
@@ -137,7 +137,7 @@ export function AppShell() {
       </aside>
       {sidebarOpen ? <button type="button" className="navigation-scrim" aria-label="关闭导航" onClick={() => setSidebarOpen(false)} /> : null}
       <div className="ai-workspace-column" ref={aiWorkspaceRef} tabIndex={-1}>
-        <AgentPanel workspace onAttentionRequested={returnToAI} onOpenTeam={() => navigate("agents")}
+        <AgentPanel workspace onAttentionRequested={returnToAI}
           workspaceWorkpages={<WorkpagesDock onChooseTarget={chooseWorkpageTarget} onPopOut={async (page) => {
             if (!page.serverId || page.kind === "evidence" || page.kind === "artifact" || page.kind === "board") throw new Error("该内容可在工作页中展开");
             await openNativeWorkpage({ kind: page.kind, serverId: page.serverId });

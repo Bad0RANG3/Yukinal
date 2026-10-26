@@ -23,7 +23,7 @@ export function ApprovalCard({ approval, onApproval, busy, status }: {
     <div className="approval-heading">
       <span className="approval-icon"><Icon name="shield" size="sm" /></span>
       <div className="approval-title"><span className="approval-caption">操作确认</span><strong>{purpose}</strong></div>
-      {status ? <span className="approval-resolved" role="status">{status}</span> : <span className="approval-state">待审批</span>}
+      {status ? <span className="approval-resolved" role="status">{status}</span> : approval.autoApproved === true ? <span className="approval-state">自动批准</span> : <span className="approval-state">待审批</span>}
     </div>
     <div className="approval-target"><span>{targetLabel(approval.target)}</span><code>{approval.toolName}</code></div>
     {!genericReason && approval.reason ? <p className="approval-reason">{approval.reason}</p> : null}
@@ -44,7 +44,7 @@ export function ApprovalCard({ approval, onApproval, busy, status }: {
       {approval.callId ? <p>调用 <code>{approval.callId}</code></p> : null}
       {approval.inputFingerprint ? <p>指纹 <code>{approval.inputFingerprint}</code></p> : null}
     </details> : null}
-    {!status ? <div className="approval-footer">
+    {!status && approval.autoApproved !== true ? <div className="approval-footer">
       <p className="approval-note" role={busy ? "status" : undefined}>{busy ? "正在提交…" : approval.sessionGrantable === false ? "此操作每次都需要单独批准" : "批准范围仅限本次运行"}</p>
       <div className="approval-actions">
         <button type="button" className="approval-button approval-button-reject" disabled={busy} onClick={() => void onApproval(approval, "reject")}>拒绝</button>

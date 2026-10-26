@@ -53,10 +53,12 @@ class FilesystemActionLedger:
         evidence_ids: tuple[str, ...],
     ) -> dict[str, Any] | None:
         """Reserve a call before remote I/O, or return its exact cached success."""
+        # Only the call identity is required. A conversation has no plan; the run,
+        # trace and call ids still make the exactly-once fence exact.
         if not all(isinstance(value, str) and value for value in (
-            run_id, trace_id, call_id, tool_name, target_id, plan_id, plan_step_id,
-        )):
-            raise ValueError("durable filesystem action identity is incomplete")
+            run_id, trace_id, call_id, tool_name, target_id,
+        )) or not isinstance(plan_id, str) or not isinstance(plan_step_id, str):
+            raise ValueError("filesystem action identity is incomplete")
         material = json.dumps(
             {
                 "tool": tool_name,

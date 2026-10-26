@@ -6,7 +6,7 @@ import { AgentEntryView, toolActionLabel } from "../src/features/agent/AgentEntr
 import { AgentFeed, intermediateReplyIndices, toolActivityRows } from "../src/features/agent/AgentFeed.js";
 import { ConversationScrollRail } from "../src/features/agent/ConversationScrollRail.js";
 import { FeedFollowIntent } from "../src/features/agent/feed-follow.js";
-import { agentFailureLabel, toolPurpose, toolOutcomeFromEvent, type Entry } from "../src/features/agent/transcript.js";
+import { agentFailureLabel, toolExecutionNotice, toolOutcomeFromEvent, toolPurpose, type Entry } from "../src/features/agent/transcript.js";
 
 const tool: Extract<Entry, { kind: "tool" }> = { kind: "tool", toolName: "server.info", callId: "call1", target: "staging", riskLevel: "read", decision: "auto", result: { status: "success", durationMs: 123, summary: "safe summary" } };
 const renderTool = (entry = tool) => renderToStaticMarkup(<AgentEntryView entry={entry} onApproval={async () => { assert.fail("must not approve"); }} approvalBusy={false} />);
@@ -84,6 +84,26 @@ test("command results display readable lines and preserve error output without r
   assert.match(html, /原始摘要/);
   assert.doesNotMatch(html, /<script/);
   assert.match(renderTool({ ...tool, toolName: "server.exec", result: { status: "success", durationMs: 1, summary: "incomplete {" } }), /incomplete \{/);
+});
+
+test("an unknown remote outcome is not rendered as a plain failure", () => {
+  // `executionState: "result_unknown"` means the effect may already have happened.
+  // The activity view says so; the conversation card used to drop the field, so the
+  // same evidence read as an ordinary failure here. Both now carry the state, and the
+  // sentence deliberately does not say "failed" — telling the operator a completed
+  // restart failed is how it gets repeated.
+  const outcome = toolOutcomeFromEvent({ toolName: "systemd.restart", status: "failed", durationMs: 900, outputSummary: "scheduled restart" , executionState: "result_unknown" });
+  assert.equal(outcome.executionState, "result_unknown");
+  const html = renderTool({ ...tool, toolName: "systemd.restart", result: outcome });
+  assert.match(html, /执行结果未知/);
+  assert.match(html, /先读取实际状态/);
+  assert.doesNotMatch(html, /工具失败/);
+  for (const [state, snippet] of [["timed_out", /超时/], ["cancelled", /已取消/]] as const) {
+    const notice = toolExecutionNotice(state);
+    assert.ok(notice);
+    assert.match(notice, snippet);
+  }
+  assert.equal(toolExecutionNotice(undefined), null, "a normal result gets no warning");
 });
 
 test("received command summaries survive ingestion and render their tail after expansion", () => {

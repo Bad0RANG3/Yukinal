@@ -52,7 +52,7 @@ export const DEFAULT_UI_PREFERENCES: UiPreferences = {
   terminalFontSize: 13,
   terminalLineHeight: 1.35,
   terminalCursorBlink: true,
-  agentPermissionMode: "ask",
+  agentPermissionMode: "auto",
   agentRunMode: "goal",
   agentDelivery: "async",
   agentReasoningEffort: null,
@@ -100,7 +100,14 @@ export const usePreferencesStore = create<PreferencesState>()(
     }),
     {
       name: isPreviewFixture() ? `${UI_PREFERENCES_STORAGE_KEY}.preview` : UI_PREFERENCES_STORAGE_KEY,
-      version: 1,
+      // v2 changes the default approval mode to auto. A stored v1 preference was
+      // captured under the old default, so it must be migrated rather than left
+      // to silently keep "ask" for every existing installation.
+      version: 2,
+      migrate: (persisted) => ({
+        ...sanitizePreferences(persisted),
+        agentPermissionMode: DEFAULT_UI_PREFERENCES.agentPermissionMode,
+      }),
       partialize: (state) => ({
         terminalFont: state.terminalFont,
         terminalFontSize: state.terminalFontSize,

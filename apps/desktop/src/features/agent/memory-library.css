@@ -16,3 +16,11 @@
 .memory-library input, .memory-library textarea { width: 100%; padding: 8px 10px; border: 1px solid var(--line); color: var(--text); background: #1d1d1d; border-radius: 5px; box-sizing: border-box; }
 .memory-actions { justify-content: flex-end; }
 .memory-library footer { padding-top: 10px; border-top: 1px solid var(--line); font-size: 12px; color: var(--muted); flex-wrap: wrap; }
+
+/* 行内确认条：与 `.agent-history-confirm` 同一套语言（说明 + 取消 + 破坏性动作），
+   因为它就是同一件事——不弹系统窗也照样能说清后果。 */
+.memory-confirm { display: flex; flex-direction: column; gap: 8px; padding: 10px 12px; border: 1px solid var(--line); border-left: 3px solid var(--danger-line); border-radius: var(--control-radius); background: var(--panel-raised); }
+.memory-confirm p { margin: 0; font-size: 12px; line-height: 1.6; color: var(--text); overflow-wrap: anywhere; }
+.memory-confirm-actions { display: flex; justify-content: flex-end; gap: 8px; }
+.memory-confirm-danger { color: var(--text); border-color: var(--danger-line); background: var(--danger-surface); }
+.memory-library [aria-disabled="true"] { opacity: 0.55; cursor: not-allowed; }

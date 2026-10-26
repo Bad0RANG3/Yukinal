@@ -64,20 +64,20 @@ export interface ApprovalOptionSpec {
  * 未勾选状态，用户看到的是一个空框，读不出「不勾 = 每次都会问你」。
  */
 export const APPROVAL_OPTIONS: Readonly<Record<AgentPermissionMode, ApprovalOptionSpec>> = {
-  ask: {
-    value: "ask",
-    label: "请求批准",
-    summary: "写入、部署、重启等操作都会先暂停，等你点头。",
-  },
   auto: {
     value: "auto",
     label: "自动批准",
-    summary: "仅在开发/预发布目标上自动放行普通写入；高危操作仍会问你。",
+    summary: "变更不再逐条打断你；宿主仍会铸造一次性票据并复核目标、输入与命令黑名单。",
+  },
+  ask: {
+    value: "ask",
+    label: "每次询问",
+    summary: "写入、部署、重启等操作都会先暂停，等你点头。",
   },
 };
 
-/** 菜单渲染顺序：「更谨慎」在前。 */
-export const APPROVAL_ORDER: readonly AgentPermissionMode[] = ["ask", "auto"];
+/** 菜单渲染顺序：默认在前。 */
+export const APPROVAL_ORDER: readonly AgentPermissionMode[] = ["auto", "ask"];
 
 export function approvalOptionSpec(mode: AgentPermissionMode): ApprovalOptionSpec {
   return APPROVAL_OPTIONS[mode];

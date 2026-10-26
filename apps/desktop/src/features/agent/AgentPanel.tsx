@@ -21,6 +21,7 @@ import {
   type ChatSession,
   type Environment,
   type RestartRecord,
+  type AgentSubagentConfig,
 } from "@yukinal/shared";
 import { useCallback, useEffect, useMemo, useRef, useState, type ReactNode } from "react";
 
@@ -51,15 +52,13 @@ import {
 } from "./composer-triggers.js";
 import { promptPartsWithAttachments } from "./image-attachments.js";
 import { entriesFromMessages, lastUserEntry, type Entry } from "./transcript.js";
-import { AGENT_TEAMS, resolveAgentRole } from "../agent-nist/agent-nist.js";
-import { CoordinatorStatus, CoordinatorTasks } from "./CoordinatorTasks.js";
-import { coordinatorConfig, coordinatorScope, coordinatorEntries } from "./coordinator-state.js";
-import { useCoordinatorTasks } from "./useCoordinatorTasks.js";
+import { SubagentStatus, SubagentTasks } from "./SubagentTasks.js";
+import { agentScope, agentEntries } from "./run-scope.js";
+import { useSubagentTasks } from "./useSubagentTasks.js";
 import { useWatchActivity } from "../agent-nist/watch-activity.js";
 import { attentionReference } from "../agent-nist/team-operations.js";
 import { useTeamRuntimeStore } from "../agent-nist/team-runtime-store.js";
 import { useWorkpagesStore } from "../workpages/workpages-store.js";
-import { useAgentRoles } from "../agent-nist/useAgentRoles.js";
 import { recalledDraft, rememberDraft, type SessionDraft } from "./session-drafts.js";
 import { requestPolicyId, type RunPolicyChoice } from "./run-policy.js";
 import { useAgentModels } from "./useAgentModels.js";
@@ -88,7 +87,6 @@ export function AgentPanel({ onCloseStart, onCloseEnd, workspace = false, worksp
   workspaceControls?: ReactNode;
   workspaceWorkpages?: ReactNode;
   onAttentionRequested?: () => void;
-  onOpenTeam?: () => void;
 }) {
   const agentStatus = useAgentStatus({ poll: true });
   useNativeTaskRunEvents(agentStatus.data?.running, restartId(agentStatus.data?.restart));
@@ -115,10 +113,7 @@ export function AgentPanel({ onCloseStart, onCloseEnd, workspace = false, worksp
   const focusServer = servers.data?.find((server) => server.id === selectedServerId);
 
   const models = useAgentModels();
-  const roles = useAgentRoles();
-  const selectedRoleId = useWorkspaceStore((state) => state.agentRoleId);
   const contextEpoch = useWorkspaceStore((state) => state.agentContextEpoch);
-  const setSelectedRoleId = useWorkspaceStore((state) => state.setAgentRoleId);
   const sessions = useChatSessions();
   const recent = useRecentAgentSessions(selectedServerId, 3);
   // 「收到审批时把面板带到前景」是导航决策，所以由面板注入，而不是让运行模块去读 store。
@@ -131,7 +126,7 @@ export function AgentPanel({ onCloseStart, onCloseEnd, workspace = false, worksp
     onApprovalRequested: () => { setAgentOpen(true); onAttentionRequested?.(); },
   });
 
-  const teamTasks = useCoordinatorTasks(agentStatus.data?.running, () => { setAgentOpen(true); onAttentionRequested?.(); });
+  const subagentTasks = useSubagentTasks(agentStatus.data?.running, () => { setAgentOpen(true); onAttentionRequested?.(); });
   // 草稿和「正在跑」放在 workspace store 里，是因为首次使用引导要先替用户填好
   // 输入框、并避免覆盖正在进行的任务 —— 两者都是跨面板的事实，不只是本组件状态。
   const prompt = useWorkspaceStore((state) => state.agentDraft);
@@ -192,7 +187,6 @@ export function AgentPanel({ onCloseStart, onCloseEnd, workspace = false, worksp
     [servers.data],
   );
   const composerMentions: MentionCandidate[] = useMemo(() => [
-    ...AGENT_TEAMS.map((team) => ({ id: `team:${team.id}`, label: team.label, aliases: [team.id, `${team.id}-team`, team.englishName.replaceAll(" ", "")], detail: team.description })),
     ...mentionCandidates,
   ], [mentionCandidates]);
   const modelReasoningLevels = reasoningLevels(models.selectedProvider, models.selectedModel ?? models.selectedProvider?.model);
@@ -246,15 +240,15 @@ export function AgentPanel({ onCloseStart, onCloseEnd, workspace = false, worksp
     const text = raw.trim();
     const parts = promptPartsWithAttachments(text, sendAttachments);
     if (!parts.length || !canSend || run.running) return;
-    // 提示词里的 @服务器 决定这次运行的目标；没提及时才回落到当前选中的服务器。
+    // @服务器始终优先。没有选择范围时，唯一已连接的服务器就是默认目标：用户不必
+    // 为了说「装个 fastfetch」先手动选一台机器，Agent 也能自己读取目标是否需要操作。
+    // 之前这里按关键词判断，导致「尝试装好 fastfetch」这类请求没有目标而直接失败。
     const mentioned = resolveMentionedServer(text, mentionCandidates);
-    const focusServerId = coordinatorScope(text, mentionCandidates, selectedServerId);
-    const requestedRole = resolveAgentRole(text, roles.roles, selectedRoleId);
-    const coordination = coordinatorConfig(roles.roles, models.providers.data ?? [], preview ? [] : servers.data ?? [], requestedRole.source === "auto" ? null : requestedRole.role.id);
-    if (!coordination.roles.length) {
-      setContextError("没有可用的团队模型，请检查团队中的 AI 连接绑定。");
-      return;
-    }
+    const onlyConfiguredServer = servers.data?.length === 1 ? servers.data[0] : undefined;
+    const implicitServerId = !selectedServerId && onlyConfiguredServer?.status === "connected"
+      ? onlyConfiguredServer.id
+      : null;
+    const focusServerId = agentScope(text, mentionCandidates, selectedServerId, implicitServerId);
     const targetView = scopeViews.current.get(focusServerId);
     const targetDraft = recalledDraft(drafts.current, focusServerId, targetView?.session?.id ?? null);
     if (focusServerId !== scopeRef.current && (targetDraft.prompt.length || targetDraft.attachments.length)) {
@@ -272,7 +266,8 @@ export function AgentPanel({ onCloseStart, onCloseEnd, workspace = false, worksp
       useWorkspaceStore.getState().selectServer(focusServerId);
     }
     setContextError(null);
-    setRunContext(mentioned?.label ?? focusServer?.name ?? "全局工作区");
+    const focusedServer = servers.data?.find((server) => server.id === focusServerId);
+    setRunContext(mentioned?.label ?? focusedServer?.name ?? "全局工作区");
     follow.pinToBottom();
     if (consumeDraft) {
       if (focusServerId !== originScope) rememberDraft(drafts.current, originScope, originSessionId, { prompt: "", attachments: [] });
@@ -286,11 +281,14 @@ export function AgentPanel({ onCloseStart, onCloseEnd, workspace = false, worksp
     const uiContext = attentionReference({ section: workspaceState.primary, serverId: workspaceState.selectedServerId, serverView: workspaceState.primary === "servers" ? workspaceState.serverPage : undefined, workpage: activePage ? { kind: activePage.kind, serverId: activePage.serverId } : undefined, action: attention && Date.now() - attention.at < 120_000 && (!attention.serverId || attention.serverId === focusServerId) ? attention.action : undefined });
     const outcome = await run.start({
       prompt: text,
-      persona: { id: "coordinator", label: "协调助手", systemPrompt: "用户始终与协调助手沟通；团队在后台完成独立任务。" },
-      coordination,
-      team: "white",
+      persona: {
+        id: "operations-agent",
+        label: "运维 Agent",
+        systemPrompt: "你是用户唯一的运维 AI Agent，直接负责把用户的目标做完：理解需求、读取现场、诊断问题、执行变更、验证结果并汇报。用户已经为结果负责，不要为工具本来就能做的事额外征求许可，也不要把命令清单交给用户自己执行。缺包、源失效、缺少编译器等都是目标主机的事实，换一条路径继续做；多次不同的尝试都没有新事实时才说明卡在哪里。只有在目标无法从主机得知时（未选服务器、缺少凭据或权限、破坏性操作范围确实模糊）才询问。工作中存在彼此独立、值得并行推进的部分时，可按需启动通用 subagent 并由你核实汇总。严格遵循本次运行模式、工具权限和逐项审批规则，被拒绝的调用不要改写重试。完成修复或部署后必须读取实际结果验证，并如实说明未完成项。",
+      },
+      team: "blue",
       uiContext,
-      participant: { id: "coordinator", label: "协调助手", kind: "agent" },
+      participant: { id: "operations-agent", label: "运维 Agent", kind: "agent" },
       taskId: preview ? null : selectedTaskId,
       parts,
       persistUserMessage: (messageId, promptParts) =>
@@ -300,6 +298,12 @@ export function AgentPanel({ onCloseStart, onCloseEnd, workspace = false, worksp
       reasoningEffort: requestReasoningEffort(models.selectedProvider, models.selectedModel ?? models.selectedProvider?.model, reasoningEffort),
       focusServerId: preview ? null : focusServerId,
       toolAccess: preview ? "none" : undefined,
+      subagents: preview ? undefined : {
+        version: 1,
+        servers: (servers.data ?? []).slice(0, 128).map((server) => ({
+          id: server.id, name: server.name.slice(0, 200), environment: server.metadata.environment ?? "unknown",
+        })),
+      } satisfies AgentSubagentConfig,
       permissionMode,
       mode: runMode,
       // 「按环境自动」在这里就是「不带这个字段」，由 requestPolicyId 保证。
@@ -430,6 +434,7 @@ export function AgentPanel({ onCloseStart, onCloseEnd, workspace = false, worksp
       <AgentHeader
         running={run.running || openingSession || resettingContext}
         runState={run.runState}
+        stage={run.stage}
         tokenUsage={run.tokenUsage}
         contextUsage={run.contextUsage}
         taskTitle={sessions.title}
@@ -443,7 +448,7 @@ export function AgentPanel({ onCloseStart, onCloseEnd, workspace = false, worksp
         closeButtonRef={panel.closeButtonRef}
         workspace={workspace}
         workspaceControls={workspaceControls}
-        context={<CoordinatorStatus tasks={teamTasks.tasks} sessionId={sessions.activeSessionId} preview={preview} />}
+        context={<SubagentStatus tasks={subagentTasks.tasks} sessionId={sessions.activeSessionId} preview={preview} />}
         showStatus={false}
       />
 
@@ -467,7 +472,7 @@ export function AgentPanel({ onCloseStart, onCloseEnd, workspace = false, worksp
         <WorkspaceLayers tools={workspaceWorkpages}>
           <WorkspaceConversation enabled={Boolean(workspaceWorkpages)} empty={run.entries.length === 0}>
             <AgentFeed
-              entries={coordinatorEntries(run.entries)}
+              entries={agentEntries(run.entries)}
               running={run.running}
               runState={run.runState}
               lastUserEntry={lastUserEntry(run.entries)}
@@ -482,7 +487,7 @@ export function AgentPanel({ onCloseStart, onCloseEnd, workspace = false, worksp
               showJumpControl={follow.showJumpControl}
               onJumpToLatest={follow.pinToBottom}
               motionScope={conversationScope}
-            ><NativeTaskApprovals sessionId={sessions.activeSessionId} serverId={selectedServerId} /><CoordinatorTasks runtime={teamTasks} sessionId={sessions.activeSessionId} /></AgentFeed>
+            ><NativeTaskApprovals sessionId={sessions.activeSessionId} serverId={selectedServerId} /><SubagentTasks runtime={subagentTasks} sessionId={sessions.activeSessionId} /></AgentFeed>
 
             <div className="agent-input-region">
               <AgentComposer
@@ -502,12 +507,11 @@ export function AgentPanel({ onCloseStart, onCloseEnd, workspace = false, worksp
                   /> : null}
                   {sessions.error ? <div className="agent-history-error agent-history-error-inline" role="status">{sessions.error}</div> : null}
                   {contextError ? <div className="agent-history-error agent-history-error-inline" role="alert">{contextError}</div> : null}
-                  {roles.notice ? <div className="agent-history-error agent-history-error-inline" role="status">{roles.notice}</div> : null}
                 </>}
                 status={<>
                   {livePreviewChat ? <span>模拟服务器 · 仅对话</span> : null}
                   <button type="button" className="agent-composer-tool agent-scope-trigger" disabled={run.running || !selectedServerId} aria-label={selectedServerId ? `当前范围：${focusServer?.name ?? selectedServerId}，切换到全局对话` : "当前范围：全局工作区"} title={run.running ? runContext ?? "运行中" : selectedServerId ? `${focusServer?.name ?? selectedServerId} · 切换到全局` : "全局工作区"} onClick={() => useWorkspaceStore.getState().selectServer(null)}><Icon name={selectedServerId ? "servers" : "projects"} size="md" /></button>
-                  <AgentRunStatus preview={preview && !livePreviewChat} running={run.running} runState={run.runState} tokenUsage={run.tokenUsage} contextUsage={run.contextUsage} agentReady={agentRunning} shell={shell} />
+                  <AgentRunStatus preview={preview && !livePreviewChat} running={run.running} runState={run.runState} stage={run.stage} tokenUsage={run.tokenUsage} contextUsage={run.contextUsage} agentReady={agentRunning} shell={shell} />
                 </>}
                 prompt={prompt}
                 onPromptChange={setPrompt}
@@ -537,9 +541,6 @@ export function AgentPanel({ onCloseStart, onCloseEnd, workspace = false, worksp
                 reasoningEffort={reasoningEffort}
                 onReasoningEffortChange={(value) => setPreferences({ agentReasoningEffort: value })}
                 mentions={composerMentions}
-                roles={roles.roles}
-                selectedRoleId={selectedRoleId}
-                onSelectRole={setSelectedRoleId}
                 commandContext={commandContext}
               />
               {run.entries.length === 0 ? <AgentRecentConversations

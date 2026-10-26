@@ -97,7 +97,7 @@ class RunFinalizationTests(unittest.IsolatedAsyncioTestCase):
         return [event for event in events if event["type"] in ("agent.failed", "agent.completed")]
 
     async def test_preparation_failures_emit_one_failed_and_finalize_before_model(self):
-        phases = ("budget", "history", "memory", "coordinator")
+        phases = ("budget", "history", "memory", "subagents")
         for phase in phases:
             with self.subTest(phase=phase):
                 sidecar, store, request, events = self.fixture()
@@ -110,8 +110,8 @@ class RunFinalizationTests(unittest.IsolatedAsyncioTestCase):
                     elif phase in ("history", "memory"):
                         stack.enter_context(patch.object(store, "context" if phase == "history" else "memory_context", side_effect=error))
                     else:
-                        request["coordination"] = {"fixture": True}
-                        stack.enter_context(patch.object(sidecar._coordination, "context", side_effect=error))
+                        request["subagents"] = {"version": 1, "servers": []}
+                        stack.enter_context(patch.object(sidecar._subagents, "context", side_effect=error))
                     result = await self.launch(sidecar, request, agent)
                 self.assertEqual(result["state"], "failed")
                 self.assertEqual(agent.calls, 0)

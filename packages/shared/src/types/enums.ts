@@ -23,6 +23,24 @@ export const AGENT_RUN_STATES = [
 ] as const;
 
 /**
+ * The operating stage a run has reached, derived from what it actually did.
+ *
+ * Mirrors `agent/src/yukinal_agent/agent_stage.py`. This is an observation of
+ * executed work — never the model's own claim — so a consumer may show it as fact.
+ */
+export const AGENT_STAGES = [
+  "intake",
+  "evidence",
+  "diagnosis",
+  "plan",
+  "change",
+  "verify",
+  "report",
+] as const;
+
+export type AgentStage = (typeof AGENT_STAGES)[number];
+
+/**
  * The outcomes a *finished* tool call can report — deliberately a subset of
  * `TOOL_EXECUTION_STATUSES`, not a second spelling of it.
  *

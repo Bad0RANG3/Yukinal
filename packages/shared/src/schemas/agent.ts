@@ -4,13 +4,15 @@ import { z } from "zod";
 
 import { RiskLevelSchema, ToolTargetSchema } from "./server.js";
 import { PermissionApprovalSourceSchema, PermissionModeSchema, ToolOriginSchema } from "./permission.js";
-import { TOOL_RESULT_STATUSES } from "../types/enums.js";
+import { AGENT_STAGES, TOOL_RESULT_STATUSES } from "../types/enums.js";
 import { TOOL_ERROR_CODES } from "../types/tool.js";
 import { AgentContextUsageSchema } from "./agent-context.js";
 
 const RunIdSchema = z.string().trim().min(1).max(256);
 const TimestampSchema = z.string().min(1).max(80);
 const AgentRunStateSchema = z.enum(["idle", "thinking", "running_tool", "waiting_approval", "completed", "failed", "cancelled"]);
+/** The stage enum lives in `types/enums.ts` so the wire schema and the union agree. */
+const AgentStageSchema = z.enum(AGENT_STAGES);
 
 const ApprovalRequestSchema = z.strictObject({
   approvalId: z.string().trim().min(1).max(256),
@@ -28,9 +30,15 @@ const ApprovalRequestSchema = z.strictObject({
   planStepId: RunIdSchema.optional(),
   evidenceIds: z.array(RunIdSchema).max(256).optional(),
   sessionGrantable: z.boolean().optional(),
+  /**
+   * The run is in auto-approval mode: the host minted its one-shot ticket and
+   * accepted it without a person. The UI shows this as an executed step, not a
+   * pending decision, and never offers buttons for it.
+   */
+  autoApproved: z.boolean().optional(),
 }).superRefine((approval, context) => {
   if (approval.toolName !== "server.exec") return;
-  for (const field of ["traceId", "callId", "inputFingerprint", "planId", "planStepId"] as const) {
+  for (const field of ["traceId", "callId", "inputFingerprint"] as const) {
     if (approval[field] === undefined) {
       context.addIssue({
         code: "custom",
@@ -38,6 +46,17 @@ const ApprovalRequestSchema = z.strictObject({
         message: `server.exec approval requires ${field} for host ticket binding`,
       });
     }
+  }
+  // A durable-task call binds its plan and step; a conversation call has neither.
+  // Partial is always wrong: it would be ambiguous which shape the ticket is.
+  const hasPlan = approval.planId !== undefined;
+  const hasStep = approval.planStepId !== undefined;
+  if (hasPlan !== hasStep) {
+    context.addIssue({
+      code: "custom",
+      path: [hasPlan ? "planStepId" : "planId"],
+      message: "planId and planStepId must be present together or absent together",
+    });
   }
 });
 
@@ -64,10 +83,8 @@ const AgentTokenUsageSchema = z.strictObject({
   }).optional(),
 });
 
-export const AgentTeamTaskSchema = z.strictObject({
+export const AgentSubagentTaskSchema = z.strictObject({
   id: RunIdSchema, runId: RunIdSchema, sessionId: RunIdSchema, parentRunId: RunIdSchema,
-  roleId: RunIdSchema,
-  team: z.enum(["blue", "red", "purple", "white", "yellow", "orange", "green"]),
   title: z.string().min(1).max(160),
   serverId: z.string().regex(/^srv_[a-z0-9]+$/).nullable(),
   access: z.enum(["read", "write"]),
@@ -125,8 +142,21 @@ export const AgentRunResultSchema = z.strictObject({
  * stops accepting what the transport cannot produce.
  */
 export const AGENT_EVENT_MEMBER_SCHEMAS = {
-  "agent.team_task": z.strictObject({ type: z.literal("agent.team_task"), runId: RunIdSchema, task: AgentTeamTaskSchema, at: TimestampSchema }),
+  "agent.subagent_task": z.strictObject({ type: z.literal("agent.subagent_task"), runId: RunIdSchema, task: AgentSubagentTaskSchema, at: TimestampSchema }),
   "agent.started": z.strictObject({ type: z.literal("agent.started"), runId: RunIdSchema, taskId: RunIdSchema.optional(), at: TimestampSchema }),
+  /**
+   * Emitted only when the derived stage changes. `previous` is what the run was in
+   * before, so a consumer can reconcile a missed frame without replaying history.
+   */
+  "agent.stage": z.strictObject({
+    type: z.literal("agent.stage"),
+    runId: RunIdSchema,
+    /** Present when the run is bound to a durable investigation task. */
+    taskId: RunIdSchema.optional(),
+    stage: AgentStageSchema,
+    previous: AgentStageSchema,
+    at: TimestampSchema,
+  }),
   "agent.thinking": z.strictObject({ type: z.literal("agent.thinking"), runId: RunIdSchema, textDelta: z.string().max(20_000).optional(), at: TimestampSchema }),
   "agent.text": z.strictObject({ type: z.literal("agent.text"), runId: RunIdSchema, textDelta: z.string().max(20_000), at: TimestampSchema }),
   "agent.usage": z.strictObject({

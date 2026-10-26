@@ -25,8 +25,9 @@ import { EVENT_SCHEMAS } from "./ipc.js";
 
 /** Channels the UI can subscribe to: declared *and* gated. */
 const SUBSCRIBABLE = [
-  "agent.team_task",
+  "agent.subagent_task",
   "agent.started",
+  "agent.stage",
   "agent.thinking",
   "agent.text",
   "agent.usage",
@@ -63,15 +64,16 @@ const SUBSCRIBABLE = [
  *    The commands exist; emitting is an increment.
  *  - `server.updated`: no emitter at all. `consistency.ts` used to assert "Rust emits it",
  *    which was false when it was written and is unfalsifiable now.
- *  - `server.auth_challenge`: the missing half of interactive SSH auth (C-1); the modal
- *    subscribes and never receives.
- *  - `agent.thinking` / `agent.usage`: the sidecar forwards exactly eight notification
- *    types (`sidecar.py:1015-1019`) and neither is among them, although `useAgentRun`
- *    branches on both.
  *  - `terminal.output_lost`: no `Lagged` handling exists in the host's broadcast path.
  *  - `activity.created`: four UI subscribers, none of which can receive; they poll instead.
- *  - `investigation.schedule_notification`: the scheduler answers in command responses and
- *    never pushes.
+ *
+ * Two names left this list because a producer was added, not because the list was
+ * edited to look better:
+ *  - `agent.thinking` — `_public_content_parts` maps `thinking` / `reasoning` /
+ *    `reasoning.summary` blocks to this type and `_stream_model` forwards each one.
+ *  - `agent.usage` — `_record_model_update` emits it on every model round.
+ *  - `server.auth_challenge` — `desktop_terminal.cpp` emits it from the
+ *    keyboard-interactive challenge path.
  *
  * Deleting any of them would make the eventual fix a contract break rather than an
  * addition. What was wrong was pretending they were live.
@@ -80,12 +82,8 @@ const NO_PRODUCER = [
   "server.connected",
   "server.disconnected",
   "server.updated",
-  "server.auth_challenge",
-  "agent.thinking",
-  "agent.usage",
   "terminal.output_lost",
   "activity.created",
-  "investigation.schedule_notification",
 ] as const;
 
 /**
@@ -139,20 +137,18 @@ test("the recorded event states partition EVENT_NAMES exactly", () => {
   assert.equal(new Set(names).size, names.length, "EVENT_NAMES has a duplicate");
 });
 
-test("the nine names with no producer are exactly the ones recorded as such", () => {
-  // The count is the deliverable (C-2/B7): nine declared names have no emitter in this
-  // repository. Pinning the number here means a tenth cannot appear unnoticed, and a fix
-  // that adds a producer has to delete exactly one entry — which is the reminder that a
-  // name moves out of this list by *emitting*, not by editing the list.
-  assert.equal(NO_PRODUCER.length, 9);
+test("the names with no producer are exactly the ones recorded as such", () => {
+  // The count is the deliverable (C-2/B7). Pinning the number means a new gap cannot
+  // appear unnoticed, and a fix moves a name out of this list by *emitting* — not by
+  // editing the list. It went 9 -> 5 when three real producers landed
+  // (`agent.thinking`, `agent.usage`, `server.auth_challenge`) and one was mis-recorded
+  // (`investigation.schedule_notification` is emitted by the scheduler's notification
+  // sink at `ipc_router.cpp`).
+  assert.equal(NO_PRODUCER.length, 5);
   assert.deepEqual(
     [...new Set([...NO_PRODUCER])].sort(),
     [
       "activity.created",
-      "agent.thinking",
-      "agent.usage",
-      "investigation.schedule_notification",
-      "server.auth_challenge",
       "server.connected",
       "server.disconnected",
       "server.updated",
@@ -183,9 +179,12 @@ test("the agent channels the sidecar actually emits are all subscribable", () =>
   // `:1015-1019` forwards `params.type`) and `model_agent.py:793,824`. A member the
   // sidecar gains has to be added here, or the UI silently cannot listen to it.
   const emitted = [
-    "agent.team_task",
+    "agent.subagent_task",
     "agent.started",
+    "agent.stage",
+    "agent.thinking",
     "agent.text",
+    "agent.usage",
     "agent.tool_call",
     "agent.tool_result",
     "agent.waiting_approval",

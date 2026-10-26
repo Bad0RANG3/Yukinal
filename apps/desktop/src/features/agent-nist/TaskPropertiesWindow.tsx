@@ -7,37 +7,35 @@ import { callDesktop, isDesktopShell } from "../../lib/ipc.js";
 import { errorMessage, formatTimestamp } from "../../lib/format.js";
 import { useWorkpagesStore } from "../workpages/workpages-store.js";
 import { artifactFromContent } from "../workpages/workpage-model.js";
-import { agentTeamLabel } from "./agent-nist.js";
 import { TEAM_HEARTBEAT_MS } from "./team-operations.js";
-import { useCoordinatorStore, TEAM_TASK_LABEL } from "../agent/coordinator-state.js";
+import { useSubagentStore, SUBAGENT_TASK_LABEL } from "../agent/subagent-state.js";
 import { teamBoardCards, type TeamBoardCard } from "./team-board.js";
 
 const TABS = [{ id: "overview", label: "概览" }, { id: "results", label: "证据与产物" }, { id: "execution", label: "执行信息" }] as const;
 export function TaskPropertiesWindow({ card, serverName, onClose }: { card: TeamBoardCard; serverName: string; onClose: () => void }) {
   const [tab, setTab] = useState("overview");
-  const background = useCoordinatorStore((state) => state.tasks.find((task) => task.runId === card.run?.id));
+  const background = useSubagentStore((state) => state.tasks.find((task) => task.runId === card.run?.id));
   const usage = background?.usage ?? card.run?.usage;
   const detail = useQuery({ queryKey: ["investigationTask", card.task?.id], enabled: Boolean(card.task) && isDesktopShell(), staleTime: TEAM_HEARTBEAT_MS,
     queryFn: () => callDesktop(IPC_COMMANDS.investigationTaskGet, { taskId: card.task!.id }),
   });
   const task = detail.data?.task ?? card.task;
-  const status = task ? teamBoardCards([task], card.run ? [card.run] : [])[0]?.status ?? card.status : background ? TEAM_TASK_LABEL[background.state] : card.status;
-  const teamLabel = agentTeamLabel(card.team ?? "");
+  const status = task ? teamBoardCards([task], card.run ? [card.run] : [])[0]?.status ?? card.status : background ? SUBAGENT_TASK_LABEL[background.state] : card.status;
   const updatedAt = task?.updatedAt ?? (card.updatedAt > 0 ? new Date(card.updatedAt).toISOString() : undefined);
   return <SecondaryWindow title="任务属性" subtitle={card.goal || "附件任务"} icon="board" tabs={TABS} activeTab={tab} onTabChange={setTab} onClose={onClose}
-    footer={<><span>{card.preview ? "模拟反馈" : background ? "后台团队任务 · 已保存" : task ? "已保存任务" : "本窗口对话运行"}</span>{updatedAt ? <time dateTime={updatedAt}>更新于 {formatTimestamp(updatedAt)}</time> : null}</>}>
+    footer={<><span>{card.preview ? "模拟反馈" : background ? "后台 subagent 任务 · 已保存" : task ? "已保存任务" : "本窗口对话运行"}</span>{updatedAt ? <time dateTime={updatedAt}>更新于 {formatTimestamp(updatedAt)}</time> : null}</>}>
     {detail.isError ? <p className="agent-nist-notice is-error" role="alert">属性读取失败：{errorMessage(detail.error)}<button type="button" className="text-button" onClick={() => void detail.refetch()}>重试</button></p> : null}
     {tab === "overview" ? <>
       <PropertySection title="任务目标"><p>{task?.objective || card.goal || "附件任务"}</p></PropertySection>
       <PropertySection title="属性"><PropertyList items={[
-        { label: "状态", value: status }, { label: "团队", value: teamLabel ?? "未记录团队" }, { label: "服务器", value: serverName },
-        { label: "来源", value: card.preview ? "仅界面演示，不连接服务器" : background ? "协调助手分派" : task ? "已保存任务" : "当前窗口会话" },
+        { label: "状态", value: status }, { label: "执行者", value: background ? "Subagent" : "运维 Agent" }, { label: "服务器", value: serverName },
+        { label: "来源", value: card.preview ? "仅界面演示，不连接服务器" : background ? "运维 Agent 拆分的独立子任务" : task ? "已保存任务" : "当前窗口会话" },
       ]} /></PropertySection>
       {task?.successCriteria.length ? <PropertySection title="完成条件"><ul>{task.successCriteria.map((criterion, index) => <li key={index}>{criterion}</li>)}</ul></PropertySection> : null}
       {task?.lastFailure ? <PropertySection title="最近失败"><p className="property-failure">{task.lastFailure.message}</p></PropertySection> : null}
     </> : null}
     {tab === "results" ? <>
-      {background ? <PropertySection title={background.error ? "执行问题" : "团队结果"}><p style={{ whiteSpace: "pre-wrap" }}>{background.result || background.error || "任务尚未返回结果。"}</p></PropertySection> : null}
+      {background ? <PropertySection title={background.error ? "执行问题" : "Subagent 结果"}><p style={{ whiteSpace: "pre-wrap" }}>{background.result || background.error || "任务尚未返回结果。"}</p></PropertySection> : null}
       {detail.isLoading ? <p role="status">读取证据与产物…</p> : null}
       <PropertySection title={`产物${detail.data ? ` · ${detail.data.artifacts.length}` : ""}`}>
         {detail.data?.artifacts.length ? detail.data.artifacts.map((artifact) => <button key={artifact.id} type="button" className="team-board-artifact" onClick={() => { useWorkpagesStore.getState().openArtifact(artifactFromContent(artifact.id, artifact.title, artifact.content, card.serverId)); onClose(); }}><Icon name="file" size="sm" /><span>{artifact.title}</span><Icon name="externalLink" size="xs" /></button>) : <p className="property-empty">{detail.isError ? "读取失败，尚未同步" : detail.isLoading ? "读取中…" : "暂无产物"}</p>}

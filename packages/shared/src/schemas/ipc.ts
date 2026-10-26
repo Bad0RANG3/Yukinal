@@ -39,8 +39,8 @@ import {
   ApprovalResponseSchema,
   EMPTY_PROMPT_MESSAGE,
 } from "./permission.js";
-import { AgentCoordinationConfigSchema } from "./coordination.js";
-import { AGENT_EVENT_MEMBER_SCHEMAS, AgentRunResultSchema, AgentTeamTaskSchema } from "./agent.js";
+import { AGENT_EVENT_MEMBER_SCHEMAS, AgentRunResultSchema, AgentSubagentTaskSchema } from "./agent.js";
+import { AgentSubagentConfigSchema } from "./subagents.js";
 import { AgentParticipantSchema, AgentPersonaSchema, AgentMemorySchema, AgentMemoryListInputSchema, AgentMemorySaveInputSchema, AgentMemoryDeleteInputSchema } from "./agent-context.js";
 import {
   ChatMessageAppendResponseSchema,
@@ -52,6 +52,7 @@ import {
 import {
   ProviderConfigSchema,
   ProviderDeleteResponseSchema,
+  ProviderModelDiscoveryInputSchema,
   ProviderModelOptionSchema,
   ProviderSaveInputSchema,
 } from "./provider.js";
@@ -674,7 +675,7 @@ export const IPC_SCHEMAS = {
         model: z.string().trim().min(1).max(256).optional(),
         reasoningEffort: AgentReasoningEffortSchema.optional(),
         toolAccess: z.literal("none").optional(),
-        coordination: AgentCoordinationConfigSchema.optional(),
+        subagents: AgentSubagentConfigSchema.optional(),
         workspaceId: z.string().trim().min(1).max(256).optional(),
         focusServerId: IpcServerIdSchema.optional(),
         permissionMode: AgentPermissionModeSchema.optional(),
@@ -708,9 +709,9 @@ export const IPC_SCHEMAS = {
       }),
     ),
   },
-  agent_team_tasks: {
+  agent_subagent_tasks: {
     params: z.strictObject({ sessionId: z.string().trim().min(1).max(256).optional(), focusServerId: IpcServerIdSchema.optional() }),
-    response: z.strictObject({ tasks: z.array(AgentTeamTaskSchema).max(128) }),
+    response: z.strictObject({ tasks: z.array(AgentSubagentTaskSchema).max(128) }),
   },
   agent_run_stop: {
     params: z.strictObject({ runId: z.string().trim().min(1).max(256) }),
@@ -804,7 +805,10 @@ export const IPC_SCHEMAS = {
     response: forwardedResponseSchema(ProviderDeleteResponseSchema),
   },
   provider_models: {
-    params: z.strictObject({ providerId: z.string().min(1) }),
+    params: z.union([
+      z.strictObject({ providerId: z.string().trim().min(1).max(256) }),
+      z.strictObject({ input: ProviderModelDiscoveryInputSchema }),
+    ]),
     response: forwardedResponseSchema(z.strictObject({ models: z.array(ProviderModelOptionSchema) })),
   },
   mcp_server_list: { params: z.strictObject({}), response: McpServerListResponseSchema },
@@ -966,7 +970,8 @@ export const EVENT_SCHEMAS = {
     at: z.string().min(1).max(80),
   }),
   "agent.started": AGENT_EVENT_MEMBER_SCHEMAS["agent.started"],
-  "agent.team_task": AGENT_EVENT_MEMBER_SCHEMAS["agent.team_task"],
+  "agent.stage": AGENT_EVENT_MEMBER_SCHEMAS["agent.stage"],
+  "agent.subagent_task": AGENT_EVENT_MEMBER_SCHEMAS["agent.subagent_task"],
   "agent.thinking": AGENT_EVENT_MEMBER_SCHEMAS["agent.thinking"],
   "agent.text": AGENT_EVENT_MEMBER_SCHEMAS["agent.text"],
   "agent.usage": AGENT_EVENT_MEMBER_SCHEMAS["agent.usage"],

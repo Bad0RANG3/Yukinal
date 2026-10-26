@@ -7,7 +7,6 @@ import type { AgentPromptPart, ChatMessage } from "@yukinal/shared";
 import { AgentEntryView } from "../src/features/agent/AgentEntryView.js";
 import { AgentHeader, AgentRunStatus } from "../src/features/agent/AgentHeader.js";
 import { AgentComposer } from "../src/features/agent/AgentComposer.js";
-import { defaultAgentRoles } from "../src/features/agent-nist/agent-nist.js";
 import { appendAssistantDelta, entriesFromMessages, settleAssistantText } from "../src/features/agent/transcript.js";
 import { conversationKey, recalledDraft, rememberDraft, type SessionDraft } from "../src/features/agent/session-drafts.js";
 import { matchMentions } from "../src/features/agent/composer-triggers.js";
@@ -115,9 +114,25 @@ const composerProps: ComponentProps<typeof AgentComposer> = {
   permissionMode: "ask", onPermissionModeChange: () => {}, runMode: "goal", onRunModeChange: () => {},
   delivery: "async", onDeliveryChange: () => {}, runPolicy: null, onRunPolicyChange: () => {}, targetEnvironment: "unknown",
   models: [{ key: "provider:model", label: "vendor/model" }], selectedModelKey: "provider:model", selectedModelLabel: "Provider · model", onSelectModel: () => {},
-  roles: defaultAgentRoles(), onSelectRole: () => {}, mentions: [],
+  mentions: [],
   commandContext: { running: false, archived: false, desktop: true },
 };
+
+test("the message box is a real combobox, so a screen reader follows the suggestion list", () => {
+  // `aria-autocomplete` / `aria-controls` / `aria-activedescendant` are only meaningful
+  // on a combobox. Without `role="combobox"` and `aria-expanded`, a screen reader does
+  // not announce that the textarea owns a popup list, and the highlighted suggestion is
+  // never spoken — keyboard navigation works but is invisible to assistive technology.
+  const markup = renderToStaticMarkup(<AgentComposer {...composerProps} />);
+  const textarea = markup.match(/<textarea[^>]*>/u)?.[0] ?? "";
+  assert.ok(textarea, "the composer must render its textarea");
+  assert.match(textarea, /role="combobox"/);
+  assert.match(textarea, /aria-expanded="false"/, "a closed composer must say the list is closed");
+  assert.match(textarea, /aria-haspopup="listbox"/);
+  assert.match(textarea, /aria-autocomplete="list"/);
+  // Closed, it must not point at an id that is not in the document.
+  assert.doesNotMatch(textarea, /aria-controls=|aria-activedescendant=/);
+});
 
 test("running composer preserves stop admission, allows drafting and locks model controls", () => {
   const markup = renderToStaticMarkup(<AgentComposer {...composerProps} running canStop stopping={false} />);
@@ -137,7 +152,7 @@ test("composer separates attachments and settings while retaining a precise send
   assert.equal((markup.match(/class="agent-composer-file-input"/gu) ?? []).length, 1);
   assert.equal((markup.match(/class="agent-composer-toolbar-left"/gu) ?? []).length, 1);
   assert.ok(markup.includes('aria-label="添加附件"'));
-  assert.ok(markup.includes('aria-label="对话设置：目标模式，请求批准"'));
+  assert.ok(markup.includes('aria-label="对话设置：目标模式，每次询问"'));
   assert.ok(markup.includes('class="agent-composer-action"'));
   assert.equal(markup.includes('aria-label="添加图片"'), false);
   assert.equal(markup.includes('aria-label="添加文本文件或 PDF"'), false);

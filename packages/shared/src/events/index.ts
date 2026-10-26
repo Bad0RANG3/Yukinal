@@ -37,21 +37,21 @@ export const EVENT_NAMES = [
   "server.disconnected",
   // 无生产者：全仓库没有任何 emit，`consistency.ts` 曾断言「Rust 在发」是错的。
   "server.updated",
-  // 无生产者：宿主侧不存在 `auth_prompt`/`auth_challenge` 字面量，`server_auth_respond`
-  // 也没有把回答写回 PTY 的路径；UI 的挑战弹窗（`ServerAuthChallengeModal.tsx:26`）
-  // 因此在等到超时之前什么都收不到。空洞的通道见 C-1/C-2 —— 要么补生产者，要么连同
-  // 弹窗一起撤掉，两种都要显式决定，不能维持现状。
+  // 有生产者（C-1 的修复）：宿主在 keyboard-interactive 挑战到达时发这一帧
+  // （`desktop_terminal.cpp` 的 `emit("server.auth_challenge", ...)`），UI 的挑战弹窗
+  // （`ServerAuthChallengeModal.tsx:26`）据它回答 `server_auth_respond`。
   "server.auth_challenge",
   "mcp.oauth_device_code",
   "agent.started",
-  // 无生产者：Python sidecar 只会发 started/text/tool_call/tool_result/waiting_approval/
-  // approval_expired/completed/failed（`sidecar.py:1019` 转发 `params.type`），没有
-  // thinking/usage。UI 有分支（`useAgentRun.ts`），所以这是「界面等待一个从不出现的
-  // 增量」，保留是为了让补发成为增量改动，而不是让 UI 的既有分支变成死代码。
-  "agent.team_task",
+  "agent.stage",
+  "agent.subagent_task",
+  // 有生产者，但只在模型真的返回公开推理块时才发：`model_agent.py` 的
+  // `_public_content_parts` 把 `thinking` / `reasoning` / `reasoning.summary` 映射为
+  // `agent.thinking`，再由 `_stream_model` 逐块转发；`_record_model_update` 每轮都发
+  // `agent.usage`。所以这两条不是「界面等一个不来的增量」，而是「模型或网关不给推理
+  // 摘要时就不会出现」——差别在于消费者该不该为此显示空状态。
   "agent.thinking",
   "agent.text",
-  // 无生产者：同上，`agent.usage` 在 sidecar 里没有任何 emit。
   "agent.usage",
   "agent.tool_call",
   "agent.tool_result",
@@ -232,4 +232,4 @@ export type YukinalEvent =
   | { name: "investigation.schedule_activity"; payload: InvestigationScheduleActivityEvent }
   | { name: "file.local_dropped"; payload: LocalFileDropEvent }
   | { name: "file.transfer_updated"; payload: FileTransferUpdatedEvent }
-  | { name: "agent.team_task" | "agent.started" | "agent.thinking" | "agent.text" | "agent.usage" | "agent.tool_call" | "agent.tool_result" | "agent.waiting_approval" | "agent.approval_expired" | "agent.completed" | "agent.failed"; payload: AgentStreamEvent };
+  | { name: "agent.subagent_task" | "agent.started" | "agent.stage" | "agent.thinking" | "agent.text" | "agent.usage" | "agent.tool_call" | "agent.tool_result" | "agent.waiting_approval" | "agent.approval_expired" | "agent.completed" | "agent.failed"; payload: AgentStreamEvent };

@@ -52,6 +52,13 @@ class HostApprovalLedger {
   // unsupported; the caller logs and continues.
   bool record_waiting_event(const nlohmann::json& params, std::int64_t now);
 
+  // Accept a recorded approval without a person: the run is in auto-approval
+  // mode, so the host mints the ticket and immediately marks it approved for its
+  // exact run, call, target, plan and input. Returns false when the event is not a
+  // well-formed host action approval; the caller then simply keeps the normal
+  // pending path. The ticket is still single-use and still expires.
+  bool record_auto_approved_event(const nlohmann::json& params, std::int64_t now);
+
   // Remember an approval the sidecar owns: every tool outside the four effectful
   // SSH actions announces itself on the same notification stream, but only the
   // sidecar holds its admission future. Recording the announcement is what lets a
@@ -83,6 +90,12 @@ class HostApprovalLedger {
   };
 
   // Fields a host tool request supplies for comparison with the approval ticket.
+  //
+  // A ticket minted for a durable task binds its task, plan and step; a ticket
+  // minted for a conversation ("wish-style" operations) has none of them, and
+  // those three stay empty on both sides. Comparing them as optionals keeps the
+  // two shapes distinguishable: a chat ticket can never authorize a task call and
+  // a task ticket can never authorize a chat call.
   struct ExecutionBinding {
     std::string approval_id;
     std::optional<std::string> run_id;

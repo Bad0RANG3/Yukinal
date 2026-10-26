@@ -77,6 +77,14 @@ void lifecycle() {
   f.scheduler->on_event({{"type", "agent.started"}, {"runId", first}, {"taskId", "foreign_task"}},
       "2026-10-20T00:00:01Z");
   check(f.activity.size() == before_foreign, "foreign task activity cannot enter the watch");
+  // The runtime's derived stage maps onto the watch strip's existing states; a
+  // change is shown as tool work, everything else as thinking.
+  f.scheduler->on_event({{"type", "agent.stage"}, {"runId", first}, {"taskId", "task_a"},
+      {"stage", "change"}, {"previous", "evidence"}}, "2026-10-20T00:00:01Z");
+  check(f.activity.back()["stage"] == "running_tool", "a derived change stage drives the tool cue");
+  f.scheduler->on_event({{"type", "agent.stage"}, {"runId", first}, {"taskId", "task_a"},
+      {"stage", "verify"}, {"previous", "change"}}, "2026-10-20T00:00:01Z");
+  check(f.activity.back()["stage"] == "thinking", "verification is analysis, not tool work");
   check(f.database->get_investigation_schedule("a")->at("lastRunStatus") == "running", "UI must expose actual running state");
   f.scheduler->tick("2026-10-20T00:00:30Z");
   check(f.starts.size() == 1, "long inspections must not overlap");

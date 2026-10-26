@@ -471,6 +471,27 @@ nlohmann::json resolve_ssh_service_filesystem_read_target(const DesktopDatabase&
   return payload;
 }
 
+nlohmann::json resolve_ssh_service_filesystem_list_target(const DesktopDatabase& database,
+                                                          const CredentialStore& credentials,
+                                                          const nlohmann::json& request) {
+  // A directory listing carries the same credential-path policy as a read: the
+  // model must not be able to enumerate `~/.ssh` even though it only learns names.
+  // The blocklist matches fragments with a trailing slash, so a directory itself
+  // is checked as if it were one — otherwise `~/.ssh` (without the trailing slash)
+  // would pass while `~/.ssh/id_rsa` is refused.
+  const auto path = required_param(request, "path");
+  require_checked_remote_path(path);
+  if (is_agent_blocked_path(path + "/")) {
+    throw std::runtime_error(
+        "Agent file tools cannot access paths that commonly contain credentials or process "
+        "secrets");
+  }
+  auto payload =
+      resolve_ssh_service_target(database, credentials, required_param(request, "serverId"));
+  payload["filesystemList"] = {{"path", path}};
+  return payload;
+}
+
 nlohmann::json resolve_ssh_service_filesystem_write_target(const DesktopDatabase& database,
                                                            const CredentialStore& credentials,
                                                            const nlohmann::json& request) {

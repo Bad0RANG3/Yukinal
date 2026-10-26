@@ -2,7 +2,7 @@ import { useState } from "react";
 import { useMutation, useQueryClient } from "@tanstack/react-query";
 import { IPC_COMMANDS } from "@yukinal/shared";
 import { callDesktop, isDesktopShell } from "../../lib/ipc.js";
-import { useProviders, PROVIDERS_QUERY_KEY } from "../../lib/providers.js";
+import { providerDeleteNotice, useProviders, PROVIDERS_QUERY_KEY } from "../../lib/providers.js";
 import { useServers, useServerAction } from "../../lib/servers.js";
 import { useAgentStatus, useSpawnAgent } from "../../lib/runtime.js";
 import { useWorkspaceStore } from "../../stores/workspace-store.js";
@@ -22,6 +22,8 @@ export function GettingStarted({ onClose }: { onClose(): void }) {
   const [providerId, setProviderId] = useState<string | null>(null);
   const [creatingProvider, setCreatingProvider] = useState(false);
   const [editingProvider, setEditingProvider] = useState(false);
+  const [confirmingProviderDelete, setConfirmingProviderDelete] = useState(false);
+  const [providerDeleteMessage, setProviderDeleteMessage] = useState<string | null>(null);
   const [serverModal, setServerModal] = useState<"add" | "edit" | null>(null);
   const provider = creatingProvider ? undefined : providers.data?.find((item) => item.id === providerId)
     ?? providers.data?.find((item) => item.enabled);
@@ -31,6 +33,22 @@ export function GettingStarted({ onClose }: { onClose(): void }) {
     mutationFn: async (candidate: NonNullable<typeof provider>) => {
       await callDesktop(IPC_COMMANDS.providerTest, { providerId: candidate.id });
       return `${candidate.id}@${candidate.updatedAt}`;
+    },
+  });
+  const removeProvider = useMutation({
+    mutationFn: async (candidate: NonNullable<typeof provider>) =>
+      callDesktop(IPC_COMMANDS.providerDelete, { providerId: candidate.id }),
+    onSuccess: ({ credentialReclaimed }, candidate) => {
+      const remaining = (providers.data ?? []).filter((item) => item.id !== candidate.id);
+      client.setQueryData(PROVIDERS_QUERY_KEY, remaining);
+      void client.invalidateQueries({ queryKey: PROVIDERS_QUERY_KEY });
+      const fallback = remaining.find((item) => item.enabled) ?? remaining[0];
+      setProviderId(fallback?.id ?? null);
+      setCreatingProvider(!fallback);
+      setEditingProvider(false);
+      setConfirmingProviderDelete(false);
+      setProviderDeleteMessage(providerDeleteNotice(candidate, credentialReclaimed));
+      test.reset();
     },
   });
   const tested = Boolean(provider && test.data === `${provider.id}@${provider.updatedAt}`);
@@ -79,14 +97,28 @@ export function GettingStarted({ onClose }: { onClose(): void }) {
           <h3>选择模型连接</h3>
 
           <label className="settings-field"><span className="field-label">模型连接</span>
-            <select className="form-input" disabled={!shell || test.isPending || workspace.agentBusy} value={creatingProvider ? "" : provider?.id ?? ""} onChange={(event) => {
-              setProviderId(event.target.value || null); setCreatingProvider(!event.target.value); setEditingProvider(false); test.reset();
+            <select className="form-input" disabled={!shell || test.isPending || removeProvider.isPending || confirmingProviderDelete || workspace.agentBusy} value={creatingProvider ? "" : provider?.id ?? ""} onChange={(event) => {
+              setProviderId(event.target.value || null); setCreatingProvider(!event.target.value); setEditingProvider(false); setConfirmingProviderDelete(false); setProviderDeleteMessage(null); test.reset(); removeProvider.reset();
             }}>
               <option value="">添加新的模型连接</option>
               {providers.data?.map((item) => <option value={item.id} key={item.id}>{item.label} · {item.model}</option>)}
             </select>
           </label>
-          {provider ? <div className="settings-actions"><button className="button-secondary" disabled={test.isPending} onClick={() => { setEditingProvider((value) => !value); test.reset(); }}>编辑配置</button></div> : null}
+          {provider && !confirmingProviderDelete ? <div className="settings-actions">
+            <button className="button-secondary" disabled={test.isPending || removeProvider.isPending} onClick={() => { setEditingProvider((value) => !value); test.reset(); }}>编辑配置</button>
+            <button type="button" className="button-secondary provider-picker-delete" disabled={test.isPending || removeProvider.isPending || workspace.agentBusy} onClick={() => { setProviderDeleteMessage(null); setConfirmingProviderDelete(true); }}>删除连接</button>
+          </div> : null}
+          {provider && confirmingProviderDelete ? <div className="provider-picker-confirm" role="group" aria-label="确认删除模型连接" onKeyDown={(event) => {
+            if (event.key === "Escape") { event.stopPropagation(); setConfirmingProviderDelete(false); removeProvider.reset(); }
+          }}>
+            <p>删除「{provider.label}」？这份配置会消失{provider.apiKeyCredentialRef ? "；没有别的 Provider 引用同一份密钥时，密钥也会从系统密钥链移除。" : "。这份配置没有保存密钥。"}{provider.enabled ? "它当前是启用连接，删除后需要改用其他连接或重新添加。" : ""}</p>
+            {removeProvider.isError ? <p className="form-error" role="alert">{removeProvider.error.message}</p> : null}
+            <div className="provider-picker-confirm-actions">
+              <button type="button" className="text-button" autoFocus disabled={removeProvider.isPending} onClick={() => { setConfirmingProviderDelete(false); removeProvider.reset(); }}>取消</button>
+              <button type="button" className="button-secondary provider-picker-confirm-delete" disabled={removeProvider.isPending} onClick={() => removeProvider.mutate(provider)}>{removeProvider.isPending ? "删除中…" : removeProvider.isError ? "重试删除" : "确认删除"}</button>
+            </div>
+          </div> : null}
+          {providerDeleteMessage ? <p className="settings-storage-note provider-picker-notice" role="status">{providerDeleteMessage}</p> : null}
         </section>
         {(!provider || editingProvider) && !providers.isLoading ? <ProviderEditor
           key={provider?.id ?? "new"}

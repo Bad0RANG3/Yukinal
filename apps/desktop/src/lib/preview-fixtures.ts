@@ -9,6 +9,8 @@
  */
 
 import {
+  AGENT_VERSION,
+  APP_VERSION,
   IPC_COMMANDS,
   type Activity,
   type AiProviderConfig,
@@ -243,9 +245,9 @@ const MCP_SERVERS: McpServerView[] = [
     ],
   },
   {
-    config: { id: "mcp_preview_remote", label: "Remote Runbooks · 运维知识库与团队工作手册（待授权）", transport: "http", url: "https://runbooks.preview.invalid/teams/platform-observability/mcp", httpAuthHeaders: [], oauth: { issuer: "https://identity.preview.invalid/organizations/platform-observability", clientId: "preview-desktop-client", flow: "device_code", clientAuth: "none", dpop: true, scopes: ["runbooks.read", "incidents.read", "service-catalog.read"] }, enabled: true, allowedTools: [], trustLevel: "unreviewed", annotationTrust: "none" },
+    config: { id: "mcp_preview_remote", label: "Remote Runbooks · 运维知识库与操作手册（待授权）", transport: "http", url: "https://runbooks.preview.invalid/organizations/platform-observability/mcp", httpAuthHeaders: [], oauth: { issuer: "https://identity.preview.invalid/organizations/platform-observability", clientId: "preview-desktop-client", flow: "device_code", clientAuth: "none", dpop: true, scopes: ["runbooks.read", "incidents.read", "service-catalog.read"] }, enabled: true, allowedTools: [], trustLevel: "unreviewed", annotationTrust: "none" },
     status: { serverId: "mcp_preview_remote", running: false, pid: null, program: null, toolCount: 0, lastExit: null, stderrTail: [], diagnostics: ["模拟连接状态：需要重新完成知识库授权。"] },
-    tools: [], unavailable: { code: "request_failed", message: "模拟端点尚未授权，无法读取团队工作手册目录。此预览不会启动 OAuth 或访问网络。" },
+    tools: [], unavailable: { code: "request_failed", message: "模拟端点尚未授权，无法读取运维手册目录。此预览不会启动 OAuth 或访问网络。" },
   },
   {
     config: { id: "mcp_preview_stopped", label: "Database Diagnostics · 数据库只读诊断（进程退出示例）", transport: "stdio", command: "preview-database-diagnostics", args: ["--readonly"], httpAuthHeaders: [], enabled: false, allowedTools: [], trustLevel: "unreviewed", annotationTrust: "none" },
@@ -277,7 +279,7 @@ const PREVIEW_CHAT_MESSAGES = [
     id: "msg_preview_assistant_1",
     sessionId: PREVIEW_CHAT_SESSION.id,
     role: "assistant",
-    participant: { id: "blue-logs", label: "蓝队 · 日志分析", kind: "agent" },
+    participant: { id: "operations-agent", label: "运维 Agent", kind: "agent" },
     model: "preview-code-reasoning-128k",
     content: "我会先读取服务状态和最近日志；不会重启容器、修改配置或写入文件。",
     createdAt: "2026-09-21T07:53:14.000Z",
@@ -427,7 +429,10 @@ export function previewResponse(command: IpcCommandName, params: unknown): unkno
   if (memoryResponse !== undefined) return memoryResponse;
   switch (command) {
     case IPC_COMMANDS.corePing:
-      return { version: "1.0.0-preview", os: "browser-fixture" };
+      // The browser fixture is still a host: it must report the version this build
+      // actually is. It used to hard-code `1.0.0-preview`, so a preview window could
+      // not tell the operator which build they were looking at.
+      return { version: APP_VERSION, os: "browser-fixture" };
     case IPC_COMMANDS.serverList:
       return { servers: SERVERS };
     case IPC_COMMANDS.serverConnect:
@@ -548,10 +553,10 @@ export function previewResponse(command: IpcCommandName, params: unknown): unkno
       return { providers: PROVIDERS };
     case IPC_COMMANDS.providerModels:
       return { models: PROVIDERS.find((provider) => provider.id === paramString(params, "providerId", PROVIDERS[0]!.id))?.models ?? MODELS };
-    case IPC_COMMANDS.agentTeamTasks:
+    case IPC_COMMANDS.agentSubagentTasks:
       return { tasks: [] };
     case IPC_COMMANDS.agentStatus:
-      return { running: true, pid: 1, protocolVersion: "1.0", agentVersion: "1.0.0-preview", toolCount: 12, entry: "browser-fixture", startedAt: AT, lastExit: null };
+      return { running: true, pid: 1, protocolVersion: "1.0", agentVersion: AGENT_VERSION, toolCount: 12, entry: "browser-fixture", startedAt: AT, lastExit: null };
     case IPC_COMMANDS.agentLogs:
       return { lines: ["[preview] Agent fixture is ready; no process or network connection was opened.", "[preview] Provider catalog: 3 enabled gateways, 1 disabled fallback.", "[preview] Long diagnostic entry: staging-checkout-api-with-background-migration.service / connection-pool-observation / readonly collection completed.", "[preview] MCP catalog and investigation history are in-memory examples only."], capacity: 256 };
     case IPC_COMMANDS.chatSessionList: {

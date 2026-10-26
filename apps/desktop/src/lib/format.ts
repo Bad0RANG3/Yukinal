@@ -8,7 +8,7 @@
  *   它是全仓库仅有的两处 `Intl.DateTimeFormat`。
  * - 错误：`useChatSessions.ts` 的 `errorText` 与 `AgentHistoryPane.tsx` 的
  *   `errorMessage` 是同一个表达式，另外还在八个组件里被内联展开成了
- *   `x instanceof Error ? x.message : String(x)`（ActivityFeed 两处、ProjectsPane、
+ *   `x instanceof Error ? x.message : String(x)`（ActivityFeed 两处、
  *   LogsPane、ServicesPane、RemoteFilesPane、ServerOverview、ServerList、TerminalPane）。
  *
  * 十份手抄的「怎么把 unknown 变成一句话」意味着：想统一去掉 zod 的冗长前缀、

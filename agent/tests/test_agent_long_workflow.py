@@ -231,18 +231,20 @@ class AgentLongWorkflowTests(unittest.IsolatedAsyncioTestCase):
                         self.assertEqual(other["result"]["result"]["context"]["totalTurns"], other_turn - 1)
                     if number % 40 == 0:
                         worker_turn += 1
-                        worker = await sidecar._launch_team({
+                        worker_job = {
+                            "id": f"subagent_workflow_{worker_turn}",
                             "runId": f"workflow-worker-{worker_turn}", "workerSessionId": "workflow-worker-session",
-                            "goal": _prompt("worker", worker_turn), "access": "read"},
-                            {"mode": "readonly", "model": "input-checker", "permissionMode": "ask", "toolAccess": "none"},
-                            {"id": "fixture-worker", "label": "Fixture Worker", "systemPrompt": "Inspect only the local task brief."})
+                            "serverId": None, "goal": _prompt("worker", worker_turn), "access": "read"}
+                        worker = await sidecar._launch_subagent(
+                            worker_job,
+                            {"mode": "readonly", "model": "input-checker", "permissionMode": "ask", "toolAccess": "none"})
                         self.assertEqual(worker["state"], "completed")
                         self.assertEqual(worker["context"]["totalTurns"], worker_turn - 1)
                     self.assertFalse(sidecar._active_runs)
                     self.assertFalse(sidecar._run_sessions)
                     self.assertFalse(sidecar._pending_approvals)
                     self.assertFalse(sidecar._session_locks)
-                    self.assertFalse(sidecar._coordination.active)
+                    self.assertFalse(sidecar._subagents.active)
                     if number in (80, 120):
                         await sidecar.shutdown()
                         store.close()
@@ -310,11 +312,11 @@ class AgentLongWorkflowTests(unittest.IsolatedAsyncioTestCase):
                 other_result = (await sidecar.turn("other", other_turn,
                     queries="origin,milestone,cutover"))["result"]["result"]
                 worker_turn += 1
-                worker_result = await sidecar._launch_team({
+                worker_result = await sidecar._launch_subagent({
+                    "id": "subagent_workflow_final",
                     "runId": f"workflow-worker-{worker_turn}", "workerSessionId": "workflow-worker-session",
                     "goal": _prompt("worker", worker_turn, queries="origin,milestone,cutover"), "access": "read"},
-                    {"mode": "readonly", "model": "input-checker", "permissionMode": "ask", "toolAccess": "none"},
-                    {"id": "fixture-worker", "label": "Fixture Worker", "systemPrompt": "Inspect only the local task brief."})
+                    {"mode": "readonly", "model": "input-checker", "permissionMode": "ask", "toolAccess": "none"})
                 isolation_results = {"reset": reset_result, "otherSession": other_result, "worker": worker_result}
                 for label, isolated in isolation_results.items():
                     self.assertEqual(isolated["state"], "completed")
@@ -330,7 +332,7 @@ class AgentLongWorkflowTests(unittest.IsolatedAsyncioTestCase):
                 self.assertFalse(sidecar._run_sessions)
                 self.assertFalse(sidecar._pending_approvals)
                 self.assertFalse(sidecar._session_locks)
-                self.assertFalse(sidecar._coordination.active)
+                self.assertFalse(sidecar._subagents.active)
                 summary.update({"rawTranscriptBytes": raw_bytes, "mainModelRequests": sum(
                     item["scope"] == "main" for item in checker.observations), "totalModelRequests": len(checker.observations),
                     "toolExecutions": len(executions), "otherSessionTurns": other_turn, "workerTurns": worker_turn,

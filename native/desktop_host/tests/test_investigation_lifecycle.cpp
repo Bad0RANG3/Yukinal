@@ -397,8 +397,49 @@ void run_continuation_prompt_checks(IpcRouter& router, DesktopDatabase& database
         "an over-budget original prompt must fail before admission without truncating its objective or consuming an attempt");
 }
 
-void run_interrupted_plan_checks(IpcRouter& router, DesktopDatabase& database) {
-  const auto failure_at = "2026-01-01T00:00:05Z";
+void run_stage_progress_checks(IpcRouter& router, DesktopDatabase& database) {
+  // The Agent's derived stage is an observation of durable progress. It must move
+  // the task phase only for the run that owns the task, never past a terminal
+  // task, and never from a stage the host does not understand.
+  const std::string id = "task_stage_progress";
+  (void)database.create_investigation_task(remote_task(id));
+  const auto active = start(router, id);
+  const auto stage = [&](const std::string& value, const std::string& run) {
+    auto notification = event("agent.stage", run, id);
+    notification["stage"] = value;
+    notification["previous"] = "intake";
+    return notification;
+  };
+  check(read_task(database, id).at("phase") == "investigating",
+        "a started task begins investigating before any stage is derived");
+  deliver(router, stage("evidence", active));
+  check(read_task(database, id).at("phase") == "investigating",
+        "collecting evidence keeps the investigating phase");
+  deliver(router, stage("change", active));
+  check(read_task(database, id).at("phase") == "execution",
+        "an executed change must move the task into execution");
+  deliver(router, stage("verify", active));
+  check(read_task(database, id).at("phase") == "verification" &&
+            database.get_investigation_run(active)->at("phase") == "verification",
+        "verification must be visible on both the task and its run");
+  const auto before = read_task(database, id);
+  deliver(router, stage("unmodelled_stage", active));
+  check(read_task(database, id) == before,
+        "an unknown stage must be ignored rather than inventing a phase");
+  // A foreign run cannot move the phase of a task it does not own.
+  deliver(router, stage("diagnosis", "run_not_owning_this_task"));
+  check(read_task(database, id) == before,
+        "a stage from a non-owning run must not change the task phase");
+  deliver(router, completion(active, id));
+  const auto ended = read_task(database, id);
+  deliver(router, stage("investigating", active));
+  check(read_task(database, id) == ended,
+        "a terminal task must not be revived by a late stage event");
+  check(ended.at("status") == "waiting_user",
+        "a completed model attempt still leaves plan verification to the host");
+}
+
+void run_interrupted_plan_checks(IpcRouter& router, DesktopDatabase& database) {  const auto failure_at = "2026-01-01T00:00:05Z";
   const auto prepare = [&](const std::string& id) {
     (void)database.create_investigation_task(remote_task(id));
     database.save_investigation_plan(saved_plan("plan_" + id, id));
@@ -795,6 +836,7 @@ void run_tests(const std::string& python) {
   deliver(router, completion(second, "task_planned"));
 
   run_continuation_prompt_checks(router, database);
+  run_stage_progress_checks(router, database);
   run_interrupted_plan_checks(router, database);
   run_recovery_state_checks(router, database);
 

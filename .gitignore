@@ -9,6 +9,9 @@ package-lock.json
 dist/
 build/
 out/
+# CTest writes Testing/ next to whatever directory it was invoked from; a stray
+# root-level run (no --test-dir) must not become an untracked commit candidate.
+Testing/
 # packaging output (scripts/package.mjs: staged payload, checksums, manifest)
 target/
 apps/desktop/resources/ssh-service/yukinal-ssh-service

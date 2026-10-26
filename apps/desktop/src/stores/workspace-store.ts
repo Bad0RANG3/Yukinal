@@ -31,7 +31,6 @@ export interface WorkspaceState {
   agentOpen: boolean;
   agentDraft: string;
   /** null routes each message automatically; an explicit role is a system persona. */
-  agentRoleId: string | null;
   agentContextEpoch: number;
   agentAttachments: AgentPromptPart[];
   agentBusy: boolean;
@@ -40,7 +39,6 @@ export interface WorkspaceState {
   /** The active chat's editability comes from useChatSessions, never from a role. */
   agentSessionArchived: boolean;
   setAgentDraft(draft: string): void;
-  setAgentRoleId(roleId: string | null): void;
   resetAgentContextView(): void;
   setAgentAttachments(attachments: AgentPromptPart[]): void;
   setAgentBusy(busy: boolean): void;
@@ -67,14 +65,12 @@ export const useWorkspaceStore = create<WorkspaceState>((set) => ({
   selectedTaskId: null,
   agentOpen: true,
   agentDraft: "",
-  agentRoleId: null,
   agentContextEpoch: 0,
   agentAttachments: [],
   agentBusy: false,
   agentHistoryOpen: false,
   agentSessionArchived: false,
   setAgentDraft: (agentDraft) => set({ agentDraft }),
-  setAgentRoleId: (agentRoleId) => set({ agentRoleId }),
   resetAgentContextView: () => set((state) => ({ agentContextEpoch: state.agentContextEpoch + 1 })),
   setAgentAttachments: (agentAttachments) => set({ agentAttachments }),
   setAgentBusy: (agentBusy) => set({ agentBusy }),

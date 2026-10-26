@@ -33,7 +33,7 @@ import { EmptyPanel, ErrorPanel, LoadingPanel, PreviewEmpty } from "../src/compo
 
 /* ── 原文：从 8 个页面里抄下来的、迁移之前的 JSX ────────────────────────────── */
 
-/** ServerOverview / LogsPane / ServicesPane / ProjectsPane 的读取中。 */
+/** ServerOverview / LogsPane / ServicesPane 的读取中。 */
 const originalLoadingPanel = (title: string, hint: string) => (
   <div className="loading-panel">
     <div className="loading-spinner" />
@@ -42,7 +42,7 @@ const originalLoadingPanel = (title: string, hint: string) => (
   </div>
 );
 
-/** ServerOverview / LogsPane / ServicesPane / ProjectsPane 的读取失败。 */
+/** ServerOverview / LogsPane / ServicesPane 的读取失败。 */
 const originalErrorPanelWithIcon = (title: string, message: string, retryLabel: string) => (
   <div className="error-panel">
     <div className="error-panel-icon"><Icon name="warning" size="md" /></div>
@@ -62,7 +62,7 @@ const originalErrorPanelBare = (title: string, message: string, retryLabel: stri
   </div>
 );
 
-/** 泛用空状态，含 LogsPane / ServicesPane / ProjectsPane 的页面级补充类。 */
+/** 泛用空状态，含 LogsPane / ServicesPane 的页面级补充类。 */
 const originalEmptyPanel = (extraClass: string, icon: IconName, title: string, body: string) => (
   <div className={`empty-state page-empty${extraClass ? ` ${extraClass}` : ""}`}>
     <Icon name={icon} size="xl" />

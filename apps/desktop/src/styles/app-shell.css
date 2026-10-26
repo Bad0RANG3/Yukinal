@@ -1277,3 +1277,10 @@ button:disabled {
 .server-list-item .server-row { align-items: stretch; padding: 0; }
 .server-row-actions { display: flex; align-items: center; }
 .server-row-actions button { border: 1px solid var(--line, var(--line)); background: transparent; cursor: pointer; }
+
+/* 服务器删除的行内确认。与对话记录、MCP 设置页的确认条同一套 token 与语言：
+   说明后果 → 取消（默认焦点）→ 破坏性动作。 */
+.server-delete-confirm { display: flex; flex-direction: column; gap: 7px; margin: 6px 0 4px; padding: 9px 10px; border: 1px solid var(--danger-line); border-radius: var(--control-radius); background: var(--danger-surface); }
+.server-delete-confirm p { margin: 0; font-size: 11px; line-height: 1.6; color: var(--text); overflow-wrap: anywhere; }
+.server-delete-confirm-actions { display: flex; justify-content: flex-end; gap: 6px; }
+.server-delete-confirm-danger { color: var(--text); border-color: var(--danger-line); background: var(--warn-surface); }

@@ -261,9 +261,8 @@ class ConversationTests(unittest.IsolatedAsyncioTestCase):
         finally:
             store.close()
 
-    async def test_coordinator_and_worker_policies_reach_models_but_not_ordinary_records(self) -> None:
+    async def test_parent_policy_reaches_subagent_but_not_ordinary_records(self) -> None:
         lead_sentinel = "lead-policy-sentinel-5173"
-        worker_sentinel = "worker-policy-sentinel-6841"
         goal = "Summarize this local fixture."
 
         class BoundaryModel(ScriptedModel):
@@ -275,8 +274,8 @@ class ConversationTests(unittest.IsolatedAsyncioTestCase):
                 if isinstance(messages[-1], ToolMessage):
                     return AIMessage(content="Fixture work dispatched.")
                 return AIMessage(content="", tool_calls=[{
-                    "name": "teams__dispatch", "args": {"tasks": [{
-                        "key": "fixture-job", "roleId": "fixture-reader", "title": "Fixture summary",
+                    "name": "subagents__start", "args": {"tasks": [{
+                        "key": "fixture-job", "title": "Fixture summary",
                         "goal": goal, "access": "read",
                     }]}, "id": "fixture-dispatch", "type": "tool_call",
                 }])
@@ -285,33 +284,31 @@ class ConversationTests(unittest.IsolatedAsyncioTestCase):
         model = BoundaryModel([])
         sidecar = LocalSidecar(model, store)
         try:
-            incoming = request("boundary-lead", prompt="Coordinate this local fixture.")
+            incoming = request("boundary-lead", prompt="使用子代理并行处理两个独立检查")
             incoming["persona"]["systemPrompt"] = lead_sentinel
-            incoming["coordination"] = {"version": 1, "roles": [{
-                "id": "fixture-reader", "team": "blue", "label": "Fixture reader",
-                "systemPrompt": worker_sentinel,
-            }], "servers": []}
+            incoming["subagents"] = {"version": 1, "servers": []}
             response = await asyncio.wait_for(sidecar.rpc("agent.run.start", incoming), 3)
             self.assertEqual(response["result"]["result"]["state"], "completed")
-            await asyncio.wait_for(asyncio.gather(*list(sidecar._coordination.active.values())), 3)
-            job = next(iter(sidecar._coordination.jobs.values()))
+            await asyncio.wait_for(asyncio.gather(*list(sidecar._subagents.active.values())), 3)
+            job = next(iter(sidecar._subagents.jobs.values()))
             self.assertEqual(job["state"], "completed")
             lead_inputs = [messages for messages in model.seen if messages[-1].content != goal
                            and any(lead_sentinel in str(message.content) for message in messages if isinstance(message, SystemMessage))]
             worker_inputs = [messages for messages in model.seen if messages[-1].content == goal]
             self.assertTrue(lead_inputs)
             self.assertEqual(len(worker_inputs), 1)
-            self.assertTrue(worker_sentinel in str(worker_inputs[0][0].content), "Worker execution policy was not supplied")
-            self.assertFalse(lead_sentinel in str(worker_inputs[0]), "Coordinator policy crossed into worker history")
+            # A subagent inherits the parent's execution policy verbatim; it is still
+            # an execution-only input and must never reach ordinary records.
+            self.assertIn(lead_sentinel, str(worker_inputs[0][0].content), "Subagent did not inherit the parent policy")
+            self.assertIn("subagent", str(worker_inputs[0][0].content))
             rows = store._connection.execute(
                 "SELECT metadata_json, messages_json, summary_text FROM conversation_turns"
             ).fetchall()
             self.assertEqual(len(rows), 2)
-            listing = await sidecar.rpc("agent.teams.list", {"sessionId": incoming["sessionId"]})
+            listing = await sidecar.rpc("agent.subagents.list", {"sessionId": incoming["sessionId"]})
             public = json.dumps({"records": [tuple(row) for row in rows], "notifications": sidecar.events,
-                                 "teamListing": listing}, ensure_ascii=False)
-            for sentinel in (lead_sentinel, worker_sentinel):
-                self.assertFalse(sentinel in public, "Execution policy entered ordinary records or notifications")
+                                 "subagentListing": listing}, ensure_ascii=False)
+            self.assertFalse(lead_sentinel in public, "Execution policy entered ordinary records or notifications")
             self.assertFalse("systemPrompt" in public, "Execution-only field entered ordinary records")
             self.assertNotIn("coordination", json.dumps([row["metadata_json"] for row in rows]))
         finally:

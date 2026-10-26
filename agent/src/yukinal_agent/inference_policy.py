@@ -36,7 +36,7 @@ def select_inference(model: Any, request: dict[str, Any]) -> InferencePlan:
     contextual = bool(request.get("taskId") or request.get("planBinding") or request.get("parts"))
     if _DEEP.search(text) or len(text) > 1800:
         effort = "high"
-    elif contextual or _ACTION.search(text) or request.get("coordination") or _TASK_CONTEXT.search(text):
+    elif contextual or _ACTION.search(text) or request.get("subagents") or _TASK_CONTEXT.search(text):
         effort = "low"
     elif _SIMPLE.fullmatch(text.strip()):
         effort = "none"

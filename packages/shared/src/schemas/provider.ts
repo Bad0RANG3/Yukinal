@@ -202,6 +202,17 @@ export const ProviderSaveInputSchema = z
   .refine(wireApiAppliesTo, WIRE_API_IS_OPENAI_ONLY)
   .refine(apiVersionAppliesTo, API_VERSION_IS_ANTHROPIC_ONLY);
 
+export const ProviderModelDiscoveryInputSchema = z
+  .strictObject({
+    providerId: z.string().trim().min(1).max(256).optional(),
+    kind: AiProviderKindSchema,
+    baseUrl: ProviderBaseUrlSchema,
+    apiKey: z.string().min(1).max(4_096).refine((value) => !/[\r\n]/.test(value)).optional(),
+    customHeaders: SafeCustomHeadersSchema.optional(),
+    apiVersion: ApiVersionSchema.optional(),
+  })
+  .refine(apiVersionAppliesTo, API_VERSION_IS_ANTHROPIC_ONLY);
+
 /**
  * 删除一个 Provider 的结果。
  *

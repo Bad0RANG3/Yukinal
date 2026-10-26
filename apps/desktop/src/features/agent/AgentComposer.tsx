@@ -34,7 +34,6 @@ import {
 } from "@yukinal/shared";
 
 import { Icon } from "../../components/Icon.js";
-import type { AgentRole } from "../agent-nist/agent-nist.js";
 import { useDismissOnOutsidePointer } from "../../hooks/useDismissOnOutsidePointer.js";
 import { usePresence } from "../../hooks/usePresence.js";
 import { composerKeyAction } from "./composer-keyboard.js";
@@ -100,9 +99,6 @@ export function AgentComposer({
   onReasoningEffortChange,
   mentions,
   commandContext,
-  roles = [],
-  selectedRoleId = null,
-  onSelectRole,
   notices,
   status,
 }: {
@@ -147,9 +143,6 @@ export function AgentComposer({
   /** 可被 @ 提及的服务器。 */
   mentions: readonly MentionCandidate[];
   commandContext: CommandContext;
-  roles?: readonly AgentRole[];
-  selectedRoleId?: string | null;
-  onSelectRole?: (roleId: string | null) => void;
   notices?: ReactNode;
   status?: ReactNode;
 }) {
@@ -518,7 +511,14 @@ export function AgentComposer({
           ref={inputRef}
           rows={1}
           aria-label="消息输入"
+          /* ARIA 1.2 combobox：`aria-autocomplete` / `aria-controls` /
+             `aria-activedescendant` 只有配上 `role="combobox"` 与 `aria-expanded` 才成立。
+             缺这两项时读屏不知道这个文本框带弹出列表，也不会宣告列表开合 —— 用户只能
+             靠视觉发现候选，键盘导航的结果不会被念出来。 */
+          role="combobox"
           aria-autocomplete="list"
+          aria-expanded={open}
+          aria-haspopup="listbox"
           aria-controls={open ? suggestionsId : undefined}
           aria-activedescendant={open && suggestions[active] ? `${suggestionsId}-${active}` : undefined}
           title="Enter 换行，Ctrl+Enter 发送"
@@ -563,7 +563,7 @@ export function AgentComposer({
             id={suggestionsId}
             inert={!open}
             aria-hidden={!open}
-            aria-label={trigger?.kind === "command" ? "可用命令" : "可提及的队伍与服务器"}
+            aria-label={trigger?.kind === "command" ? "可用命令" : "可提及的服务器"}
             onAnimationEnd={suggestionsPresence.onAnimationEnd}
           >
             {visibleSuggestions.map((suggestion, index) => {
@@ -600,7 +600,6 @@ export function AgentComposer({
           permissionMode={permissionMode} onPermissionModeChange={onPermissionModeChange}
           runPolicy={runPolicy} onRunPolicyChange={onRunPolicyChange} targetEnvironment={targetEnvironment}
           delivery={delivery} onDeliveryChange={onDeliveryChange}
-          roles={roles} selectedRoleId={selectedRoleId} onSelectRole={onSelectRole}
         /> : null}
 
         <div className="agent-composer-toolbar">

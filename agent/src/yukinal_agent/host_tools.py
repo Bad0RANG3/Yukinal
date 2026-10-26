@@ -65,7 +65,9 @@ FILESYSTEM_ACTION_TOOLS = frozenset({
     "filesystem.restore",
     "filesystem.backup.cleanup",
 })
-PLAN_BOUND_HOST_ACTION_TOOLS = HOST_APPROVAL_TOOLS | FILESYSTEM_ACTION_TOOLS
+# Every tool that changes remote state. Membership decides the approval and
+# target requirements, never whether the tool exists for a given run.
+STATE_CHANGING_TOOLS = HOST_APPROVAL_TOOLS | FILESYSTEM_ACTION_TOOLS
 _SERVER_EXEC_SCHEMA = {
     "type": "object",
     "additionalProperties": False,
@@ -474,7 +476,7 @@ _STRUCTURED_ACTIONS: tuple[tuple[str, str, dict[str, Any]], ...] = (
     ),
     (
         "package.install",
-        "Install one apt, dnf, or yum package after exact per-call user approval and host plan checks.",
+        "Install one package using the target's detected apt, dnf, or yum manager after exact per-call user approval and host plan checks.",
         {
             "type": "object",
             "additionalProperties": False,
@@ -482,11 +484,8 @@ _STRUCTURED_ACTIONS: tuple[tuple[str, str, dict[str, Any]], ...] = (
             "properties": {
                 "manager": {
                     "type": "string",
-                    "enum": ["apt", "dnf", "yum"],
-                    "description": (
-                        "Use apt for Debian/Ubuntu, dnf for Fedora and modern RHEL, "
-                        "and yum for CentOS/RHEL 7."
-                    ),
+                    "enum": ["auto"],
+                    "description": "Always use auto; detect the package manager on the selected target during installation.",
                 },
                 "package": {"type": "string", "pattern": "^[A-Za-z0-9][A-Za-z0-9+._:-]{0,127}$"},
                 "version": {"type": "string", "pattern": "^[A-Za-z0-9][A-Za-z0-9+._:-]{0,127}$"},
@@ -570,7 +569,7 @@ def register_host_tools(
         ),
         (
             "package.inspect",
-            "Read whether one apt, dnf, or yum package is installed and return its normalized version.",
+            "Read whether a package is installed and return its normalized version. Always use manager=auto so the selected target chooses the package manager.",
             {
                 "type": "object",
                 "additionalProperties": False,
@@ -578,11 +577,8 @@ def register_host_tools(
                 "properties": {
                     "manager": {
                         "type": "string",
-                        "enum": ["apt", "dnf", "yum"],
-                        "description": (
-                            "Use apt for Debian/Ubuntu, dnf for Fedora and modern RHEL, "
-                            "and yum for CentOS/RHEL 7."
-                        ),
+                        "enum": ["auto"],
+                        "description": "Always use auto; detect the package manager on the target during the SSH operation.",
                     },
                     "package": {"type": "string", "pattern": "^[A-Za-z0-9][A-Za-z0-9+._:-]{0,127}$"},
                 },
@@ -1411,21 +1407,20 @@ async def _execute_on_host(
     }
     if context.run_id:
         request["runId"] = context.run_id
-    if context.host_task_id:
+    if context.host_task_id and context.plan_id and context.plan_step_id:
+        # All or nothing: the host refuses a partial task/plan/step set. A
+        # conversation has no plan, so it sends none of them.
         request["taskId"] = context.host_task_id
-    if context.plan_id is not None and context.plan_step_id is not None:
         request["planId"] = context.plan_id
         request["planStepId"] = context.plan_step_id
         request["evidenceIds"] = list(context.evidence_ids)
-    if tool_name in PLAN_BOUND_HOST_ACTION_TOOLS:
-        if (
-            not context.host_target
-            or context.host_target.get("host") != "remote"
-            or not context.host_task_id
-            or not context.plan_id
-            or not context.plan_step_id
-        ):
-            raise ToolCallError("durable_plan_required", "host actions require a current durable remote action plan")
+    if tool_name in STATE_CHANGING_TOOLS and (
+        not context.host_target or context.host_target.get("host") != "remote"
+    ):
+        # The host refuses effectful tools on this `host.tool.execute` route; the
+        # remote-target check keeps the failure honest instead of inventing a
+        # second execution path. Real actions go through the ticketed SSH route.
+        raise ToolCallError("target_required", "host actions require a resolved remote server")
     if tool_name in HOST_APPROVAL_TOOLS:
         fingerprint = approval_fingerprint(
             tool_name,

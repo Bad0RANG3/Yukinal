@@ -223,6 +223,74 @@ timing, result shape, approval status and a stable error code. Raw arguments,
 tool results and exception text are not written to the audit file. The JSONL
 file is created with owner-only permissions where the platform supports them.
 
+## Operating procedure and runbooks
+
+The agent owns the outcome. It works through one procedure, defined in
+`agent/src/yukinal_agent/operations_policy.py`:
+
+    understand → look → diagnose → do it → verify → report
+
+`OPERATIONS_PROCEDURE` is prompt text, deliberately. The loop runs no stage checks,
+so the procedure is a contract the model is asked to keep; what code enforces is the
+per-call approval, the single-use host ticket, the repetition and unknown-outcome
+guards, and the host's own target and command rules. A runbook is only a *starting
+point* for a matching request.
+
+There is one permission model, not a tier per environment. A `goal` run exposes every
+registered tool; each state-changing call pauses for the user's approval, and the host
+re-checks the target, the exact input, the operator's command blacklist and its own
+one-shot ticket before anything runs. `readonly`/`plan` expose read-only tools only.
+Durable tasks and their plans remain available for scheduled investigations, but they
+are no longer a precondition for a conversation to change a host.
+
+`RUNBOOKS` holds curated standard procedures for the failures this product is used
+for: disk or inode exhaustion, a service down or returning 502, high CPU/memory,
+log triage, deploy/configuration change, and an unhealthy container. Each defines
+the evidence to collect (by registered tool name), common causes, ordered steps, a
+verification requirement and the condition under which the agent must stop and
+ask. Selection reads only the current user instruction: code blocks are stripped,
+and a pure question about a failure ("what is a 502?") does not select a runbook
+because it asks for knowledge rather than work. `test_operations_policy.py` fails
+if a runbook names a tool the desktop build no longer registers.
+
+### Stages are derived, not claimed
+
+`agent_stage.py` maps executed tool results to a stage, and the loop emits
+`agent.stage` only when that stage changes:
+
+| Stage | Reached when |
+| --- | --- |
+| `intake` | the run has not executed anything yet |
+| `evidence` | a read succeeded |
+| `diagnosis` | a read failed, or an effectful call's outcome is unknown/failed after dispatch |
+| `plan` | `investigation.plan` recorded a plan |
+| `change` | an effectful call succeeded (or may have run) |
+| `verify` | a read succeeded after a change |
+| `report` | the run produced its final answer |
+
+The stage is an observation of what ran, never the model's own claim, so the UI may
+show it as fact. It changes nothing about what the agent is allowed to do.
+
+A denied, approval-pending or invalid call changes no stage: nothing ran, and the
+target did not change. The event carries `runId` and, for a durable task,
+`taskId`. The shared schema, the desktop channel gate, the watch strip and the
+chat header consume it; an older sidecar that does not emit it simply keeps the
+generic run-state label.
+
+### Diagnostic read tools
+
+Three fixed, read-only operations exist because diagnosing a host without them
+means a high-risk `server.exec`:
+
+- `server.processes` — process table ranked by CPU (pid, parent, user, CPU/memory
+  percent, state, elapsed seconds, command).
+- `server.ports` — listening TCP/UDP sockets with the owning process when the SSH
+  user may read it, and `processInfoAvailable: false` when it may not.
+- `filesystem.list` — one directory level (name, type, size), non-recursive, with
+  the same credential-path blocklist as `filesystem.read`.
+
+The model supplies no flags for these: every call runs the same bounded command.
+
 ## Tests
 
 ```powershell

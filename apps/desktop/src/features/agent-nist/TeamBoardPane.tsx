@@ -7,7 +7,6 @@ import { errorMessage, formatRelativeTime, formatTimestamp } from "../../lib/for
 import { isPreviewFixture } from "../../lib/preview-fixtures.js";
 import { useServers } from "../../lib/servers.js";
 import { useWorkspaceStore } from "../../stores/workspace-store.js";
-import { AGENT_TEAMS, agentTeamLabel } from "./agent-nist.js";
 import { useTeamRuntimeStore } from "./team-runtime-store.js";
 import { BOARD_COLUMNS, boardCardFeedback, boardPreviewCards, teamBoardCards, type TeamBoardCard } from "./team-board.js";
 import { TeamFeedbackPreview } from "./TeamActivity.js";
@@ -21,7 +20,6 @@ export function TeamBoardPane({ serverId }: { serverId: string | null; expanded?
   const selectedServerId = useWorkspaceStore((state) => state.selectedServerId);
   const [goalsOpen, setGoalsOpen] = useState(false);
   const [scope, setScope] = useState(serverId ?? "all");
-  const [team, setTeam] = useState("all");
   const [search, setSearch] = useState("");
   const [selectedId, setSelectedId] = useState<string | null>(null);
   const servers = useServers({ enabled: false });
@@ -31,7 +29,6 @@ export function TeamBoardPane({ serverId }: { serverId: string | null; expanded?
   });
   const allCards = [...(isPreviewFixture() ? boardPreviewCards(cues) : []), ...teamBoardCards(query.data ?? [], runs)];
   const cards = allCards.filter((card) => (scope === "all" || card.serverId === scope)
-    && (team === "all" || (team === "unassigned" ? !card.team : card.team === team))
     && (!search.trim() || `${card.goal} ${card.serverId ? names.get(card.serverId) ?? card.serverId : "全局工作区"}`.toLocaleLowerCase().includes(search.trim().toLocaleLowerCase())));
   const activeCount = cards.filter((card) => !card.preview && boardCardFeedback(card, cues)?.phase === "working").length;
   const waitingCount = cards.filter((card) => card.column === "waiting").length;
@@ -47,8 +44,7 @@ export function TeamBoardPane({ serverId }: { serverId: string | null; expanded?
     </div></header>
     {goalsOpen ? <Suspense fallback={<p className="agent-nist-notice" role="status">加载目标任务…</p>}><InvestigationsPane /></Suspense> : <>
     <div className="team-board-controls"><label className="team-board-search"><Icon name="search" size="sm" /><input aria-label="搜索看板任务" placeholder="搜索任务或服务器" value={search} onChange={(event) => setSearch(event.target.value)} /></label>
-      <div className="team-board-filters"><select aria-label="看板服务器范围" value={scope} onChange={(event) => setScope(event.target.value)}><option value="all">全部服务器</option>{servers.data?.map((server) => <option key={server.id} value={server.id}>{server.name}</option>)}{serverId && !names.has(serverId) ? <option value={serverId}>当前服务器</option> : null}</select>
-        <select aria-label="看板团队筛选" value={team} onChange={(event) => setTeam(event.target.value)}><option value="all">全部团队</option>{AGENT_TEAMS.map((item) => <option key={item.id} value={item.id}>{item.label}</option>)}<option value="unassigned">未记录团队</option></select></div>
+      <div className="team-board-filters"><select aria-label="看板服务器范围" value={scope} onChange={(event) => setScope(event.target.value)}><option value="all">全部服务器</option>{servers.data?.map((server) => <option key={server.id} value={server.id}>{server.name}</option>)}{serverId && !names.has(serverId) ? <option value={serverId}>当前服务器</option> : null}</select></div>
     </div>
     <div className="team-board-status" role="status"><span>{activeCount ? `本窗口 ${activeCount} 个 AI 执行中` : "本窗口无 AI 执行"}</span>{waitingCount ? <strong>{waitingCount} 项待确认</strong> : null}<span>点击卡片查看属性</span></div>
     {query.isLoading ? <p className="agent-nist-notice" role="status">读取任务…</p> : null}
@@ -57,7 +53,7 @@ export function TeamBoardPane({ serverId }: { serverId: string | null; expanded?
       const items = cards.filter((card) => card.column === column.id);
       return <section key={column.id} className={`team-board-column column-${column.id}`} aria-label={column.label}>
         <header><span aria-hidden="true" /><h3>{column.label}</h3><span>{items.length}</span></header>
-        <div className="team-board-cards">{items.map((card) => <BoardCard key={card.id} card={card} serverName={card.serverId ? names.get(card.serverId) ?? card.serverId : "全局工作区"} onOpen={() => setSelectedId(card.id)} />)}{!items.length ? <p className="team-board-empty">{query.isLoading ? "读取中…" : query.isError ? "任务状态未同步" : search || scope !== "all" || team !== "all" ? "无匹配任务" : "暂无任务"}</p> : null}</div>
+        <div className="team-board-cards">{items.map((card) => <BoardCard key={card.id} card={card} serverName={card.serverId ? names.get(card.serverId) ?? card.serverId : "全局工作区"} onOpen={() => setSelectedId(card.id)} />)}{!items.length ? <p className="team-board-empty">{query.isLoading ? "读取中…" : query.isError ? "任务状态未同步" : search || scope !== "all" ? "无匹配任务" : "暂无任务"}</p> : null}</div>
       </section>;
     })}</div></div>
     <p className="team-board-footnote">已存任务与本窗口运行同步呈现。{query.data?.length === 100 ? "当前显示最近 100 个已存任务。" : ""}</p>
@@ -69,12 +65,11 @@ export function TeamBoardPane({ serverId }: { serverId: string | null; expanded?
 function BoardCard({ card, serverName, onOpen }: { card: TeamBoardCard; serverName: string; onOpen: () => void }) {
   const cues = useTeamRuntimeStore((state) => state.cues);
   const feedback = boardCardFeedback(card, cues);
-  const teamLabel = agentTeamLabel(card.team ?? "");
-  return <article className={`team-board-card ${card.failed ? "has-failure" : ""} ${feedback ? `team-color-${feedback.team}` : ""}`} data-operation={feedback?.phase}>
-    {feedback ? <span key={feedback.key} aria-hidden="true" className={`team-operation-outline team-color-${feedback.team}`} data-operation={feedback.phase} /> : null}
+  return <article className={`team-board-card ${card.failed ? "has-failure" : ""} ${feedback ? "team-color-blue" : ""}`} data-operation={feedback?.phase}>
+    {feedback ? <span key={feedback.key} aria-hidden="true" className="team-operation-outline team-color-blue" data-operation={feedback.phase} /> : null}
     <button type="button" className="team-board-card-toggle" aria-haspopup="dialog" aria-label={`查看任务属性：${card.goal || "附件任务"}`} onClick={onOpen}>
       <strong title={card.goal || "附件任务"}>{card.goal || "附件任务"}</strong>
-      <span className="team-board-card-meta"><span className={card.team ? `team-color-${card.team}` : ""}>{card.preview ? "模拟 · " : ""}{teamLabel ?? "未记录团队"}</span><span className={feedback?.phase === "working" ? "team-board-working" : ""}>{feedback?.phase === "working" ? <i aria-hidden="true" /> : null}{card.status}</span></span>
+      <span className="team-board-card-meta"><span>{card.preview ? "模拟 · " : "运维 Agent"}</span><span className={feedback?.phase === "working" ? "team-board-working" : ""}>{feedback?.phase === "working" ? <i aria-hidden="true" /> : null}{card.status}</span></span>
       <span className="team-board-card-target"><Icon name={card.serverId ? "servers" : "projects"} size="xs" /><span title={serverName}>{serverName}</span>{card.updatedAt > 0 ? <time dateTime={new Date(card.updatedAt).toISOString()} title={formatTimestamp(new Date(card.updatedAt).toISOString())}>{formatRelativeTime(new Date(card.updatedAt).toISOString())}</time> : null}</span>
     </button>
   </article>;

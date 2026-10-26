@@ -34,6 +34,9 @@ from .tools import (
 _ASCII_LOWER = str.maketrans("ABCDEFGHIJKLMNOPQRSTUVWXYZ", "abcdefghijklmnopqrstuvwxyz")
 _MAX_SERVER_LOG_LINES = 100
 _MAX_SERVICE_INVENTORY_LINES = 200
+_MAX_PROCESS_LINES = 64
+_MAX_PORT_LINES = 128
+_MAX_DIRECTORY_ENTRIES = 256
 _MAX_INVENTORY_OUTPUT_BYTES = 60 * 1024
 _MAX_DOCKER_PS_CONTAINERS = 200
 _MAX_DOCKER_LOG_LINE_CHARS = 4_000
@@ -65,11 +68,8 @@ _PACKAGE_INSTALL_INPUT_SCHEMA = {
     "properties": {
         "manager": {
             "type": "string",
-            "enum": ["apt", "dnf", "yum"],
-            "description": (
-                "Use apt for Debian/Ubuntu, dnf for Fedora and modern RHEL, "
-                "and yum for CentOS/RHEL 7."
-            ),
+            "enum": ["auto"],
+            "description": "Always use auto; detect the package manager on the selected target during the operation.",
         },
         "package": {"type": "string", "pattern": "^[A-Za-z0-9][A-Za-z0-9+._:-]{0,127}$"},
         "version": {"type": "string", "pattern": "^[A-Za-z0-9][A-Za-z0-9+._:~^-]{0,127}$"},
@@ -268,17 +268,14 @@ def register_desktop_ssh_tools(
         ),
         (
             "package.inspect",
-            "Read whether one apt, dnf, or yum package is installed and its normalized version.",
+            "Read whether a package is installed and its normalized version. Always use manager=auto so the target selects apt, dnf, or yum in the same SSH operation.",
             {
                 "type": "object",
                 "properties": {
                     "manager": {
                         "type": "string",
-                        "enum": ["apt", "dnf", "yum"],
-                        "description": (
-                            "Use apt for Debian/Ubuntu, dnf for Fedora and modern RHEL, "
-                            "and yum for CentOS/RHEL 7."
-                        ),
+                        "enum": ["auto"],
+                        "description": "Always use auto; detect apt, dnf, or yum on the target during this SSH operation.",
                     },
                     "package": {"type": "string", "pattern": "^[A-Za-z0-9][A-Za-z0-9+._:-]{0,127}$"},
                 },
@@ -306,6 +303,39 @@ def register_desktop_ssh_tools(
             },
             "filesystem_read",
         ),
+        (
+            "filesystem.list",
+            "List one directory level on the selected remote server without changing state. "
+            "Returns names, types and sizes; it does not follow symlinks or recurse.",
+            {
+                "type": "object",
+                "additionalProperties": False,
+                "required": ["path"],
+                "properties": {
+                    "path": {
+                        "type": "string",
+                        "minLength": 1,
+                        "maxLength": 4096,
+                        "pattern": "^/[^\\u0000-\\u001f]*$",
+                    },
+                },
+            },
+            "filesystem_list",
+        ),
+        (
+            "server.processes",
+            "Read the fixed, read-only process table on the selected server, ranked by CPU: "
+            "pid, parent, user, CPU/memory percent, state, elapsed seconds and command name.",
+            {"type": "object", "additionalProperties": False, "properties": {}},
+            "process_inventory",
+        ),
+        (
+            "server.ports",
+            "Read the fixed, read-only listening TCP/UDP sockets on the selected server. "
+            "The owning process is reported only when the SSH user may read it.",
+            {"type": "object", "additionalProperties": False, "properties": {}},
+            "port_inventory",
+        ),
     )
 
     async def execute(
@@ -321,6 +351,8 @@ def register_desktop_ssh_tools(
             method = (
                 "host.ssh.filesystem_read_target"
                 if operation == "filesystem_read"
+                else "host.ssh.filesystem_list_target"
+                if operation == "filesystem_list"
                 else "host.ssh.service_target"
             )
             params: dict[str, Any] = {"serverId": target_id}
@@ -328,6 +360,8 @@ def register_desktop_ssh_tools(
                 params.update(
                     {"path": arguments["path"], "maxBytes": arguments.get("maxBytes")}
                 )
+            elif operation == "filesystem_list":
+                params.update({"path": arguments["path"]})
             payload = await host.request(
                 method, params, timeout_seconds=8.0
             )
@@ -382,6 +416,29 @@ def register_desktop_ssh_tools(
                     "truncated": len(raw) > max_bytes,
                     "revision": hashlib.sha256(kept).hexdigest(),
                 }
+            elif operation == "filesystem_list":
+                list_binding = (
+                    payload.get("filesystemList") if isinstance(payload, dict) else None
+                )
+                if (
+                    not isinstance(list_binding, dict)
+                    or list_binding.get("path") != arguments["path"]
+                ):
+                    return await _execute_on_host(host, tool_name, arguments, context)
+                entries = await asyncio.to_thread(
+                    client.sftp_list, target_id, arguments["path"],
+                )
+                return {
+                    "path": arguments["path"],
+                    "entries": entries[:_MAX_DIRECTORY_ENTRIES],
+                    "truncated": len(entries) > _MAX_DIRECTORY_ENTRIES,
+                }
+            elif operation == "process_inventory":
+                result = await asyncio.to_thread(client.process_inventory, target_id)
+                return _parse_process_inventory(result.stdout)
+            elif operation == "port_inventory":
+                result = await asyncio.to_thread(client.port_inventory, target_id)
+                return _parse_port_inventory(result.stdout)
             elif operation == "system_snapshot":
                 outputs = await asyncio.to_thread(client.system_snapshot, target_id)
                 snapshot = await _execute_on_host(
@@ -699,6 +756,23 @@ def register_desktop_ssh_tools(
     )
 
 
+def _host_plan_binding(context: ExecutionContext) -> dict[str, Any]:
+    """Task/plan fields for a host RPC, or nothing for a conversation run.
+
+    The host refuses a partial set, so this is all-or-nothing. A conversation has
+    no plan; its call is still bound by run/trace/call identity and the approval
+    ticket, and its file mutations still go through the exactly-once ledger.
+    """
+    if context.host_task_id and context.plan_id and context.plan_step_id:
+        return {
+            "taskId": context.host_task_id,
+            "planId": context.plan_id,
+            "planStepId": context.plan_step_id,
+            "evidenceIds": list(context.evidence_ids),
+        }
+    return {}
+
+
 def _ssh_effectful_action_host_call(
     tool_name: str, arguments: dict[str, Any], context: ExecutionContext
 ) -> dict[str, Any]:
@@ -712,11 +786,8 @@ def _ssh_effectful_action_host_call(
         or not context.run_id
         or not context.trace_id
         or not context.call_id
-        or not context.host_task_id
-        or not context.plan_id
-        or not context.plan_step_id
     ):
-        raise ToolCallError("durable_plan_required", "the SSH action requires a durable remote plan")
+        raise ToolCallError("target_required", "the SSH action requires a resolved remote server")
     fingerprint = approval_fingerprint(
         tool_name,
         target_id,
@@ -728,19 +799,18 @@ def _ssh_effectful_action_host_call(
     approval_id = context.approved_actions.get(fingerprint)
     if not approval_id:
         raise ToolCallError("approval_reference_missing", "the exact SSH action approval is unavailable")
-    return {
+    tool_call: dict[str, Any] = {
         "callId": context.call_id,
         "runId": context.run_id,
         "traceId": context.trace_id,
         "toolName": tool_name,
         "input": arguments,
         "target": dict(target),
-        "taskId": context.host_task_id,
-        "planId": context.plan_id,
-        "planStepId": context.plan_step_id,
-        "evidenceIds": list(context.evidence_ids),
         "approvalId": approval_id,
     }
+    # The host refuses a partial task/plan/step set; a conversation sends none.
+    tool_call.update(_host_plan_binding(context))
+    return tool_call
 
 
 async def _finish_desktop_ssh_effectful_action(
@@ -992,37 +1062,8 @@ async def _desktop_filesystem_write(
         or not context.run_id
         or not context.trace_id
         or not context.call_id
-        or not context.host_task_id
-        or not context.plan_id
-        or not context.plan_step_id
     ):
-        raise ToolCallError(
-            "durable_plan_required", "filesystem.write requires a durable remote action plan"
-        )
-
-    plan_request = {
-        "taskId": context.host_task_id,
-        "toolName": "filesystem.write",
-        "input": arguments,
-        "target": dict(target),
-    }
-    try:
-        plan = await host.request(
-            "host.investigation.plan.check", plan_request, timeout_seconds=8.0
-        )
-    except asyncio.CancelledError:
-        raise
-    except Exception:
-        raise ToolCallError("host_unavailable", "The desktop host could not validate the action plan") from None
-    if (
-        not isinstance(plan, dict)
-        or plan.get("status") != "allowed"
-        or plan.get("planId") != context.plan_id
-        or plan.get("stepId") != context.plan_step_id
-        or plan.get("stepKind") != "action"
-        or plan.get("evidenceIds") != list(context.evidence_ids)
-    ):
-        raise ToolCallError("plan_deviation", "The current durable plan does not authorize this file write")
+        raise ToolCallError("target_required", "filesystem.write requires a resolved remote server")
 
     ledger = FilesystemActionLedger.from_environment()
     if ledger is None:
@@ -1034,8 +1075,8 @@ async def _desktop_filesystem_write(
         "tool_name": "filesystem.write",
         "target_id": target_id,
         "arguments": arguments,
-        "plan_id": context.plan_id,
-        "plan_step_id": context.plan_step_id,
+        "plan_id": context.plan_id or "",
+        "plan_step_id": context.plan_step_id or "",
         "evidence_ids": context.evidence_ids,
     }
     try:
@@ -1062,10 +1103,7 @@ async def _desktop_filesystem_write(
                 "serverId": target_id,
                 "path": arguments["path"],
                 "content": arguments["content"],
-                "taskId": context.host_task_id,
-                "planId": context.plan_id,
-                "planStepId": context.plan_step_id,
-                "evidenceIds": list(context.evidence_ids),
+                **_host_plan_binding(context),
                 "target": dict(target),
             },
             timeout_seconds=8.0,
@@ -1140,37 +1178,8 @@ async def _desktop_filesystem_edit(
         or not context.run_id
         or not context.trace_id
         or not context.call_id
-        or not context.host_task_id
-        or not context.plan_id
-        or not context.plan_step_id
     ):
-        raise ToolCallError(
-            "durable_plan_required", "filesystem.edit requires a durable remote action plan"
-        )
-
-    plan_request = {
-        "taskId": context.host_task_id,
-        "toolName": "filesystem.edit",
-        "input": arguments,
-        "target": dict(target),
-    }
-    try:
-        plan = await host.request(
-            "host.investigation.plan.check", plan_request, timeout_seconds=8.0
-        )
-    except asyncio.CancelledError:
-        raise
-    except Exception:
-        raise ToolCallError("host_unavailable", "The desktop host could not validate the action plan") from None
-    if (
-        not isinstance(plan, dict)
-        or plan.get("status") != "allowed"
-        or plan.get("planId") != context.plan_id
-        or plan.get("stepId") != context.plan_step_id
-        or plan.get("stepKind") != "action"
-        or plan.get("evidenceIds") != list(context.evidence_ids)
-    ):
-        raise ToolCallError("plan_deviation", "The current durable plan does not authorize this file edit")
+        raise ToolCallError("target_required", "filesystem.edit requires a resolved remote server")
 
     ledger = FilesystemActionLedger.from_environment()
     if ledger is None:
@@ -1182,8 +1191,8 @@ async def _desktop_filesystem_edit(
         "tool_name": "filesystem.edit",
         "target_id": target_id,
         "arguments": arguments,
-        "plan_id": context.plan_id,
-        "plan_step_id": context.plan_step_id,
+        "plan_id": context.plan_id or "",
+        "plan_step_id": context.plan_step_id or "",
         "evidence_ids": context.evidence_ids,
     }
     try:
@@ -1209,10 +1218,7 @@ async def _desktop_filesystem_edit(
             {
                 "serverId": target_id,
                 **arguments,
-                "taskId": context.host_task_id,
-                "planId": context.plan_id,
-                "planStepId": context.plan_step_id,
-                "evidenceIds": list(context.evidence_ids),
+                **_host_plan_binding(context),
                 "target": dict(target),
             },
             timeout_seconds=8.0,
@@ -1345,37 +1351,8 @@ async def _desktop_filesystem_backup(
         or not context.run_id
         or not context.trace_id
         or not context.call_id
-        or not context.host_task_id
-        or not context.plan_id
-        or not context.plan_step_id
     ):
-        raise ToolCallError(
-            "durable_plan_required", "filesystem.backup requires a durable remote action plan"
-        )
-
-    plan_request = {
-        "taskId": context.host_task_id,
-        "toolName": "filesystem.backup",
-        "input": arguments,
-        "target": dict(target),
-    }
-    try:
-        plan = await host.request(
-            "host.investigation.plan.check", plan_request, timeout_seconds=8.0
-        )
-    except asyncio.CancelledError:
-        raise
-    except Exception:
-        raise ToolCallError("host_unavailable", "The desktop host could not validate the backup plan") from None
-    if (
-        not isinstance(plan, dict)
-        or plan.get("status") != "allowed"
-        or plan.get("planId") != context.plan_id
-        or plan.get("stepId") != context.plan_step_id
-        or plan.get("stepKind") != "action"
-        or plan.get("evidenceIds") != list(context.evidence_ids)
-    ):
-        raise ToolCallError("plan_deviation", "The current durable plan does not authorize this backup")
+        raise ToolCallError("target_required", "filesystem.backup requires a resolved remote server")
 
     ledger = FilesystemActionLedger.from_environment()
     if ledger is None:
@@ -1387,8 +1364,8 @@ async def _desktop_filesystem_backup(
         "tool_name": "filesystem.backup",
         "target_id": target_id,
         "arguments": arguments,
-        "plan_id": context.plan_id,
-        "plan_step_id": context.plan_step_id,
+        "plan_id": context.plan_id or "",
+        "plan_step_id": context.plan_step_id or "",
         "evidence_ids": context.evidence_ids,
     }
     try:
@@ -1414,10 +1391,7 @@ async def _desktop_filesystem_backup(
             {
                 "serverId": target_id,
                 "path": arguments["path"],
-                "taskId": context.host_task_id,
-                "planId": context.plan_id,
-                "planStepId": context.plan_step_id,
-                "evidenceIds": list(context.evidence_ids),
+                **_host_plan_binding(context),
                 "target": dict(target),
             },
             timeout_seconds=8.0,
@@ -1488,12 +1462,9 @@ async def _desktop_filesystem_backup(
                     "backupPath": output["backupPath"],
                     "revision": output["revision"],
                     "bytesBackedUp": output["bytesBackedUp"],
-                    "taskId": context.host_task_id,
-                    "planId": context.plan_id,
-                    "planStepId": context.plan_step_id,
+                    **_host_plan_binding(context),
                     "traceId": context.trace_id,
                     "callId": context.call_id,
-                    "evidenceIds": list(context.evidence_ids),
                     "target": dict(target),
                 },
                 timeout_seconds=8.0,
@@ -1562,37 +1533,8 @@ async def _desktop_filesystem_restore(
         or not context.run_id
         or not context.trace_id
         or not context.call_id
-        or not context.host_task_id
-        or not context.plan_id
-        or not context.plan_step_id
     ):
-        raise ToolCallError(
-            "durable_plan_required", "filesystem.restore requires a durable remote action plan"
-        )
-
-    plan_request = {
-        "taskId": context.host_task_id,
-        "toolName": "filesystem.restore",
-        "input": arguments,
-        "target": dict(target),
-    }
-    try:
-        plan = await host.request(
-            "host.investigation.plan.check", plan_request, timeout_seconds=8.0
-        )
-    except asyncio.CancelledError:
-        raise
-    except Exception:
-        raise ToolCallError("host_unavailable", "The desktop host could not validate the restore plan") from None
-    if (
-        not isinstance(plan, dict)
-        or plan.get("status") != "allowed"
-        or plan.get("planId") != context.plan_id
-        or plan.get("stepId") != context.plan_step_id
-        or plan.get("stepKind") != "action"
-        or plan.get("evidenceIds") != list(context.evidence_ids)
-    ):
-        raise ToolCallError("plan_deviation", "The current durable plan does not authorize this restore")
+        raise ToolCallError("target_required", "filesystem.restore requires a resolved remote server")
 
     ledger = FilesystemActionLedger.from_environment()
     if ledger is None:
@@ -1604,8 +1546,8 @@ async def _desktop_filesystem_restore(
         "tool_name": "filesystem.restore",
         "target_id": target_id,
         "arguments": arguments,
-        "plan_id": context.plan_id,
-        "plan_step_id": context.plan_step_id,
+        "plan_id": context.plan_id or "",
+        "plan_step_id": context.plan_step_id or "",
         "evidence_ids": context.evidence_ids,
     }
     try:
@@ -1631,10 +1573,7 @@ async def _desktop_filesystem_restore(
             {
                 "serverId": target_id,
                 **arguments,
-                "taskId": context.host_task_id,
-                "planId": context.plan_id,
-                "planStepId": context.plan_step_id,
-                "evidenceIds": list(context.evidence_ids),
+                **_host_plan_binding(context),
                 "target": dict(target),
             },
             timeout_seconds=8.0,
@@ -1748,12 +1687,9 @@ async def _desktop_filesystem_restore(
                     "serverId": target_id,
                     **output,
                     "expectedRevision": arguments["expectedRevision"],
-                    "taskId": context.host_task_id,
-                    "planId": context.plan_id,
-                    "planStepId": context.plan_step_id,
+                    **_host_plan_binding(context),
                     "traceId": context.trace_id,
                     "callId": context.call_id,
-                    "evidenceIds": list(context.evidence_ids),
                     "target": dict(target),
                 },
                 timeout_seconds=8.0,
@@ -1807,12 +1743,9 @@ async def _desktop_filesystem_backup_cleanup(
         or not context.run_id
         or not context.trace_id
         or not context.call_id
-        or not context.host_task_id
-        or not context.plan_id
-        or not context.plan_step_id
     ):
         raise ToolCallError(
-            "durable_plan_required", "filesystem.backup.cleanup requires a durable remote action plan"
+            "target_required", "filesystem.backup.cleanup requires a resolved remote server"
         )
 
     batch = "items" in arguments
@@ -1834,32 +1767,6 @@ async def _desktop_filesystem_backup_cleanup(
             raise ToolCallError(
                 "output_too_large", "The cleanup batch paths exceed the durable result size limit"
             )
-    plan_request = {
-        "taskId": context.host_task_id,
-        "toolName": "filesystem.backup.cleanup",
-        "input": arguments,
-        "target": dict(target),
-    }
-    try:
-        plan = await host.request(
-            "host.investigation.plan.check", plan_request, timeout_seconds=8.0
-        )
-    except asyncio.CancelledError:
-        raise
-    except Exception:
-        raise ToolCallError(
-            "host_unavailable", "The desktop host could not validate the cleanup plan"
-        ) from None
-    if (
-        not isinstance(plan, dict)
-        or plan.get("status") != "allowed"
-        or plan.get("planId") != context.plan_id
-        or plan.get("stepId") != context.plan_step_id
-        or plan.get("stepKind") != "action"
-        or plan.get("evidenceIds") != list(context.evidence_ids)
-    ):
-        raise ToolCallError("plan_deviation", "The current durable plan does not authorize this cleanup")
-
     ledger = FilesystemActionLedger.from_environment()
     if ledger is None:
         return await _execute_on_host(host, "filesystem.backup.cleanup", arguments, context)
@@ -1870,8 +1777,8 @@ async def _desktop_filesystem_backup_cleanup(
         "tool_name": "filesystem.backup.cleanup",
         "target_id": target_id,
         "arguments": arguments,
-        "plan_id": context.plan_id,
-        "plan_step_id": context.plan_step_id,
+        "plan_id": context.plan_id or "",
+        "plan_step_id": context.plan_step_id or "",
         "evidence_ids": context.evidence_ids,
     }
     try:
@@ -1897,13 +1804,10 @@ async def _desktop_filesystem_backup_cleanup(
             {
                 "serverId": target_id,
                 "input": arguments,
-                "taskId": context.host_task_id,
-                "planId": context.plan_id,
-                "planStepId": context.plan_step_id,
+                **_host_plan_binding(context),
                 "runId": context.run_id,
                 "traceId": context.trace_id,
                 "callId": context.call_id,
-                "evidenceIds": list(context.evidence_ids),
                 "target": dict(target),
             },
             timeout_seconds=8.0,
@@ -2091,12 +1995,9 @@ async def _desktop_filesystem_backup_cleanup(
                         "input": arguments,
                         "item": requested,
                         **deleted,
-                        "taskId": context.host_task_id,
-                        "planId": context.plan_id,
-                        "planStepId": context.plan_step_id,
+                        **_host_plan_binding(context),
                         "traceId": context.trace_id,
                         "callId": context.call_id,
-                        "evidenceIds": list(context.evidence_ids),
                         "target": dict(target),
                     },
                     timeout_seconds=8.0,
@@ -2327,6 +2228,118 @@ def _parse_server_logs(raw: str, arguments: dict[str, Any]) -> dict[str, object]
     return result
 
 
+def _parse_process_inventory(raw: str) -> dict[str, object]:
+    """Parse the fixed `ps` probe; malformed rows are skipped, never guessed."""
+    source_marker = "__YUKINAL_SOURCE__="
+    source = next(
+        (line.strip()[len(source_marker):] for line in reversed(raw.splitlines())
+         if line.strip().startswith(source_marker)),
+        None,
+    )
+    if source not in {"ps", "busybox", "unavailable"}:
+        raise ToolCallError("execution_failed", "The C++ SSH service returned an invalid process inventory")
+    if source == "unavailable":
+        return {"source": source, "processes": [], "message": "目标上没有可用的 ps 命令"}
+    inventory_lines, partial = _bounded_inventory_lines(raw, _MAX_PROCESS_LINES * 4)
+    processes: list[dict[str, object]] = []
+    for raw_line in inventory_lines:
+        line = raw_line.strip()
+        if not line or line.startswith(source_marker):
+            continue
+        fields = line.split(None, 7)
+        if len(fields) != 8:
+            continue
+        pid, ppid, user, cpu, memory, state, elapsed, command = fields
+        if not (pid.isascii() and pid.isdigit() and ppid.isascii() and ppid.isdigit()
+                and elapsed.isascii() and elapsed.isdigit()):
+            continue
+        try:
+            cpu_percent, memory_percent = float(cpu), float(memory)
+        except ValueError:
+            continue
+        if not (0 <= cpu_percent <= 100 * 1024 and 0 <= memory_percent <= 100):
+            continue
+        if not command.strip() or len(command) > 256:
+            continue
+        processes.append({
+            "pid": int(pid),
+            "parentPid": int(ppid),
+            "user": user[:64],
+            "cpuPercent": round(cpu_percent, 2),
+            "memoryPercent": round(memory_percent, 2),
+            "state": state[:16],
+            "elapsedSeconds": int(elapsed),
+            "command": command.strip(),
+        })
+        if len(processes) >= _MAX_PROCESS_LINES:
+            partial = True
+            break
+    result: dict[str, object] = {"source": source, "processes": processes}
+    if partial:
+        result["message"] = f"仅显示 CPU 占用最高的 {_MAX_PROCESS_LINES} 个进程；其余已省略。"
+    return result
+
+
+def _parse_port_inventory(raw: str) -> dict[str, object]:
+    """Parse `ss -lntup` or `netstat -lntup`; only listening sockets are reported."""
+    source_marker = "__YUKINAL_SOURCE__="
+    source = next(
+        (line.strip()[len(source_marker):] for line in reversed(raw.splitlines())
+         if line.strip().startswith(source_marker)),
+        None,
+    )
+    if source not in {"ss", "netstat", "unavailable"}:
+        raise ToolCallError("execution_failed", "The C++ SSH service returned an invalid port inventory")
+    if source == "unavailable":
+        return {"source": source, "listeners": [], "processInfoAvailable": False,
+                "message": "目标上没有可用的 ss 或 netstat 命令"}
+    inventory_lines, partial = _bounded_inventory_lines(raw, _MAX_PORT_LINES * 2)
+    listeners: list[dict[str, object]] = []
+    process_names: set[str] = set()
+    for raw_line in inventory_lines:
+        line = raw_line.strip()
+        if not line or line.startswith(source_marker):
+            continue
+        fields = line.split()
+        if not fields or fields[0] not in {"tcp", "tcp6", "udp", "udp6"}:
+            continue
+        protocol = "tcp" if fields[0].startswith("tcp") else "udp"
+        # ss prints: State Recv-Q Send-Q Local:Port Peer:Port [Process]
+        # netstat prints: Proto Recv-Q Send-Q Local Peer [State] [Process]
+        local_index = 4 if source == "ss" else 3
+        if len(fields) <= local_index:
+            continue
+        address, _, port = fields[local_index].rpartition(":")
+        if not port.isascii() or not port.isdigit() or not 0 < int(port) < 65536:
+            continue
+        entry: dict[str, object] = {
+            "protocol": protocol,
+            "address": address.strip("[]")[:128] or "*",
+            "port": int(port),
+        }
+        process = fields[-1] if source == "ss" else " ".join(fields[local_index + 1:])
+        match = re.search(r'users:\(\("([^"]{1,128})"', process)
+        if match is not None:
+            entry["process"] = match.group(1)
+            process_names.add(match.group(1))
+        listeners.append(entry)
+        if len(listeners) >= _MAX_PORT_LINES:
+            partial = True
+            break
+    result: dict[str, object] = {
+        "source": source,
+        "listeners": listeners,
+        # `-p` needs privilege; an empty process column is a permission fact,
+        # not proof that no process owns the socket.
+        "processInfoAvailable": bool(process_names),
+    }
+    if not process_names:
+        result["message"] = "当前 SSH 用户无法读取监听端口的所属进程；端口与地址仍然有效。"
+    if partial:
+        result["message"] = f"仅显示前 {_MAX_PORT_LINES} 个监听端口；其余已省略。"
+    return result
+
+
 def _parse_docker_ps(raw: str) -> list[dict[str, object]]:
     containers: list[dict[str, object]] = []
     for raw_line in raw.splitlines():
@@ -2474,13 +2487,26 @@ def _parse_package_inspect(raw: str, manager: str, package: str) -> dict[str, ob
     lines = [line.strip() for line in raw.splitlines() if line.strip()]
     if not lines:
         raise ToolCallError("execution_failed", "package inspect returned no status")
-    if len(lines) > 1:
-        raise ToolCallError("execution_failed", "package inspect returned unexpected extra fields")
     line = lines[0]
+    detected_manager = manager
+    manager_prefix = "__YUKINAL_MANAGER__="
+    if line.startswith(manager_prefix):
+        detected_manager = line.removeprefix(manager_prefix)
+        if detected_manager not in {"apt", "dnf", "yum", "unsupported"}:
+            raise ToolCallError("execution_failed", "package inspect returned an invalid manager")
+        if detected_manager == "unsupported":
+            # The marker is the whole verdict; the target has no supported manager.
+            raise ToolCallError("unsupported", f"no supported package manager is available on the target (requested {manager})")
+        lines = lines[1:]
+        if not lines:
+            raise ToolCallError("execution_failed", "package inspect returned no status")
+        if len(lines) > 1:
+            raise ToolCallError("execution_failed", "package inspect returned unexpected extra fields")
+        line = lines[0]
     if line == "unsupported":
-        raise ToolCallError("unsupported", f"package manager {manager} is unavailable on the target")
+        raise ToolCallError("unsupported", f"no supported package manager is available on the target (requested {manager}, detected {detected_manager})")
     if line == "absent":
-        return {"manager": manager, "package": package, "installed": False}
+        return {"manager": detected_manager, "package": package, "installed": False}
     version = line.removeprefix("installed\t") if line.startswith("installed\t") else (
         line.removeprefix("install ok installed\t")
         if line.startswith("install ok installed\t")
@@ -2491,7 +2517,7 @@ def _parse_package_inspect(raw: str, manager: str, package: str) -> dict[str, ob
     version = version.strip()
     if len(version) > 128 or any(unicodedata.category(character) == "Cc" for character in version):
         raise ToolCallError("execution_failed", "package inspect returned an invalid version")
-    return {"manager": manager, "package": package, "installed": True, "version": version}
+    return {"manager": detected_manager, "package": package, "installed": True, "version": version}
 
 
 def _systemd_service_state(active: str, sub: str) -> str:

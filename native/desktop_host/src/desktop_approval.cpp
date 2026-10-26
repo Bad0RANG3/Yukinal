@@ -161,9 +161,12 @@ struct HostApprovalLedger::Impl {
     std::string server_id;
     std::optional<std::string> workspace_id;
     std::string environment;
-    std::string task_id;
-    std::string plan_id;
-    std::string plan_step_id;
+    // Empty for a conversation ("wish-style") approval; all three are set for a
+    // durable-task approval. Comparison is by optional, so the two shapes can
+    // never authorize each other's calls.
+    std::optional<std::string> task_id;
+    std::optional<std::string> plan_id;
+    std::optional<std::string> plan_step_id;
     std::optional<std::vector<std::string>> evidence_ids;
     std::int64_t expires_at = 0;
 
@@ -274,20 +277,28 @@ bool HostApprovalLedger::record_waiting_event(const nlohmann::json& params,
         "approval event does not describe a supported host action binding");
   }
 
+  // A durable-task approval binds all three identifiers; a conversation approval
+  // ("wish-style" operation) binds none. A partial set is refused: it would blur
+  // which shape the ticket is and let a task call consume a chat ticket.
   std::optional<std::string> task_id;
-  if (!json_optional_string_field(params, "taskId", task_id) || !task_id.has_value() ||
-      task_id->empty()) {
-    throw std::runtime_error("host action approval requires a durable task");
-  }
   std::optional<std::string> plan_id;
   std::optional<std::string> plan_step_id;
-  if (!json_optional_string_field(approval, "planId", plan_id) || !plan_id.has_value() ||
-      plan_id->empty()) {
-    throw std::runtime_error("host action approval requires a current plan");
-  }
-  if (!json_optional_string_field(approval, "planStepId", plan_step_id) ||
-      !plan_step_id.has_value() || plan_step_id->empty()) {
-    throw std::runtime_error("host action approval requires a current plan step");
+  const bool has_task = json_optional_string_field(params, "taskId", task_id) &&
+                        task_id.has_value() && !task_id->empty();
+  const bool has_plan = json_optional_string_field(approval, "planId", plan_id) &&
+                        plan_id.has_value() && !plan_id->empty();
+  const bool has_step = json_optional_string_field(approval, "planStepId", plan_step_id) &&
+                        plan_step_id.has_value() && !plan_step_id->empty();
+  if (has_task || plan_id.has_value() || plan_step_id.has_value()) {
+    if (!(has_task && has_plan && has_step)) {
+      throw std::runtime_error(
+          "host action approval has a partial task binding; task, plan and step must be "
+          "present together or absent together");
+    }
+  } else {
+    task_id.reset();
+    plan_id.reset();
+    plan_step_id.reset();
   }
 
   const auto expires_at_epoch = parse_iso8601_utc_seconds(expires_at);
@@ -325,9 +336,9 @@ bool HostApprovalLedger::record_waiting_event(const nlohmann::json& params,
   binding.server_id = *server_id;
   binding.workspace_id = workspace_id;
   binding.environment = environment;
-  binding.task_id = *task_id;
-  binding.plan_id = *plan_id;
-  binding.plan_step_id = *plan_step_id;
+  binding.task_id = task_id;
+  binding.plan_id = plan_id;
+  binding.plan_step_id = plan_step_id;
   binding.evidence_ids = std::move(evidence_ids);
   binding.expires_at = *expires_at_epoch;
 
@@ -357,6 +368,31 @@ bool HostApprovalLedger::record_waiting_event(const nlohmann::json& params,
   }
   const std::string key = binding.approval_id;
   impl_->entries.emplace(key, Impl::Entry{std::move(binding)});
+  return true;
+}
+
+bool HostApprovalLedger::record_auto_approved_event(const nlohmann::json& params,
+                                                    std::int64_t now) {
+  // Same well-formedness checks as a pending host action, plus the explicit
+  // auto-approval marker from the sidecar. Anything else keeps the normal path.
+  if (!params.is_object() || !params.contains("approval") ||
+      !params.at("approval").is_object() ||
+      params.at("approval").value("autoApproved", false) != true) {
+    return false;
+  }
+  if (!record_waiting_event(params, now)) return false;
+  const auto approval_id = params.at("approval").value("approvalId", std::string());
+  std::lock_guard lock(impl_->mutex);
+  const auto found = impl_->entries.find(approval_id);
+  if (found == impl_->entries.end()) return false;
+  // Idempotent: the same event can arrive over both the notification stream and
+  // the explicit request, in either order.
+  if (found->second.phase == Impl::Phase::Approved) return true;
+  if (found->second.phase != Impl::Phase::Pending) {
+    throw std::runtime_error("auto-approved action is already being answered");
+  }
+  found->second.phase = Impl::Phase::Approved;
+  impl_->changed.notify_all();
   return true;
 }
 

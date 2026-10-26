@@ -3,7 +3,6 @@ import { test } from "node:test";
 
 import { shortModelLabel } from "../src/features/agent/ModelPicker.js";
 import { resolveAgentModels } from "../src/features/agent/useAgentModels.js";
-import { defaultAgentRoles, roleBinding, roleModelChoices } from "../src/features/agent-nist/agent-nist.js";
 import type { AiProviderConfig } from "@yukinal/shared";
 
 /**
@@ -101,9 +100,13 @@ test("transient overrides bind to the exact enabled provider and retain model ID
   }
 });
 
-test("a foreground current option does not broaden independent capability binding rules", () => {
+test("the live conversation model may sit outside the refreshed catalog without changing the saved provider", () => {
+  // The role catalog's separate binding rules were removed with role routing, but this
+  // property still matters: `resolveAgentModels` must keep naming the model the user
+  // actually selected even when the provider's refreshed list no longer includes it,
+  // and it must not mutate or extend the provider record to do so.
+  const before = structuredClone(deepseek);
   const current = resolveAgentModels([deepseek], "deepseek", "deepseek-chat");
   assert.ok(current.modelChoices.some((choice) => choice.model === "deepseek-chat"));
-  assert.equal(roleModelChoices(deepseek).some((choice) => choice.model === "deepseek-chat"), false);
-  assert.ok(roleBinding({ ...defaultAgentRoles()[0]!, providerId: "deepseek", model: "deepseek-chat" }, [deepseek]).reason);
+  assert.deepEqual(deepseek, before, "reading a selection must not rewrite the saved catalog");
 });

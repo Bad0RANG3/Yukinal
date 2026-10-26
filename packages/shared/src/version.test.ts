@@ -12,7 +12,7 @@ import { readFileSync } from "node:fs";
 import { test } from "node:test";
 import { fileURLToPath } from "node:url";
 
-import { APP_VERSION } from "./version.js";
+import { AGENT_VERSION, APP_VERSION } from "./version.js";
 
 /** This file lives in `packages/shared/src/`, so the repository root is three levels up. */
 const rootFile = (relativePath: string): string =>
@@ -39,8 +39,15 @@ test("every JavaScript manifest reports APP_VERSION", () => {
   }
 });
 
-/** The Agent has its own release cadence: read its version from the Python package metadata. */
-const AGENT_VERSION = (() => {
+/**
+ * The Agent has its own release cadence: `agent/pyproject.toml` is the source of truth.
+ *
+ * `AGENT_VERSION` (exported from `version.ts`) is what the UI shows when no sidecar is
+ * running. Reading the file here and comparing it with the constant is what keeps the
+ * two honest: before this, the constant did not exist and the preview fixture carried a
+ * hard-coded `1.0.0-preview` for a `0.1.0` package.
+ */
+const PYPROJECT_AGENT_VERSION = (() => {
   const pyproject = readRoot("agent/pyproject.toml");
   // Only the [project] table is relevant; a nested `version =` elsewhere must not win.
   const project = pyproject.match(/^\[project\]\s*$([\s\S]*?)(?=^\[|$(?![\s\S]))/mu)?.[1] ?? "";
@@ -48,6 +55,14 @@ const AGENT_VERSION = (() => {
   assert.ok(version, "agent/pyproject.toml must declare a [project] version");
   return version;
 })();
+
+test("the exported AGENT_VERSION matches agent/pyproject.toml", () => {
+  assert.equal(
+    AGENT_VERSION,
+    PYPROJECT_AGENT_VERSION,
+    "packages/shared/src/version.ts must carry the version agent/pyproject.toml declares",
+  );
+});
 
 test("the version-carrying IPC fixtures advertise the version their producer emits", () => {
   // The shared fixtures are the serialised contract the desktop host round-trips in
@@ -69,7 +84,7 @@ test("the version-carrying IPC fixtures advertise the version their producer emi
   ];
   const agentVersions = agentFixturePaths.map((path) => {
     const actual = payloadOf(path).agentVersion;
-    assert.equal(actual, AGENT_VERSION, path + " must carry the Python Agent version from agent/pyproject.toml");
+    assert.equal(actual, PYPROJECT_AGENT_VERSION, path + " must carry the Python Agent version from agent/pyproject.toml");
     return actual;
   });
   assert.equal(new Set(agentVersions).size, 1, "the Agent IPC fixtures must agree on one agentVersion");

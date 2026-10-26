@@ -626,6 +626,9 @@ async function main() {
     { name: "gate runner guardrail tests", command: process.execPath, args: ["--test", "scripts/lib/gate.test.mjs"], required: true },
     // Documentation links are load-bearing now that the rules live in a tree: a
     // section that moves takes its anchors with it, and only the renderer notices.
+    // The anchor helper is tested separately because the gate's own bug — CRLF
+    // documents anchoring as the empty string — was invisible from its output.
+    { name: "docs anchor helper tests", command: process.execPath, args: ["--test", "scripts/lib/doc-anchors.test.mjs"], required: true },
     { name: "docs links", command: process.execPath, args: ["scripts/check-docs-links.mjs"], required: true },
     // CTest runs whatever binaries are on disk; without this step a stale `.exe`
     // built before the current source change can keep the native suite green. The

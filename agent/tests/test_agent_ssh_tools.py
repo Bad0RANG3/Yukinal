@@ -15,6 +15,8 @@ from yukinal_agent.ssh_tools import (
     _parse_docker_logs,
     _parse_docker_ps,
     _parse_package_inspect,
+    _parse_port_inventory,
+    _parse_process_inventory,
     _parse_server_logs,
     _parse_service_inventory,
     _parse_systemd_inspect,
@@ -90,6 +92,8 @@ class FakeDesktopHost:
                 "path": params["path"],
                 "maxBytes": params.get("maxBytes") or 131072,
             }
+        if method == "host.ssh.filesystem_list_target":
+            payload["filesystemList"] = {"path": params["path"]}
         if method == "host.ssh.filesystem_write_target":
             payload["filesystemWrite"] = {
                 "path": params["path"],
@@ -248,6 +252,46 @@ class FakeDesktopSshClient:
             output_truncated=False,
         )
 
+    def process_inventory(self, *arguments: Any) -> Any:
+        self.calls.append(("process_inventory", arguments))
+        return SimpleNamespace(
+            target_id=arguments[0],
+            operation="process_inventory",
+            exit_code=0,
+            stdout=(
+                "  912     1 www-data  38.5  2.1 Ssl  1200 nginx\n"
+                "  980   912 root       1.5  0.4 S      900 php-fpm\n"
+                "__YUKINAL_SOURCE__=ps\n"
+            ),
+            stderr="",
+            duration_ms=3,
+            output_truncated=False,
+        )
+
+    def port_inventory(self, *arguments: Any) -> Any:
+        self.calls.append(("port_inventory", arguments))
+        return SimpleNamespace(
+            target_id=arguments[0],
+            operation="port_inventory",
+            exit_code=0,
+            stdout=(
+                "tcp   LISTEN 0  511  0.0.0.0:80  0.0.0.0:* users:((\"nginx\",pid=912,fd=6))\n"
+                "tcp   LISTEN 0  128  127.0.0.1:5432  0.0.0.0:* users:((\"postgres\",pid=1200,fd=7))\n"
+                "__YUKINAL_SOURCE__=ss\n"
+            ),
+            stderr="",
+            duration_ms=3,
+            output_truncated=False,
+        )
+
+    def sftp_list(self, *arguments: Any) -> Any:
+        self.calls.append(("sftp_list", arguments))
+        return [
+            {"name": "nginx.conf", "type": "file", "size": 1024},
+            {"name": "conf.d", "type": "directory", "size": 4096},
+            {"name": "access.log", "type": "symlink", "size": 12},
+        ]
+
     def docker_ps(self, *arguments: Any) -> Any:
         self.calls.append(("docker_ps", arguments))
         return SimpleNamespace(
@@ -318,7 +362,7 @@ class FakeDesktopSshClient:
         self.calls.append(("package_inspect", arguments))
         return SimpleNamespace(
             target_id=arguments[0], operation="package_inspect", exit_code=0,
-            stdout="installed\t1.27.0-1\n", stderr="", duration_ms=3,
+            stdout="__YUKINAL_MANAGER__=yum\ninstalled\t1.27.0-1\n", stderr="", duration_ms=3,
             output_truncated=False,
         )
 
@@ -460,6 +504,7 @@ class SshToolTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(direct_names, {
             "server.info", "ssh.disk_usage", "server.logs", "server.services", "docker.ps", "docker.logs",
             "docker.inspect", "systemd.inspect", "package.inspect", "filesystem.read",
+            "filesystem.list", "server.processes", "server.ports",
             "filesystem.write", "filesystem.edit", "filesystem.backup", "filesystem.restore",
             "filesystem.backup.cleanup", "systemd.restart", "docker.restart", "package.install",
             "server.exec",
@@ -477,8 +522,11 @@ class SshToolTests(unittest.IsolatedAsyncioTestCase):
             ("docker.logs", {"container": "api", "tail": 50}, "docker_logs", ("srv_stage1", "api", 50)),
             ("docker.inspect", {"container": "api"}, "docker_inspect", ("srv_stage1", "api")),
             ("systemd.inspect", {"service": "nginx.service"}, "systemd_inspect", ("srv_stage1", "nginx.service")),
-            ("package.inspect", {"manager": "apt", "package": "nginx"}, "package_inspect", ("srv_stage1", "apt", "nginx")),
+            ("package.inspect", {"manager": "auto", "package": "nginx"}, "package_inspect", ("srv_stage1", "auto", "nginx")),
             ("filesystem.read", {"path": "/srv/app/data.bin", "maxBytes": 5}, "filesystem_read", ("srv_stage1", "/srv/app/data.bin", 5)),
+            ("filesystem.list", {"path": "/etc/nginx"}, "sftp_list", ("srv_stage1", "/etc/nginx")),
+            ("server.processes", {}, "process_inventory", ("srv_stage1",)),
+            ("server.ports", {}, "port_inventory", ("srv_stage1",)),
         ]
         context = ExecutionContext(
             task_id="task-ssh-1",
@@ -521,6 +569,22 @@ class SshToolTests(unittest.IsolatedAsyncioTestCase):
                         "truncated": True,
                         "revision": hashlib.sha256(b"hello").hexdigest(),
                     })
+                elif tool_name == "filesystem.list":
+                    self.assertEqual(result.value, {
+                        "path": "/etc/nginx",
+                        "entries": [
+                            {"name": "nginx.conf", "type": "file", "size": 1024},
+                            {"name": "conf.d", "type": "directory", "size": 4096},
+                            {"name": "access.log", "type": "symlink", "size": 12},
+                        ],
+                        "truncated": False,
+                    })
+                elif tool_name == "server.processes":
+                    self.assertEqual(result.value["source"], "ps")
+                    self.assertEqual([item["pid"] for item in result.value["processes"]], [912, 980])
+                elif tool_name == "server.ports":
+                    self.assertTrue(result.value["processInfoAvailable"])
+                    self.assertEqual([item["port"] for item in result.value["listeners"]], [80, 5432])
                 elif tool_name == "server.logs":
                     self.assertEqual(result.value, {
                         "source": "journalctl",
@@ -567,7 +631,7 @@ class SshToolTests(unittest.IsolatedAsyncioTestCase):
                     })
                 elif tool_name == "package.inspect":
                     self.assertEqual(result.value, {
-                        "manager": "apt",
+                        "manager": "yum",
                         "package": "nginx",
                         "installed": True,
                         "version": "1.27.0-1",
@@ -600,6 +664,11 @@ class SshToolTests(unittest.IsolatedAsyncioTestCase):
                 expected_host_calls.append((
                     "host.ssh.filesystem_read_target",
                     {"serverId": "srv_stage1", "path": "/srv/app/data.bin", "maxBytes": 5},
+                ))
+            elif operation == "sftp_list":
+                expected_host_calls.append((
+                    "host.ssh.filesystem_list_target",
+                    {"serverId": "srv_stage1", "path": "/etc/nginx"},
                 ))
             else:
                 expected_host_calls.append((
@@ -744,7 +813,7 @@ class SshToolTests(unittest.IsolatedAsyncioTestCase):
         registry = ToolRegistry(MemoryAuditSink())
         register_desktop_ssh_tools(registry, host, Path("ssh-service.exe"))  # type: ignore[arg-type]
         arguments = {
-            "manager": "apt",
+            "manager": "auto",
             "package": "nginx",
             "version": "1.27.0-1",
             "timeoutSeconds": 10,
@@ -787,11 +856,11 @@ class SshToolTests(unittest.IsolatedAsyncioTestCase):
 
         self.assertEqual(
             result.value,
-            {"manager": "apt", "package": "nginx", "version": "1.27.0-1", "installed": True},
+            {"manager": "auto", "package": "nginx", "version": "1.27.0-1", "installed": True},
         )
         self.assertEqual(
             FakeDesktopSshClient.calls,
-            [("package_install", ("srv_stage1", "apt", "nginx", "1.27.0-1", 10))],
+            [("package_install", ("srv_stage1", "auto", "nginx", "1.27.0-1", 10))],
         )
         self.assertEqual(
             [method for method, _params in host.calls],
@@ -1094,12 +1163,10 @@ class SshToolTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(
             [method for method, _params in host.calls],
             [
-                "host.investigation.plan.check",
                 "host.ssh.filesystem_write_target",
-                "host.investigation.plan.check",
             ],
         )
-        self.assertEqual(host.calls[1][1], {
+        self.assertEqual(host.calls[0][1], {
             "serverId": "srv_stage1",
             "path": "/etc/app.conf",
             "content": "hello=world\n",
@@ -1181,14 +1248,12 @@ class SshToolTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(
             [method for method, _params in host.calls],
             [
-                "host.investigation.plan.check",
                 "host.ssh.filesystem_backup_target",
                 "host.investigation.filesystem_backup.register",
-                "host.investigation.plan.check",
             ],
         )
-        self.assertEqual(host.calls[2][1]["revision"], expected["revision"])
-        self.assertEqual(host.calls[2][1]["bytesBackedUp"], 7)
+        self.assertEqual(host.calls[1][1]["revision"], expected["revision"])
+        self.assertEqual(host.calls[1][1]["bytesBackedUp"], 7)
         self.assertTrue(FakeDesktopSshProcess.instances[0].started)
         self.assertTrue(FakeDesktopSshProcess.instances[0].stopped)
 
@@ -1282,13 +1347,11 @@ class SshToolTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(
             [method for method, _params in host.calls],
             [
-                "host.investigation.plan.check",
                 "host.ssh.filesystem_restore_target",
                 "host.investigation.filesystem_backup.restored",
-                "host.investigation.plan.check",
             ],
         )
-        self.assertEqual(host.calls[2][1]["revision"], restored_revision)
+        self.assertEqual(host.calls[1][1]["revision"], restored_revision)
         self.assertTrue(FakeDesktopSshProcess.instances[0].started)
         self.assertTrue(FakeDesktopSshProcess.instances[0].stopped)
 
@@ -1369,10 +1432,8 @@ class SshToolTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(
             [method for method, _params in host.calls],
             [
-                "host.investigation.plan.check",
                 "host.ssh.filesystem_cleanup_target",
                 "host.investigation.filesystem_backup.deleted",
-                "host.investigation.plan.check",
             ],
         )
         self.assertTrue(FakeDesktopSshProcess.instances[0].started)
@@ -1539,9 +1600,57 @@ class SshToolTests(unittest.IsolatedAsyncioTestCase):
             _parse_package_inspect("absent\n", "apt", "nginx"),
             {"manager": "apt", "package": "nginx", "installed": False},
         )
+        self.assertEqual(
+            _parse_package_inspect("__YUKINAL_MANAGER__=yum\nabsent\n", "auto", "fastfetch"),
+            {"manager": "yum", "package": "fastfetch", "installed": False},
+        )
         with self.assertRaises(ToolCallError) as unsupported:
             _parse_package_inspect("unsupported\n", "dnf", "nginx")
         self.assertEqual(unsupported.exception.code, "unsupported")
+        # The `auto` probe reports a target with no supported manager through the
+        # marker alone. That must read as "unsupported", not as a malformed reply:
+        # the CentOS 7 host that first exposed this returned a second status line.
+        for raw in ("__YUKINAL_MANAGER__=unsupported\n",
+                    "__YUKINAL_MANAGER__=unsupported\nunsupported\n"):
+            with self.subTest(raw=raw.strip()):
+                with self.assertRaises(ToolCallError) as detected:
+                    _parse_package_inspect(raw, "auto", "fastfetch")
+                self.assertEqual(detected.exception.code, "unsupported")
+
+    async def test_process_and_port_parsers_keep_provenance_and_bounded_fields(self) -> None:
+        processes = _parse_process_inventory(
+            "  912     1 www-data  38.5  2.1 Ssl  1200 nginx\n"
+            "not a process row\n"
+            "  980   912 root       1.5  0.4 S      900 php-fpm\n"
+            "__YUKINAL_SOURCE__=ps\n"
+        )
+        self.assertEqual(processes["source"], "ps")
+        self.assertEqual(processes["processes"], [
+            {"pid": 912, "parentPid": 1, "user": "www-data", "cpuPercent": 38.5,
+             "memoryPercent": 2.1, "state": "Ssl", "elapsedSeconds": 1200, "command": "nginx"},
+            {"pid": 980, "parentPid": 912, "user": "root", "cpuPercent": 1.5,
+             "memoryPercent": 0.4, "state": "S", "elapsedSeconds": 900, "command": "php-fpm"},
+        ])
+        self.assertEqual(_parse_process_inventory("__YUKINAL_SOURCE__=unavailable\n")["processes"], [])
+        with self.assertRaises(ToolCallError):
+            _parse_process_inventory("912 1 root 1 1 S 1 nginx\n")
+
+        listeners = _parse_port_inventory(
+            'tcp   LISTEN 0  511  0.0.0.0:80  0.0.0.0:* users:(("nginx",pid=912,fd=6))\n'
+            'tcp   LISTEN 0  128  127.0.0.1:5432  0.0.0.0:* users:(("postgres",pid=1200,fd=7))\n'
+            "__YUKINAL_SOURCE__=ss\n"
+        )
+        self.assertTrue(listeners["processInfoAvailable"])
+        self.assertEqual(listeners["listeners"], [
+            {"protocol": "tcp", "address": "0.0.0.0", "port": 80, "process": "nginx"},
+            {"protocol": "tcp", "address": "127.0.0.1", "port": 5432, "process": "postgres"},
+        ])
+        # Without privilege the socket facts remain; the missing owner is stated.
+        hidden = _parse_port_inventory("tcp   LISTEN 0  511  0.0.0.0:80  0.0.0.0:*\n__YUKINAL_SOURCE__=ss\n")
+        self.assertFalse(hidden["processInfoAvailable"])
+        self.assertIn("message", hidden)
+        with self.assertRaises(ToolCallError):
+            _parse_port_inventory("tcp LISTEN 0 1 0.0.0.0:80 0.0.0.0:*\n")
 
     async def test_selected_server_is_bound_by_host_context(self) -> None:
         client = FakeSshServiceClient()

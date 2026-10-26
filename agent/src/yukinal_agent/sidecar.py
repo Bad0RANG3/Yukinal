@@ -13,6 +13,7 @@ from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any, BinaryIO, Callable
 from urllib.error import HTTPError, URLError
+from urllib.parse import urlencode
 from urllib.request import HTTPRedirectHandler, ProxyHandler, Request, build_opener
 
 from langchain_core.messages import HumanMessage
@@ -21,13 +22,12 @@ from yukinal_ssh import SshServiceClient
 
 from .audit import JsonlAuditSink
 from .conversation_store import ConversationStore, message_bytes
-from .coordination import CoordinationRuntime, COORDINATOR_TOOLS, parse_coordination
+from .subagents import SubagentRuntime, SUBAGENT_TOOLS, parse_subagents
 from .work_routing import delegation_allowed, tools_prohibited, user_request_text
 from .goal_loop import long_goal_requested
 from .host_rpc import HostRpcClient
 from .host_tools import (
     HOST_APPROVAL_TOOLS,
-    PLAN_BOUND_HOST_ACTION_TOOLS,
     register_desktop_backup_metadata_tools,
     register_host_tools,
     register_mcp_catalog,
@@ -41,6 +41,8 @@ from .ssh_tools import (
     _parse_docker_inspect,
     _parse_docker_ps,
     _parse_package_inspect,
+    _parse_port_inventory,
+    _parse_process_inventory,
     _parse_server_logs,
     _parse_service_inventory,
     _parse_systemd_inspect,
@@ -67,6 +69,8 @@ METHODS = {
     "server.snapshot.normalize": True,
     "server.logs.normalize": True,
     "server.services.normalize": True,
+    "server.processes.normalize": True,
+    "server.ports.normalize": True,
     "docker.ps.normalize": True,
     "docker.logs.normalize": True,
     "docker.inspect.normalize": True,
@@ -76,7 +80,7 @@ METHODS = {
     "system.describe": True,
     "agent.run.start": True,
     "agent.run.stop": True,
-    "agent.teams.list": True,
+    "agent.subagents.list": True,
     "agent.approval.respond": True,
     "agent.context.reset": True,
     "agent.context.resetAll": True,
@@ -153,7 +157,7 @@ class PythonSidecar:
         self._undelivered_terminals: OrderedDict[str, dict[str, Any]] = OrderedDict()
         self._resetting_sessions: set[str] = set()
         self._resetting_all = False
-        self._coordination = CoordinationRuntime(self._registry, self._conversations, self._emit, self._launch_team)
+        self._subagents = SubagentRuntime(self._registry, self._conversations, self._emit, self._launch_subagent)
 
     def set_notification_sink(self, sink: Callable[[str, dict[str, Any]], None] | None) -> None:
         self._notification_sink = sink
@@ -207,6 +211,10 @@ class PythonSidecar:
                 result = self._normalize_server_logs(params)
             elif method == "server.services.normalize":
                 result = self._normalize_server_services(params)
+            elif method == "server.processes.normalize":
+                result = self._normalize_server_processes(params)
+            elif method == "server.ports.normalize":
+                result = self._normalize_server_ports(params)
             elif method == "docker.ps.normalize":
                 result = self._normalize_docker_ps(params)
             elif method == "docker.logs.normalize":
@@ -229,7 +237,7 @@ class PythonSidecar:
                     "toolNameCollisions": [],
                     "implemented": dict(METHODS),
                 }
-            elif method == "agent.teams.list":
+            elif method == "agent.subagents.list":
                 parsed = _strict_object(params, {"sessionId", "focusServerId"})
                 session_id = parsed.get("sessionId")
                 if session_id is not None and (not isinstance(session_id, str) or not session_id.strip() or len(session_id) > 256):
@@ -241,7 +249,7 @@ class PythonSidecar:
                         self._conversations.bind_session(session_id, parsed.get("focusServerId"))
                 except ValueError as error:
                     raise _RpcFault(RPC_INVALID_PARAMS, str(error)) from None
-                result = {"tasks": [self._coordination.public(job) for job in self._coordination.list(session_id)]}
+                result = {"tasks": self._subagents.list(session_id)}
             elif method == "agent.approval.respond":
                 result = self._approval_respond(params)
             elif method == "agent.memory.list":
@@ -363,8 +371,12 @@ class PythonSidecar:
             raise _RpcFault(RPC_INTERNAL_ERROR, "Model returned no text; check the model and endpoint settings")
         return {"ok": True}
 
-    async def _list_provider_models(self, params: object) -> dict[str, Any]:
-        config, api_key, timeout_ms = _parse_runtime_model_config(params)
+    async def _list_provider_models(
+        self, params: object, *, allow_missing_model: bool = False
+    ) -> dict[str, Any]:
+        config, api_key, timeout_ms = _parse_runtime_model_config(
+            params, allow_missing_model=allow_missing_model
+        )
         try:
             models = await asyncio.to_thread(_fetch_model_catalog, config, api_key, timeout_ms)
         except _RpcFault:
@@ -516,7 +528,32 @@ class PythonSidecar:
         return {"provider": provider}
 
     async def _provider_models(self, params: object) -> dict[str, Any]:
-        parsed = _strict_object(params, {"providerId"})
+        parsed = _strict_object(params, {"providerId", "input"})
+        if "input" in parsed:
+            if "providerId" in parsed:
+                raise _RpcFault(RPC_INVALID_PARAMS, "invalid params")
+            discovery = parsed["input"]
+            if not isinstance(discovery, dict):
+                raise _RpcFault(RPC_INVALID_PARAMS, "invalid params")
+            provider_id = discovery.get("providerId")
+            if provider_id is not None:
+                if not isinstance(provider_id, str) or not provider_id.strip() or len(provider_id) > 256:
+                    raise _RpcFault(RPC_INVALID_PARAMS, "invalid params")
+                discovery = dict(discovery)
+                discovery.pop("providerId", None)
+                if not discovery.get("apiKey"):
+                    try:
+                        provider = self._require_provider_store().get_ai(provider_id.strip())
+                    except ProviderStoreError as error:
+                        raise _provider_store_fault(error) from None
+                    if provider is None:
+                        raise _RpcFault(RPC_INTERNAL_ERROR, f"Provider `{provider_id}` was not found")
+                    api_key = await self._provider_key(provider)
+                    if api_key is not None:
+                        discovery["apiKey"] = api_key
+            return await self._list_provider_models(discovery, allow_missing_model=True)
+        if "providerId" not in parsed:
+            raise _RpcFault(RPC_INVALID_PARAMS, "invalid params")
         provider_id = parsed.get("providerId")
         if not isinstance(provider_id, str) or not provider_id.strip():
             raise _RpcFault(RPC_INVALID_PARAMS, "invalid params")
@@ -668,7 +705,7 @@ class PythonSidecar:
             return await self._admit_run(request, run_id, admission, resumed)
         finally:
             if run_id not in self._active_runs:
-                self._coordination.parents.pop(run_id, None)
+                self._subagents.parents.pop(run_id, None)
                 self._run_sessions.pop(run_id, None)
                 if request["sessionId"] not in self._run_sessions.values():
                     self._session_locks.pop(request["sessionId"], None)
@@ -696,8 +733,8 @@ class PythonSidecar:
                 request["agentBudget"] = replace(request["agentBudget"], max_parallel_tools=1)
         except ModelFactoryError as error:
             raise _RpcFault(RPC_INVALID_PARAMS, str(error)) from None
-        if request.get("coordination"):
-            self._coordination.activate(request)
+        if request.get("subagents"):
+            self._subagents.activate(request)
         try:
             agent = ModelDrivenAgent(
                 self._registry,
@@ -772,49 +809,45 @@ class PythonSidecar:
             print(f"Stopped run {run_id} still answered its synchronous caller", file=sys.stderr, flush=True)
             return {"runId": run_id, "state": "cancelled", "text": "", "steps": 0, "toolCalls": 0}
 
-    async def _launch_team(self, job: dict[str, Any], parent: dict[str, Any], role: dict[str, Any]) -> dict[str, Any]:
-        # Child sessions contain only the bounded task brief. They never hydrate
-        # the native user conversation or wait for its foreground session lock.
+    async def _launch_subagent(self, job: dict[str, Any], parent: dict[str, Any]) -> dict[str, Any]:
+        # A subagent receives only its task brief and the parent run's frozen
+        # model, target, permission mode and policy. It cannot recursively spawn.
+        parent_persona = parent.get("persona") or {"id": "operations-agent", "label": "运维 Agent"}
+        parent_participant = parent.get("participant") or {
+            "id": parent_persona.get("id", "operations-agent"),
+            "label": parent_persona.get("label", "运维 Agent"),
+            "kind": "agent",
+        }
+        # A subagent participant must name a parent that actually participates in
+        # its own session. The worker session is fresh, so register the lead there
+        # first; the store rejects a dangling parent rather than inventing one.
+        self._conversations.validate_participant(
+            job["workerSessionId"], job.get("serverId"),
+            {"id": parent_participant["id"], "label": parent_participant["label"], "kind": "agent"},
+            register=True,
+        )
         payload: dict[str, Any] = {
             "runId": job["runId"], "sessionId": job["workerSessionId"], "prompt": job["goal"],
             "delivery": "sync", "mode": parent.get("mode", "goal") if job["access"] == "write" else "readonly",
             "permissionMode": parent.get("permissionMode", "ask"),
-            "persona": {"id": role["id"], "label": role["label"], "systemPrompt": role["systemPrompt"] +
-                "\n你是后台团队成员。只完成当前任务，不能再分派团队。给协调助手返回简短结果、证据、失败和待确认事项。没有执行证据不能声称完成。"},
-            "participant": {"id": role["id"], "label": role["label"], "kind": "agent"},
+            "persona": {"id": parent_persona.get("id", "operations-agent"),
+                "label": "运维 Agent · 子任务", "systemPrompt": parent_persona.get("systemPrompt", "")[:12000] +
+                "\n\n你正在作为主运维 Agent 的 subagent 执行一项独立任务。只完成这项任务，返回结果、证据、失败和待确认事项；不要尝试启动其他 subagent。没有执行证据不能声称完成。"},
+            "participant": {"id": "subagent-" + job["id"][-24:], "label": "运维 Agent · 子任务",
+                            "kind": "subagent", "parentId": parent_participant["id"]},
         }
-        role_provider = role.get("providerId")
-        provider_id = role_provider or parent.get("providerId")
-        if provider_id:
-            payload["providerId"] = provider_id
-        # A separately selected provider owns its default model. Never carry a
-        # model name from the parent's provider into a provider-only binding.
-        model = role.get("model")
-        if not role_provider:
-            model = model or parent.get("model")
-        if model:
-            payload["model"] = model
-        # Reasoning settings belong to the inherited model. A model-only
-        # override can be incompatible with the parent's reasoning settings.
-        inherits_model = not role_provider and (
-            not role.get("model") or role["model"] == parent.get("model")
-        )
-        if inherits_model and parent.get("reasoningEffort"):
-            payload["reasoningEffort"] = parent["reasoningEffort"]
-        for field in ("taskBudget", "toolAccess", "policyId"):
+        for field in ("providerId", "model", "reasoningEffort", "taskBudget", "toolAccess", "policyId"):
             if field in parent:
                 payload[field] = parent[field]
         if job.get("serverId"):
             payload["focusServerId"] = job["serverId"]
-            server = next(item for item in parent["coordination"]["servers"] if item["id"] == job["serverId"])
+            server = next(item for item in parent["subagents"]["servers"] if item["id"] == job["serverId"])
             payload["target"] = {"host": "remote", "serverId": job["serverId"], "environment": server["environment"]}
-        # An existing durable task binding can be inherited only on its exact
-        # original server. Other jobs do not acquire a host action plan by role.
         if parent.get("taskId") and parent.get("targetId") == job.get("serverId"):
             payload["taskId"] = parent["taskId"]
         self._conversations.import_legacy(payload["sessionId"], job.get("serverId"), [])
         response = await self._run_start(payload)
-        return response.get("result", {"state": "failed", "error": "team_run_not_started"})
+        return response.get("result", {"state": "failed", "error": "subagent_run_not_started"})
 
     async def _hydrate_conversation(self, request: dict[str, Any]) -> None:
         # Concurrent first turns must share one native snapshot, even while its
@@ -876,7 +909,7 @@ class PythonSidecar:
         run_id = parsed.get("runId")
         if not isinstance(run_id, str) or not run_id.strip() or len(run_id) > 256:
             raise _RpcFault(RPC_INVALID_PARAMS, "invalid params")
-        if self._coordination.stop(run_id):
+        if self._subagents.stop(run_id):
             return {"stopped": True}
         task = self._active_runs.get(run_id)
         if task is None or task.done():
@@ -925,7 +958,7 @@ class PythonSidecar:
         server_id = parsed.get("focusServerId")
         if not isinstance(session_id, str) or not session_id.strip() or len(session_id) > 256 or server_id is not None and not _valid_server_id(server_id):
             raise _RpcFault(RPC_INVALID_PARAMS, "invalid context reset scope")
-        if session_id in self._run_sessions.values() or self._coordination.session_active(session_id):
+        if session_id in self._run_sessions.values() or self._subagents.session_active(session_id):
             raise _RpcFault(RPC_INVALID_PARAMS, "Stop the active session run before resetting its context")
         try:
             self._conversations.bind_session(session_id, server_id)
@@ -951,7 +984,7 @@ class PythonSidecar:
 
     async def _context_reset_all(self, params: object) -> dict[str, Any]:
         _strict_object(params, set())
-        if self._run_sessions or self._coordination.active:
+        if self._run_sessions or self._subagents.active:
             raise _RpcFault(RPC_INVALID_PARAMS, "Stop all active runs before resetting model context")
         if self._resetting_all or self._resetting_sessions:
             raise _RpcFault(RPC_INVALID_PARAMS, "A context reset is already in progress")
@@ -1089,10 +1122,18 @@ class PythonSidecar:
             # visible without adding worker transcripts to the foreground session.
             persona = request.get("persona")
             task_snapshot = []
-            if request.get("coordination"):
-                persona = {"id": "coordinator", "label": "协调助手", "systemPrompt": self._coordination.context(request, include_tasks=False) +
-                           "\n当前界面参考：\n" + (request.get("persona") or {}).get("systemPrompt", "")[:4000]}
-                task_snapshot = [HumanMessage(content="本轮状态快照，仅供参考；用户请求以最后一条消息为准。\n" + self._coordination.turn_context(request))]
+            if request.get("subagents"):
+                # The agent context is appended to whatever persona this run has. A
+                # caller that sent no persona still gets a complete, non-empty one:
+                # `run` and `conversation_budget_bytes` both require id, label and
+                # systemPrompt, and the caller's configured persona must not be
+                # replaced by an incomplete object.
+                agent_context = self._subagents.context(request, include_tasks=False)
+                if persona is None:
+                    persona = {"id": "operations-agent", "label": "运维 Agent", "systemPrompt": agent_context}
+                else:
+                    persona = {**persona, "systemPrompt": persona.get("systemPrompt", "")[:12000] + "\n\n" + agent_context}
+                task_snapshot = [HumanMessage(content="当前后台 subagent 状态快照，仅供参考；用户请求以最后一条消息为准。\n" + self._subagents.turn_context(request))]
             available_bytes = max(0, agent.conversation_budget_bytes(request["promptText"], persona) - message_bytes(task_snapshot))
             memory_budget = min(16 * 1024, available_bytes // 8)
             context = self._conversations.context(request["sessionId"], request.get("targetId"), exclude_run=run_id,
@@ -1192,7 +1233,7 @@ class PythonSidecar:
             self._finish_run(request, run_id, final_status)
 
     def _finish_run(self, request: dict[str, Any], run_id: str, status: str) -> None:
-        self._coordination.parents.pop(run_id, None)
+        self._subagents.parents.pop(run_id, None)
         self._terminal_accounting(request, run_id, status)
 
     def _emit_terminal(self, event: dict[str, Any]) -> None:
@@ -1200,9 +1241,9 @@ class PythonSidecar:
         if isinstance(run_id, str) and run_id in self._terminal_emitted:
             return
         try:
-            self._coordination.observe(event)
+            self._subagents.observe(event)
         except Exception:
-            print("Agent terminal coordinator status could not be saved", file=sys.stderr, flush=True)
+            print("Agent terminal task status could not be saved", file=sys.stderr, flush=True)
         if isinstance(run_id, str):
             try:
                 self._record_run_event(run_id, event)
@@ -1259,8 +1300,9 @@ class PythonSidecar:
             return False
 
     def _emit(self, event: dict[str, Any]) -> None:
-        if event.get("type") != "agent.team_task" and hasattr(self, "_coordination"):
-            self._coordination.observe(event)
+        if event.get("type") != "agent.subagent_task":
+            if hasattr(self, "_subagents"):
+                self._subagents.observe(event)
         if isinstance(event.get("runId"), str):
             # The audit row is the durable trace, not the delivery. The UI only leaves
             # `running` on `agent.completed` / `agent.failed`, so a failing conversation
@@ -1296,8 +1338,6 @@ class PythonSidecar:
 
         fingerprint = approval.fingerprint
         plan_binding = request.get("planBinding")
-        if approval.tool_name in PLAN_BOUND_HOST_ACTION_TOOLS and not isinstance(plan_binding, dict):
-            raise _RpcFault(RPC_INTERNAL_ERROR, "host action approval is missing its durable plan binding")
         if approval.tool_name in HOST_APPROVAL_TOOLS and not isinstance(host_input, dict):
             raise _RpcFault(RPC_INTERNAL_ERROR, "host action approval is missing its exact input")
         approval_id = "apr_" + hashlib.sha256(
@@ -1310,6 +1350,10 @@ class PythonSidecar:
         if not isinstance(target, dict):
             target = {"host": "local", "environment": "unknown"}
         expires_at = (datetime.now(UTC) + timedelta(seconds=self._approval_ttl_seconds)).isoformat()
+        # Auto-approval: the user chose "let it run" for this run. The call is still
+        # announced so the host can mint its exact one-shot ticket (and re-check the
+        # target, input, command blacklist and plan step), but nobody waits.
+        auto_approved = request.get("permissionMode", "ask") == "auto"
         self._emit({
             "type": "agent.waiting_approval",
             "runId": run_id,
@@ -1328,14 +1372,23 @@ class PythonSidecar:
                 "target": dict(target),
                 "expiresAt": expires_at,
                 "sessionGrantable": False,
+                **({"autoApproved": True} if auto_approved else {}),
+                # The binding belongs to the run, not the tool: a task-bound
+                # server.exec approval still needs its plan step for the host
+                # ticket, while a conversation approval has no plan at all.
                 **({
                     "planId": plan_binding["planId"],
                     "planStepId": plan_binding["planStepId"],
                     "evidenceIds": list(plan_binding["evidenceIds"]),
-                } if approval.tool_name in PLAN_BOUND_HOST_ACTION_TOOLS and isinstance(plan_binding, dict) else {}),
+                } if isinstance(plan_binding, dict) else {}),
             },
             "at": _timestamp(),
         })
+        if auto_approved:
+            self._pending_approvals.pop(approval_id, None)
+            return await agent.resume_after_approval(
+                result.checkpoint_id, fingerprint, approval_id, approved=True
+            )
         try:
             decision = await asyncio.wait_for(future, timeout=self._approval_ttl_seconds)
         except TimeoutError:
@@ -1360,7 +1413,7 @@ class PythonSidecar:
         )
 
     async def shutdown(self) -> None:
-        await self._coordination.shutdown()
+        await self._subagents.shutdown()
         active = list(self._active_runs.values())
         for task in active:
             task.cancel()
@@ -1442,6 +1495,18 @@ class PythonSidecar:
     @staticmethod
     def _normalize_server_services(params: object) -> dict[str, Any]:
         return _normalize_ssh_inventory(params, _parse_service_inventory, {"name", "state"}, "services")
+
+    @staticmethod
+    def _normalize_server_processes(params: object) -> dict[str, Any]:
+        return _normalize_ssh_parser(
+            params, set(), lambda stdout, _arguments: _parse_process_inventory(stdout)
+        )
+
+    @staticmethod
+    def _normalize_server_ports(params: object) -> dict[str, Any]:
+        return _normalize_ssh_parser(
+            params, set(), lambda stdout, _arguments: _parse_port_inventory(stdout)
+        )
 
     @staticmethod
     def _normalize_docker_ps(params: object) -> dict[str, Any]:
@@ -1579,7 +1644,7 @@ def _normalize_ssh_inventory(
         package = arguments.get("package")
         if (
             not isinstance(manager, str)
-            or manager not in {"apt", "dnf", "yum"}
+            or manager not in {"auto", "apt", "dnf", "yum"}
             or not isinstance(package, str)
             or len(package) > 128
             or re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9+._:-]*", package) is None
@@ -1618,7 +1683,9 @@ def _parser_result(
     return {"ok": True, "output": output}
 
 
-def _parse_runtime_model_config(params: object, *, max_output_tokens: int = 256) -> tuple[ModelConfig, str | None, int]:
+def _parse_runtime_model_config(
+    params: object, *, max_output_tokens: int = 256, allow_missing_model: bool = False
+) -> tuple[ModelConfig, str | None, int]:
     fields = {"kind", "baseUrl", "model", "apiKey", "customHeaders", "apiVersion", "timeoutMs", "wireApi"}
     parsed = _strict_object(params, fields)
     kind = parsed.get("kind")
@@ -1634,8 +1701,8 @@ def _parse_runtime_model_config(params: object, *, max_output_tokens: int = 256)
         kind not in ("openai-compatible", "anthropic", "gemini")
         or not isinstance(base_url, str)
         or len(base_url) > 2048
-        or not isinstance(model_name, str)
-        or len(model_name) > 256
+        or (not isinstance(model_name, str) and not (allow_missing_model and model_name is None))
+        or (isinstance(model_name, str) and (not model_name.strip() or len(model_name) > 256))
         or any(name in parsed and not isinstance(value, str) for name, value in optional_strings.items())
         or "customHeaders" in parsed and not isinstance(custom_headers, dict)
         or isinstance(timeout_ms, bool)
@@ -1644,7 +1711,7 @@ def _parse_runtime_model_config(params: object, *, max_output_tokens: int = 256)
     ):
         raise _RpcFault(RPC_INVALID_PARAMS, "invalid params")
     base_url = base_url.strip()
-    model_name = model_name.strip()
+    model_name = "model-catalog" if model_name is None else model_name.strip()
     api_version = api_version.strip() if api_version is not None else None
     wire_api = wire_api.strip() if wire_api is not None else None
     try:
@@ -1720,6 +1787,56 @@ def _fetch_model_catalog(config: ModelConfig, api_key: str | None, timeout_ms: i
     elif api_key:
         headers["x-goog-api-key"] = api_key
 
+    models: list[dict[str, Any]] = []
+    cursor: str | None = None
+    seen_cursors: set[str] = set()
+    for _ in range(32):
+        if config.provider == "anthropic":
+            query = {"limit": "1000"}
+            if cursor:
+                query["after_id"] = cursor
+        elif config.provider == "gemini":
+            query = {"pageSize": "1000"}
+            if cursor:
+                query["pageToken"] = cursor
+        else:
+            query = {}
+        page_url = f"{endpoint}?{urlencode(query)}" if query else endpoint
+        payload = _fetch_model_catalog_page(page_url, headers, timeout_ms)
+        try:
+            page = _map_provider_models(config.provider, payload)
+        except (TypeError, ValueError, KeyError):
+            raise _RpcFault(RPC_INTERNAL_ERROR, "Provider returned an invalid model catalog") from None
+        models.extend(page)
+        if len(models) > 1000:
+            raise _RpcFault(RPC_INTERNAL_ERROR, "Provider model catalog exceeds the entry limit")
+        if config.provider == "anthropic":
+            if not isinstance(payload, dict) or not isinstance(payload.get("has_more"), bool):
+                raise _RpcFault(RPC_INTERNAL_ERROR, "Provider returned an invalid model catalog")
+            if payload["has_more"] is False:
+                return models
+            next_cursor = payload.get("last_id")
+        elif config.provider == "gemini":
+            next_cursor = payload.get("nextPageToken") if isinstance(payload, dict) else None
+            if next_cursor is None:
+                return models
+        else:
+            return models
+        if (
+            not isinstance(next_cursor, str)
+            or not next_cursor
+            or len(next_cursor) > 8_192
+            or next_cursor in seen_cursors
+        ):
+            raise _RpcFault(RPC_INTERNAL_ERROR, "Provider returned an invalid model catalog cursor")
+        seen_cursors.add(next_cursor)
+        cursor = next_cursor
+    raise _RpcFault(RPC_INTERNAL_ERROR, "Provider model catalog exceeds the pagination limit")
+
+
+def _fetch_model_catalog_page(
+    endpoint: str, headers: dict[str, str], timeout_ms: int
+) -> dict[str, Any]:
     request = Request(endpoint, headers=headers, method="GET")
     opener = build_opener(ProxyHandler({}), _NoRedirect())
     try:
@@ -1735,12 +1852,11 @@ def _fetch_model_catalog(config: ModelConfig, api_key: str | None, timeout_ms: i
         raise _RpcFault(RPC_INTERNAL_ERROR, "Provider model catalog response exceeds the size limit")
     try:
         payload = json.loads(body.decode("utf-8"))
-        models = _map_provider_models(config.provider, payload)
-    except (UnicodeDecodeError, json.JSONDecodeError, TypeError, ValueError, KeyError):
+    except (UnicodeDecodeError, json.JSONDecodeError):
         raise _RpcFault(RPC_INTERNAL_ERROR, "Provider returned an invalid model catalog") from None
-    if len(models) > 1000:
-        raise _RpcFault(RPC_INTERNAL_ERROR, "Provider model catalog exceeds the entry limit")
-    return models
+    if not isinstance(payload, dict):
+        raise _RpcFault(RPC_INTERNAL_ERROR, "Provider returned an invalid model catalog")
+    return payload
 
 
 def _map_provider_models(provider: str, payload: object) -> list[dict[str, Any]]:
@@ -1806,12 +1922,12 @@ def _parse_run_request(value: object) -> dict[str, Any]:
         "runId", "sessionId", "taskId", "taskBudget", "prompt", "messageId", "parts", "delivery",
         "resume", "workspaceId", "focusServerId", "target", "policyId", "permissionMode", "mode",
         "providerId", "model", "reasoningEffort", "toolAccess", "requireCheckpoint", "planBinding",
-        "persona", "participant", "coordination",
+        "persona", "participant", "subagents",
     }
     parsed = _strict_object(value, fields)
-    if "coordination" in parsed:
+    if "subagents" in parsed:
         try:
-            parsed["coordination"] = parse_coordination(parsed["coordination"])
+            parsed["subagents"] = parse_subagents(parsed["subagents"])
         except ValueError as error:
             raise _RpcFault(RPC_INVALID_PARAMS, str(error)) from None
     if "persona" in parsed:
@@ -1985,17 +2101,25 @@ def _allowed_tools_for_run(
     mode: str,
     request: dict[str, Any],
 ) -> frozenset[str]:
+    """Every registered tool the chosen run mode permits.
+
+    There is one permission model: the host resolves the target, the tool checks
+    its own input, and a state-changing call asks the user once. There is no
+    task/plan/environment tier that decides *which* tools exist — that layering
+    meant a chat on a production host silently lost `server.exec`, and the agent
+    reported "no tool" instead of doing the work. The user owns the outcome.
+
+    Two explicit choices remain, because the user makes them for this run:
+    `readonly`/`plan` expose read-only tools, and `toolAccess: none` (or "no tools
+    this turn") exposes none.
+    """
     if request.get("toolAccess") == "none" or tools_prohibited(request):
         return frozenset()
-    # A saved role roster does not replace the normal execution tools. Keep
-    # their existing target, plan and approval checks for foreground work too.
-    allowed = set(_allowed_tool_names(registry, mode)) - COORDINATOR_TOOLS
-    if not _host_action_has_plan_binding(request):
-        allowed.difference_update(PLAN_BOUND_HOST_ACTION_TOOLS)
-    if request.get("coordination"):
-        allowed.update({"teams.status", "teams.cancel"})
+    allowed = set(_allowed_tool_names(registry, mode)) - SUBAGENT_TOOLS
+    if request.get("subagents"):
+        allowed.update({"subagents.status", "subagents.stop"})
         if request.get("_dispatchAllowed", delegation_allowed(request)):
-            allowed.add("teams.dispatch")
+            allowed.add("subagents.start")
     return frozenset(allowed)
 
 
@@ -2084,7 +2208,7 @@ def _run_fingerprint(request: dict[str, Any]) -> str:
             "targetId": request.get("targetId"),
             "persona": request.get("persona"),
             "participant": request.get("participant"),
-            **({"coordination": request["coordination"]} if "coordination" in request else {}),
+            **({"subagents": request["subagents"]} if "subagents" in request else {}),
             "providerId": request.get("providerId"),
             "model": request.get("model"),
             "reasoningEffort": request.get("reasoningEffort"),
@@ -2107,7 +2231,7 @@ def _run_checkpoint_binding(request: dict[str, Any]) -> str:
         "sessionId", "taskId", "taskBudget", "prompt", "parts", "workspaceId",
         "focusServerId", "target", "policyId", "permissionMode", "mode",
         "planBinding",
-        "persona", "participant", "reasoningEffort", "toolAccess", "coordination",
+        "persona", "participant", "reasoningEffort", "toolAccess", "subagents",
     )
     binding = {field: request[field] for field in fields if field in request}
     budget = request.get("agentBudget")
@@ -2148,17 +2272,6 @@ def _parse_memory_params(value: object, action: str) -> dict[str, Any]:
 
 def _safe_context_id(prefix: str, value: str) -> str:
     return f"{prefix}-{hashlib.sha256(value.encode('utf-8')).hexdigest()[:32]}"
-
-
-def _host_action_has_plan_binding(request: dict[str, Any]) -> bool:
-    binding = request.get("planBinding")
-    target = request.get("hostTarget")
-    return bool(
-        request.get("taskId")
-        and isinstance(binding, dict)
-        and isinstance(target, dict)
-        and target.get("host") == "remote"
-    )
 
 
 def _valid_server_id(value: object) -> bool:

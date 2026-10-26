@@ -22,7 +22,9 @@ test("watch operations use real scoped cues and never touch foreground compositi
   receiveWatchActivity(EVENT_SCHEMAS["investigation.schedule_activity"].parse({ ...base, stage: "running_tool", tool: { callId: "logs", name: "server.logs", finished: false } }));
   assert.equal(useWorkspaceStore.getState(), foreground);
   assert.equal(useTeamRuntimeStore.getState().runs.find((run) => run.id === "main_chat")?.stage, "starting");
-  assert.match(renderToStaticMarkup(<TeamActionCueView cues={useTeamRuntimeStore.getState().cues} serverId="srv_a" surface="logs" />), /运维 · 操作中 · server.logs/);
+  // The single-agent UI no longer has team-colour labels: the cue names the
+  // agent and keeps the tool in the title, which is what a watch operator reads.
+  assert.match(renderToStaticMarkup(<TeamActionCueView cues={useTeamRuntimeStore.getState().cues} serverId="srv_a" surface="logs" />), /title="操作中 · server\.logs"[^>]*>.*运维 Agent/);
   assert.equal(renderToStaticMarkup(<TeamActionCueView cues={useTeamRuntimeStore.getState().cues} serverId="srv_b" surface="logs" />), "");
   receiveWatchActivity({ ...base, stage: "thinking", tool: { callId: "logs", name: "server.logs", finished: true } });
   receiveWatchActivity({ ...base, stage: "completed" });

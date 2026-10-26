@@ -1023,6 +1023,32 @@ int main(int argc, char** argv) {
                      {"path", "/etc/hosts"},
                      {"maxBytes", 2 * 1024 * 1024}});
 
+    const auto list_target = yukinal::desktop_host::resolve_ssh_service_filesystem_list_target(
+        database, target_credentials,
+        {{"serverId", "srv_target"}, {"path", "/etc/nginx"}});
+    check(list_target.at("filesystemList").at("path") == "/etc/nginx",
+          "a directory listing target should carry the requested path");
+    bool list_rejected = false;
+    try {
+      (void)yukinal::desktop_host::resolve_ssh_service_filesystem_list_target(
+          database, target_credentials,
+          {{"serverId", "srv_target"}, {"path", "/home/deploy/.ssh"}});
+    } catch (const std::exception&) {
+      list_rejected = true;
+    }
+    check(list_rejected,
+          "listing a credential directory must be refused by the same path blocklist as a read");
+    bool nested_rejected = false;
+    try {
+      (void)yukinal::desktop_host::resolve_ssh_service_filesystem_list_target(
+          database, target_credentials,
+          {{"serverId", "srv_target"}, {"path", "/home/deploy/.ssh/keys"}});
+    } catch (const std::exception&) {
+      nested_rejected = true;
+    }
+    check(nested_rejected,
+          "listing inside a credential directory must be refused too, not only the directory itself");
+
     const auto write_target = yukinal::desktop_host::resolve_ssh_service_filesystem_write_target(
         database, target_credentials,
         {{"serverId", "srv_target"}, {"path", "/srv/app.conf"}, {"content", "PORT=8080\n"}});
@@ -4564,6 +4590,42 @@ int main(int argc, char** argv) {
                 !yukinal::desktop_host::is_host_approval_tool_name("filesystem.write"),
             "only the four effectful SSH actions require a host approval ticket");
 
+      // Auto-approval: the run asked for the change without a person. The ticket
+      // is still minted for the exact binding and still single-use; the only
+      // difference is that nobody had to answer it.
+      {
+        ApprovalLedger automatic;
+        auto event = waiting_event();
+        event["approval"]["autoApproved"] = true;
+        check(automatic.record_auto_approved_event(event, kApprovalNow),
+              "an auto-approved host action should mint its exact ticket");
+        check(!automatic.consume(execution_binding(), now_fn).has_value(),
+              "an auto-approved ticket should be consumed by its exact request");
+        check(automatic.consume(execution_binding(), now_fn) == TicketError::Missing,
+              "an auto-approved ticket is still single-use");
+        // The same event arriving twice must not fail or duplicate the ticket.
+        check(automatic.record_auto_approved_event(event, kApprovalNow),
+              "a repeated auto-approval event is idempotent");
+        // Without the marker the event stays a pending, unanswered request.
+        ApprovalLedger unmarked;
+        check(unmarked.record_waiting_event(waiting_event(), kApprovalNow),
+              "an unmarked approval is recorded");
+        check(unmarked.consume(execution_binding(), now_fn) == TicketError::NotApproved,
+              "an unmarked approval must not execute before it is answered");
+        // A malformed or marked-without-binding event mints nothing.
+        auto broken = waiting_event();
+        broken["approval"]["autoApproved"] = true;
+        broken.erase("taskId");
+        ApprovalLedger rejected;
+        bool refused = false;
+        try {
+          refused = !rejected.record_auto_approved_event(broken, kApprovalNow);
+        } catch (const std::runtime_error&) {
+          refused = true;
+        }
+        check(refused, "an auto-approval without its durable task must be refused");
+      }
+
       // A user approval mints one exact ticket that is consumed once.
       ApprovalLedger ledger;
       check(ledger.record_waiting_event(waiting_event(), kApprovalNow),
@@ -5007,17 +5069,32 @@ int main(int argc, char** argv) {
                               "iplan_effect", "step_effect",
                               {{"host", "remote"}, {"environment", "staging"}},
                               exec_input("uptime"));
-        check(failure_code(call_target(call)) == "durable_plan_required",
-              "an action without a server id must require a durable plan");
+        check(failure_code(call_target(call)) == "denied_by_policy",
+              "an action without a resolved server must be refused before anything else");
       }
       {
+        // A partial task/plan/step set is ambiguous and refused outright: it must
+        // be a durable-task call or a conversation call, never half of each.
         auto call = exec_call("trace_eff_plan", "call_eff_plan", "itask_effect", "", "",
                               effect_target, exec_input("uptime"));
+        check(failure_code(call_target(call)) == "invalid_input",
+              "a partially bound action must be refused");
+      }
+      {
+        // A conversation approval carries no task/plan/step. It is admitted, but
+        // it still needs the single-use host ticket minted from its own approval
+        // event; without one the call fails closed rather than executing.
+        auto call = exec_call("trace_eff_chat", "call_eff_chat", "", "", "",
+                              effect_target, exec_input("uptime"));
+        call.erase("taskId");
+        call.erase("planId");
+        call.erase("planStepId");
+        call.erase("evidenceIds");
         const auto payload = call_target(call);
-        check(failure_code(payload) == "durable_plan_required" &&
+        check(failure_code(payload) == "denied_by_policy" &&
                   payload.at("error").at("detail").value("code", std::string()) ==
-                      "durable_plan_required",
-              "an action without a plan binding must require a durable plan");
+                      "approval_ticket",
+              "a conversation action must require its exact host approval ticket");
       }
       {
         auto call = exec_call("trace_eff_host", "call_eff_host", "itask_effect",
@@ -5308,7 +5385,8 @@ int main(int argc, char** argv) {
                                        nlohmann::json::array()))) == "invalid_input",
             "the host tool target must be an object");
 
-      // Every effectful tool needs the durable task, plan and step identifiers.
+      // This compatibility route never executes an effectful tool, with or
+      // without a durable plan: real actions go through the ticketed SSH path.
       {
         const auto payload = run_tool(tool_call(
             "filesystem.write", {{"path", "/srv/app.conf"}, {"content", "x"}}, read_target));

@@ -1,5 +1,5 @@
 import type { InvestigationTask, TaskStatus } from "@yukinal/shared";
-import type { AgentTeam } from "./agent-nist.js";
+import type { AgentTeam } from "./agent-teams.js";
 import { TEAM_STAGE_LABEL, teamRunActive, type TeamRun, type TeamCue } from "./team-runtime-store.js";
 
 export const BOARD_COLUMNS = [

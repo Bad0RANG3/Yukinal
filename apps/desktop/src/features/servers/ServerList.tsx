@@ -1,5 +1,5 @@
 import { type Server } from "@yukinal/shared";
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 
 import { errorMessage } from "../../lib/format.js";
 import { isDesktopShell } from "../../lib/ipc.js";
@@ -20,6 +20,15 @@ export function ServerList({ onClose, onSelect, onOpenWorkpage, embedded = false
   const [propertiesId, setPropertiesId] = useState<string | null>(null);
   const [editing, setEditing] = useState<Server | undefined>();
   const [filter, setFilter] = useState("");
+  // 删除服务器要二次确认，但**不**弹系统对话框：`window.confirm` 会挡住整个窗口，
+  // 也说不清「这台服务器的凭据会一起删掉」这种只有这一屏知道的事。所以确认落在行里，
+  // 一次只确认一台（与 `AgentHistoryDeleteConfirm`、MCP 设置页同一套做法）。
+  const [confirmingId, setConfirmingId] = useState<string | null>(null);
+  const cancelDeleteRef = useRef<HTMLButtonElement>(null);
+  useEffect(() => {
+    if (!confirmingId) return;
+    requestAnimationFrame(() => cancelDeleteRef.current?.focus());
+  }, [confirmingId]);
   const shell = isDesktopShell();
   const preview = isPreviewFixture();
   const protectedInput = useWorkspaceStore((state) => state.agentBusy || Boolean(state.agentDraft.trim()) || state.agentAttachments.length > 0);
@@ -27,6 +36,10 @@ export function ServerList({ onClose, onSelect, onOpenWorkpage, embedded = false
   const servers = useServers({ poll: true });
   const { action, busy } = useServerAction();
   const serverRows = servers.data ?? [];
+  // 过滤词一变，被确认的那一行可能已经不在列表里了；留着会让焦点落空。
+  useEffect(() => {
+    if (confirmingId && !serverRows.some((server) => server.id === confirmingId)) setConfirmingId(null);
+  }, [confirmingId, serverRows]);
   const propertiesServer = serverRows.find((server) => server.id === propertiesId);
   const filteredServers = useMemo(() => { const needle = filter.trim().toLowerCase(); return needle ? serverRows.filter((server) => [server.name, server.connection.host, server.connection.username, String(server.connection.port), server.metadata.environment, ENVIRONMENT_LABEL_SHORT[server.metadata.environment], server.metadata.region].filter((value): value is string => Boolean(value)).some((value) => value.toLowerCase().includes(needle))) : serverRows; }, [filter, serverRows]);
   const togglePreview = () => {
@@ -77,7 +90,14 @@ export function ServerList({ onClose, onSelect, onOpenWorkpage, embedded = false
                 <button type="button" role="menuitem" aria-label={`连接 ${server.name}`} onClick={() => action.mutate({ type: "connect", serverId: server.id })} disabled={busy || server.status === "connecting"}><Icon name="connect" size="sm" />连接</button>
               )}
               <button type="button" role="menuitem" title={preview ? "退出模拟后可编辑服务器" : undefined} aria-label={`编辑 ${server.name}`} disabled={busy || preview} onClick={() => setEditing(server)}><Icon name="edit" size="sm" />编辑</button>
-              <button type="button" role="menuitem" className="server-action-delete" aria-label={`删除 ${server.name}`} disabled={busy} onClick={() => { if (window.confirm(`确定删除服务器“${server.name}”？`)) action.mutate({ type: "delete", serverId: server.id }); }}><Icon name="trash" size="sm" />删除</button>
+              <button type="button" role="menuitem" className="server-action-delete" aria-label={`删除 ${server.name}`} aria-disabled={busy || undefined} onClick={() => { if (!busy) setConfirmingId(server.id); }}><Icon name="trash" size="sm" />删除</button>
+              {confirmingId === server.id ? <div className="server-delete-confirm" role="group" aria-label={`确认删除服务器 ${server.name}`}>
+                <p>删除「{server.name}」？本机保存的连接配置和凭据会一起删除，不能撤销。</p>
+                <div className="server-delete-confirm-actions">
+                  <button ref={cancelDeleteRef} type="button" className="text-button" onClick={() => setConfirmingId(null)}>取消</button>
+                  <button type="button" className="button-secondary server-delete-confirm-danger" aria-disabled={busy || undefined} onClick={() => { if (!busy) { setConfirmingId(null); action.mutate({ type: "delete", serverId: server.id }); } }}>删除</button>
+                </div>
+              </div> : null}
             </ServerTreeItem>
           ))}
         </ul>

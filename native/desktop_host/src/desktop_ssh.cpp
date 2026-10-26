@@ -257,6 +257,46 @@ SshCommandResult run_service_inventory(const DesktopDatabase& database,
 #endif
 }
 
+SshCommandResult run_process_inventory(const DesktopDatabase& database,
+                                       const CredentialStore& credentials,
+                                       const std::string& server_id, int timeout_seconds) {
+#ifdef YUKINAL_DESKTOP_HOST_WITH_SSH_CORE
+  if (timeout_seconds < 1 || timeout_seconds > 30) {
+    throw std::runtime_error("the process inventory timeout is out of range");
+  }
+  const auto payload = resolve_ssh_service_target(database, credentials, server_id);
+  const auto target = build_target_config(payload);
+  yukinal::ssh_service::ScopedCredentialOverride credentials_scope(credential_values(payload));
+  return to_result(yukinal::ssh_service::process_inventory(target, timeout_seconds));
+#else
+  (void)database;
+  (void)credentials;
+  (void)server_id;
+  (void)timeout_seconds;
+  throw std::runtime_error("the C++ SSH core is not available in this build");
+#endif
+}
+
+SshCommandResult run_port_inventory(const DesktopDatabase& database,
+                                    const CredentialStore& credentials,
+                                    const std::string& server_id, int timeout_seconds) {
+#ifdef YUKINAL_DESKTOP_HOST_WITH_SSH_CORE
+  if (timeout_seconds < 1 || timeout_seconds > 30) {
+    throw std::runtime_error("the port inventory timeout is out of range");
+  }
+  const auto payload = resolve_ssh_service_target(database, credentials, server_id);
+  const auto target = build_target_config(payload);
+  yukinal::ssh_service::ScopedCredentialOverride credentials_scope(credential_values(payload));
+  return to_result(yukinal::ssh_service::port_inventory(target, timeout_seconds));
+#else
+  (void)database;
+  (void)credentials;
+  (void)server_id;
+  (void)timeout_seconds;
+  throw std::runtime_error("the C++ SSH core is not available in this build");
+#endif
+}
+
 /**
  * Resolves the target and runs one bounded read-only SSH operation, mapping the raw
  * result. The `research` nested callbacks keep each helper's SSH-core reference

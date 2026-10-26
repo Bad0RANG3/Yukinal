@@ -4,8 +4,8 @@ import { Icon } from "../../components/Icon.js";
 import { useDismissOnOutsidePointer } from "../../hooks/useDismissOnOutsidePointer.js";
 
 const OPTIONS = [
-  { value: "ask", label: "请求批准", summary: "写入与执行变更前确认" },
-  { value: "auto", label: "帮我批准", summary: "委托常规审批，保留宿主确认" },
+  { value: "auto", label: "自动批准", summary: "变更直接执行，宿主仍复核目标与输入" },
+  { value: "ask", label: "每次询问", summary: "写入与执行变更前先确认" },
 ] as const;
 
 export function PermissionPicker({ value, readOnly, disabled, onChange }: { value: AgentPermissionMode; readOnly: boolean; disabled: boolean; onChange: (value: AgentPermissionMode) => void }) {
@@ -16,7 +16,7 @@ export function PermissionPicker({ value, readOnly, disabled, onChange }: { valu
   useDismissOnOutsidePointer(open, [root], useCallback(() => setOpen(false), []));
   useEffect(() => { if (disabled) setOpen(false); }, [disabled]);
   useLayoutEffect(() => { if (open) menu.current?.querySelector<HTMLButtonElement>(`[aria-checked="true"]`)?.focus(); }, [open]);
-  const label = readOnly ? "只读访问" : value === "auto" ? "帮我批准" : "请求批准";
+  const label = readOnly ? "只读访问" : value === "auto" ? "自动批准" : "每次询问";
   return <div className="agent-permission-picker" ref={root} onKeyDown={(event) => {
     if (event.key === "Escape" && open) { event.preventDefault(); event.stopPropagation(); setOpen(false); trigger.current?.focus(); }
   }}>

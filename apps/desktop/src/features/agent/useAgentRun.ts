@@ -15,10 +15,11 @@
 import {
   IPC_COMMANDS,
   type AgentPromptPart,
-  type AgentCoordinationConfig,
+  type AgentSubagentConfig,
   type AgentPermissionMode,
   type AgentRunMode,
   type AgentRunResult,
+  type AgentStage,
   type AgentTokenUsage,
   type AgentContextUsage,
   type AgentParticipant,
@@ -34,7 +35,7 @@ import { callDesktop, isDesktopShell, subscribeDesktop, type AgentEventName, typ
 import { errorMessage } from "../../lib/format.js";
 import { resetAdmissionOnFailure, type AdmissionRef, type PendingAdmission } from "./run-lifecycle.js";
 import { ASSISTANT_REPLY_NOT_SAVED, assistantReplyNotSaved } from "./session-persistence.js";
-import type { AgentTeam } from "../agent-nist/agent-nist.js";
+import type { AgentTeam } from "../agent-nist/agent-teams.js";
 import { useTeamRuntimeStore } from "../agent-nist/team-runtime-store.js";
 import { AgentRunStream, appendStreamBatch, settleStreamText, type RunStreamScope } from "./run-stream.js";
 import {
@@ -67,7 +68,7 @@ export type StartOutcome =
 export type StartRunInput = {
   prompt: string;
   persona?: AgentPersona;
-  coordination?: AgentCoordinationConfig;
+  subagents?: AgentSubagentConfig;
   team?: AgentTeam;
   /** Snapshot captured on first admission, retained unchanged across retries. */
   uiContext?: string;
@@ -102,6 +103,12 @@ export type AgentRun = {
   entries: Entry[];
   running: boolean;
   runState: string | null;
+  /**
+   * The operating stage the agent has actually reached (evidence, diagnosis,
+   * change, verify …), derived from executed tool results by the runtime. It is
+   * an observation, never the model's own claim, so the UI may label it as fact.
+   */
+  stage: AgentStage | null;
   runId: string | null;
   stopping: boolean;
   /** 事件订阅是否已经装好；没装好就不该允许发送。 */
@@ -164,6 +171,7 @@ export function useAgentRun(options: {
   const [entries, setEntries] = useState<Entry[]>([]);
   const [running, setRunning] = useState(false);
   const [runState, setRunState] = useState<string | null>(null);
+  const [stage, setStage] = useState<AgentStage | null>(null);
   const [runId, setRunId] = useState<string | null>(null);
   const [stopping, setStopping] = useState(false);
   const [listening, setListening] = useState(false);
@@ -190,6 +198,11 @@ export function useAgentRun(options: {
     setStopping(false);
     setPendingApprovalIds([]);
     setRunState(result.state);
+    // The run is no longer working, so a stale operating stage must not label it.
+    // A completed run used to be labelled `report` locally, which duplicated — and
+    // could contradict — the runtime's own `agent.stage` frame. The runtime is the
+    // producer now; this only clears the stage when the run did not complete.
+    setStage((current) => (result.state === "completed" ? current : null));
     useTeamRuntimeStore.getState().stage(eventRunId, result.state === "completed" ? "completed" : result.state === "cancelled" ? "cancelled" : "failed");
     setContextUsage(result.context ?? null);
     if (result.text) {
@@ -246,7 +259,14 @@ export function useAgentRun(options: {
       setRunId(event.runId);
       setRunning(true);
       setRunState("thinking");
+      setStage("intake");
       useTeamRuntimeStore.getState().stage(event.runId, "thinking");
+    });
+    on("agent.stage", (event) => {
+      if (!isActive(event)) return;
+      // Only the payload's own stage is stored; the runtime derived it from
+      // executed results, so a late or duplicated frame cannot invent progress.
+      setStage(event.stage);
     });
     on("agent.thinking", (event) => {
       if (!isActive(event)) return;
@@ -305,6 +325,12 @@ export function useAgentRun(options: {
     on("agent.waiting_approval", (event) => {
       if (!isActive(event)) return;
       stream.boundary();
+      if (event.approval.autoApproved === true) {
+        // Auto-approval mode: the host already minted and accepted its one-shot
+        // ticket. This is a record of a call that is running, not a decision
+        // waiting for a person, so it must not interrupt or render buttons.
+        return;
+      }
       setRunState("waiting_approval");
       useTeamRuntimeStore.getState().stage(event.runId, "waiting_approval");
       onApprovalRequested.current?.();
@@ -401,7 +427,7 @@ export function useAgentRun(options: {
       return "failed";
     }
     const contentKey = JSON.stringify(parts);
-    const routingKey = JSON.stringify({ persona: input.persona, coordination: input.coordination, participant: input.participant, providerId: input.providerId, model: input.model, focusServerId: input.focusServerId, reasoningEffort: input.reasoningEffort, toolAccess: input.toolAccess, permissionMode: input.permissionMode, mode: input.mode, policyId: input.policyId });
+    const routingKey = JSON.stringify({ persona: input.persona, subagents: input.subagents, participant: input.participant, providerId: input.providerId, model: input.model, focusServerId: input.focusServerId, reasoningEffort: input.reasoningEffort, toolAccess: input.toolAccess, permissionMode: input.permissionMode, mode: input.mode, policyId: input.policyId });
     const previous = pendingAdmission.current;
     const reusable =
       previous?.prompt === prompt && JSON.stringify(previous.parts) === contentKey && previous.taskId === (input.taskId ?? null) && previous.routingKey === routingKey
@@ -410,9 +436,10 @@ export function useAgentRun(options: {
     const expectedRunId = reusable?.runId ?? newId("run");
     const scope = stream.begin(expectedRunId, { ...(input.participant ? { participant: input.participant } : {}), ...(input.model ? { model: input.model } : {}) });
     if (!scope) return "busy";
-    if (input.team) useTeamRuntimeStore.getState().begin({ id: expectedRunId, team: input.team, source: input.coordination ? "coordinator" : undefined, serverId: input.focusServerId ?? null, taskId: input.taskId ?? undefined, goal: prompt });
+    if (input.team) useTeamRuntimeStore.getState().begin({ id: expectedRunId, team: input.team, serverId: input.focusServerId ?? null, taskId: input.taskId ?? undefined, goal: prompt });
     setRunning(true);
     setRunState("starting");
+    setStage("intake");
     setRunId(null);
     setApprovalStatuses({});
     setPendingApprovalIds([]);
@@ -454,7 +481,7 @@ export function useAgentRun(options: {
         model: input.model ?? undefined,
         reasoningEffort: input.reasoningEffort,
         toolAccess: input.toolAccess,
-        coordination: input.coordination,
+        subagents: input.subagents,
         persona: input.persona && admitted.uiContext ? { ...input.persona, systemPrompt: `${input.persona.systemPrompt}\n\n${admitted.uiContext}` } : input.persona,
         participant: input.participant,
         focusServerId: input.focusServerId ?? undefined,
@@ -574,6 +601,7 @@ export function useAgentRun(options: {
     setEntries(appendEntries([], next));
     setRunning(false);
     setRunState(null);
+    setStage(null);
     setRunId(null);
     setStopping(false);
     setPendingApprovalIds([]);
@@ -597,6 +625,7 @@ export function useAgentRun(options: {
     entries,
     running,
     runState,
+    stage,
     runId,
     stopping,
     listening,

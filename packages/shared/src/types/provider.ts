@@ -136,6 +136,21 @@ export interface ProviderSaveInput {
   models?: ProviderModelOption[];
 }
 
+/**
+ * Short-lived input for discovering a provider's model list before it is saved.
+ * The API key is forwarded only for this request and is never included in a
+ * provider response or persisted catalog entry.
+ */
+export interface ProviderModelDiscoveryInput {
+  /** Existing provider whose saved key may be used when apiKey is omitted. */
+  providerId?: string;
+  kind: AiProviderKind;
+  baseUrl: string;
+  apiKey?: string;
+  customHeaders?: Record<string, string>;
+  apiVersion?: string;
+}
+
 export interface ModelInfo {
   id: string;
   label: string;

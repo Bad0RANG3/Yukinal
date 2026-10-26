@@ -1,5 +1,12 @@
 import { useIsMutating, useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
-import { HttpBaseUrlSchema, IPC_COMMANDS, type AiProviderConfig, type AiProviderKind } from "@yukinal/shared";
+import {
+  HttpBaseUrlSchema,
+  IPC_COMMANDS,
+  type AiProviderConfig,
+  type AiProviderKind,
+  type ProviderModelDiscoveryInput,
+  type ProviderModelOption,
+} from "@yukinal/shared";
 import { useId, useState, type ReactNode } from "react";
 
 import { Icon } from "../../components/Icon.js";
@@ -249,7 +256,6 @@ function ProviderSettings({ active }: { active: boolean }) {
 export function ProviderEditor({ provider, existingProviderIds, onSaved, active = true }: { provider?: AiProviderConfig; existingProviderIds: Set<string>; onSaved: (response: { provider: AiProviderConfig }) => void; active?: boolean }) {
   const shell = isDesktopShell();
   const busy = useIsMutating({ mutationKey: ["provider-write"] }) > 0;
-  const [providerId, setProviderId] = useState(provider?.id ?? "");
   const [kind, setKind] = useState<AiProviderKind>(provider?.kind ?? "openai-compatible");
   const [label, setLabel] = useState(provider?.label ?? "");
   const [baseUrl, setBaseUrl] = useState(provider?.baseUrl ?? "");
@@ -258,8 +264,45 @@ export function ProviderEditor({ provider, existingProviderIds, onSaved, active 
   const [wireApi, setWireApi] = useState<"chat" | "responses">(provider?.wireApi ?? "chat");
   const [apiVersion, setApiVersion] = useState(provider?.apiVersion ?? "");
   const [customHeadersText, setCustomHeadersText] = useState(providerHeadersText(provider?.customHeaders));
+  const [discoveredModels, setDiscoveredModels] = useState<ProviderModelOption[]>([]);
+  const [catalogSource, setCatalogSource] = useState<"saved" | "draft">(provider ? "saved" : "draft");
   const [saved, setSaved] = useState(false);
-  const modelsId = useId();
+  const catalog = useQuery(providerModelsQueryOptions(provider?.id, { enabled: active }));
+  const models = catalogSource === "saved"
+    ? catalog.data ?? provider?.models ?? []
+    : discoveredModels;
+  const discoverModels = useMutation({
+    mutationFn: async () => {
+      if (!HttpBaseUrlSchema.safeParse(baseUrl).success) {
+        throw new Error("Base URL 必须是有效的安全 http(s) 地址。");
+      }
+      const input: ProviderModelDiscoveryInput = {
+        providerId: provider?.id,
+        kind,
+        baseUrl: baseUrl.trim(),
+        apiKey: apiKey.trim() || undefined,
+        customHeaders: parseProviderHeaders(customHeadersText),
+        apiVersion: providerKindUsesApiVersion(kind) ? apiVersion.trim() || undefined : undefined,
+      };
+      const response = await callDesktop(IPC_COMMANDS.providerModels, { input });
+      if (response.models.length === 0) {
+        throw new Error("服务商没有返回可用模型，请检查协议、地址和密钥。");
+      }
+      return response.models;
+    },
+    onSuccess: (nextModels) => {
+      setDiscoveredModels(nextModels);
+      setCatalogSource("draft");
+      setModel((current) =>
+        nextModels.some((option) => option.id === current) ? current : "",
+      );
+    },
+  });
+  const clearDiscoveredModels = () => {
+    setDiscoveredModels([]);
+    setCatalogSource("draft");
+    discoverModels.reset();
+  };
   /**
    * 切换协议。
    *
@@ -274,15 +317,13 @@ export function ProviderEditor({ provider, existingProviderIds, onSaved, active 
       Object.values(PROVIDER_KIND_DEFAULT_BASE_URL).includes(current);
     setKind(next);
     if (untouched) setBaseUrl(PROVIDER_KIND_DEFAULT_BASE_URL[next] ?? "");
+    clearDiscoveredModels();
   };
-  const catalog = useQuery(providerModelsQueryOptions(provider?.id, { enabled: active }));
-  const models = catalog.data ?? provider?.models ?? [];
   const save = useMutation({
     mutationKey: ["provider-write"],
     mutationFn: () => {
-      const nextProviderId = providerId.trim();
-      if (!provider && !nextProviderId) throw new Error("请填写 连接 ID。");
-      if (!provider && existingProviderIds.has(nextProviderId)) throw new Error("连接 ID 已存在，请换一个唯一 ID。");
+      if (!label.trim()) throw new Error("请填写连接名称。");
+      const nextProviderId = provider?.id ?? makeProviderId(label, existingProviderIds);
       // 校验交给共享的那条规则，而不是在这里再手写一遍。
       //
       // 原来这里是 `new URL(baseUrl.trim())` 加一句协议判断，有两个洞：
@@ -303,7 +344,6 @@ export function ProviderEditor({ provider, existingProviderIds, onSaved, active 
       }));
     },
     onSuccess: (response) => {
-      setProviderId(response.provider.id);
       setKind(response.provider.kind);
       setLabel(response.provider.label);
       setBaseUrl(response.provider.baseUrl);
@@ -311,6 +351,8 @@ export function ProviderEditor({ provider, existingProviderIds, onSaved, active 
       setApiKey("");
       setApiVersion(response.provider.apiVersion ?? "");
       setCustomHeadersText(providerHeadersText(response.provider.customHeaders));
+      setDiscoveredModels(response.provider.models ?? []);
+      setCatalogSource("draft");
       setSaved(true);
       onSaved(response);
     },
@@ -319,31 +361,38 @@ export function ProviderEditor({ provider, existingProviderIds, onSaved, active 
     <section className="settings-card">
       <div className="settings-card-header"><div><h2>{provider ? "编辑连接" : "添加连接"}</h2></div>{provider ? <span className="settings-editing">正在编辑 {provider.label}</span> : null}</div>
       <form onSubmit={(event) => { event.preventDefault(); if (shell && !busy) save.mutate(); }} onChange={() => { setSaved(false); save.reset(); }}>
-        <fieldset className="settings-form-fields" disabled={busy}>
+        <fieldset className="settings-form-fields" disabled={busy || discoverModels.isPending}>
           <div className="settings-form-grid settings-form-grid-provider">
             <Field label="名称" className="field-wide"><input className="form-input" value={label} onChange={(event) => setLabel(event.target.value)} placeholder="连接名称" required /></Field>
-            {!provider ? <Field label="连接 ID" className="field-wide"><input className="form-input" value={providerId} onChange={(event) => setProviderId(event.target.value.toLowerCase())} placeholder="myprovider" required spellCheck={false} pattern="[a-z0-9][a-z0-9-_]*" title="只能使用小写字母、数字、连字符和下划线，且首字符不能是符号" /></Field> : null}
             <Field label="协议" className="field-wide"><select className="form-input" value={kind} onChange={(event) => changeKind(event.target.value as AiProviderKind)}>{PROVIDER_KIND_ORDER.map((option) => <option key={option} value={option}>{PROVIDER_KIND_LABEL[option]}</option>)}</select></Field>
-            <Field label="Base URL" className="field-wide"><input type="url" className="form-input" value={baseUrl} onChange={(event) => setBaseUrl(event.target.value)} placeholder={PROVIDER_KIND_DEFAULT_BASE_URL[kind] ?? "https://api.example.com/v1"} required spellCheck={false} /></Field>
-            <Field label="API Key" className="field-wide"><input className="form-input" type="password" value={apiKey} onChange={(event) => setApiKey(event.target.value)} autoComplete="new-password" placeholder={provider?.apiKeyCredentialRef ? "留空以保留当前密钥" : "粘贴 API Key（本地无鉴权端点可留空）"} /></Field>
-            <Field label="模型"><input className="form-input" list={modelsId} value={model} onChange={(event) => setModel(event.target.value)} placeholder="选择或输入模型 ID" required spellCheck={false} /><datalist id={modelsId}>{models.map((option) => <option key={option.id} value={option.id}>{option.label}</option>)}</datalist></Field>
+            <Field label="Base URL" className="field-wide"><input type="url" className="form-input" value={baseUrl} onChange={(event) => { setBaseUrl(event.target.value); clearDiscoveredModels(); }} placeholder={PROVIDER_KIND_DEFAULT_BASE_URL[kind] ?? "https://api.example.com/v1"} required spellCheck={false} /></Field>
+            <Field label="API Key" className="field-wide"><input className="form-input" type="password" value={apiKey} onChange={(event) => { setApiKey(event.target.value); clearDiscoveredModels(); }} autoComplete="new-password" placeholder={provider?.apiKeyCredentialRef ? "留空以保留当前密钥" : "粘贴 API Key（本地无鉴权端点可留空）"} /></Field>
+            <Field label="模型"><div className="provider-model-field">
+              <div className="provider-model-control">{models.length ? <select className="form-input" value={model} onChange={(event) => setModel(event.target.value)} required>
+                <option value="" disabled>选择服务商提供的模型</option>
+                {model && !models.some((option) => option.id === model) ? <option value={model}>{model}（当前配置）</option> : null}
+                {models.map((option) => <option key={option.id} value={option.id}>{option.label}</option>)}
+              </select> : <input className="form-input" value={model} onChange={(event) => setModel(event.target.value)} placeholder="获取列表，或手动输入模型 ID" required spellCheck={false} />}
+                <button type="button" disabled={!shell || busy || !baseUrl.trim() || discoverModels.isPending} onClick={() => discoverModels.mutate()} className="button-secondary">{discoverModels.isPending ? "正在获取…" : "获取模型"}</button>
+              </div>
+              {!baseUrl.trim() ? <span className="form-hint">先填写实际 Base URL；需要鉴权的服务商还需填 API Key。</span> : null}
+            </div></Field>
           </div>
           <details className="settings-advanced">
             <summary>高级连接选项</summary>
             <div className="settings-form-grid settings-form-grid-provider">
-              {provider ? <Field label="连接 ID" className="field-wide"><input className="form-input" value={providerId} readOnly spellCheck={false} /></Field> : null}
-              {providerKindUsesWireApi(kind) ? <Field label="Wire API"><select className="form-input" value={wireApi} onChange={(event) => setWireApi(event.target.value as "chat" | "responses")}><option value="chat">Chat Completions</option><option value="responses">Responses</option></select></Field> : null}
-              {providerKindUsesApiVersion(kind) ? <Field label="Anthropic Version"><input className="form-input" value={apiVersion} onChange={(event) => setApiVersion(event.target.value)} placeholder="2023-06-01（留空使用适配器默认值）" spellCheck={false} /></Field> : null}
-              <Field label="自定义请求头" className="field-wide"><textarea className="form-input form-textarea" rows={3} value={customHeadersText} onChange={(event) => setCustomHeadersText(event.target.value)} placeholder={"每行一个「名称: 值」，例如\nHTTP-Referer: https://desktop.example"} spellCheck={false} /></Field>
+              {providerKindUsesWireApi(kind) ? <Field label="对话接口格式"><select className="form-input" value={wireApi} onChange={(event) => setWireApi(event.target.value as "chat" | "responses")}><option value="chat">Chat Completions</option><option value="responses">Responses</option></select></Field> : null}
+              {providerKindUsesApiVersion(kind) ? <Field label="Anthropic Version"><input className="form-input" value={apiVersion} onChange={(event) => { setApiVersion(event.target.value); clearDiscoveredModels(); }} placeholder="2023-06-01（留空使用适配器默认值）" spellCheck={false} /></Field> : null}
+              <Field label="自定义请求头" className="field-wide"><textarea className="form-input form-textarea" rows={3} value={customHeadersText} onChange={(event) => { setCustomHeadersText(event.target.value); clearDiscoveredModels(); }} placeholder={"每行一个「名称: 值」，例如\nHTTP-Referer: https://desktop.example"} spellCheck={false} /></Field>
             </div>
           </details>
         </fieldset>
-        {catalog.isError ? <p className="form-hint form-hint-warning">实时模型列表暂不可用，可手动输入模型 ID。</p> : null}
+        {catalogSource === "saved" && catalog.isError ? <p className="form-hint form-hint-warning">已保存的模型列表暂不可用；获取新列表或手动输入模型 ID。</p> : null}
+        {discoverModels.isError ? <div className="settings-error-row" role="alert"><span>{discoverModels.error.message} 仍可手动输入模型 ID。</span><button type="button" className="text-button" onClick={() => discoverModels.mutate()}>重试</button></div> : null}
         {save.isError ? <div className="settings-error-row" role="alert"><span>{save.error.message}</span><button type="button" className="text-button" onClick={() => save.mutate()}>重试</button></div> : null}
         {saved ? <p className="form-success" role="status">已保存</p> : null}
         <div className="settings-actions">
-          <button type="submit" disabled={!shell || busy || !baseUrl.trim() || !model.trim()} className="button-primary"><Icon name="connect" size="sm" />{save.isPending ? "保存中…" : provider ? "保存并启用" : "添加并启用"}</button>
-          {provider ? <button type="button" disabled={!shell || busy || catalog.isFetching} onClick={() => void catalog.refetch()} className="button-secondary">{catalog.isFetching ? "检查中…" : "刷新模型"}</button> : null}
+          <button type="submit" disabled={!shell || busy || discoverModels.isPending || !baseUrl.trim() || !model.trim()} className="button-primary"><Icon name="connect" size="sm" />{save.isPending ? "保存中…" : provider ? "保存并启用" : "添加并启用"}</button>
           {models.length ? <span className="settings-storage-note">{models.length} 个可选模型</span> : null}
         </div>
       </form>
@@ -352,6 +401,18 @@ export function ProviderEditor({ provider, existingProviderIds, onSaved, active 
 }
 function Field({ label, className, children }: { label: string; className?: string; children: ReactNode }) {
   return <label className={className ? `settings-field ${className}` : "settings-field"}><span className="field-label">{label}</span>{children}</label>;
+}
+
+function makeProviderId(label: string, existingIds: Set<string>): string {
+  const base = label.normalize("NFKD").replace(/[\u0300-\u036f]/g, "").toLowerCase()
+    .replace(/[^a-z0-9]+/g, "-").replace(/^-+|-+$/g, "").slice(0, 220) || "provider";
+  let candidate = base;
+  let suffix = 2;
+  while (existingIds.has(candidate)) {
+    const ending = `-${suffix++}`;
+    candidate = `${base.slice(0, 256 - ending.length).replace(/[-_]+$/g, "")}${ending}`;
+  }
+  return candidate;
 }
 
 function Row({ label, value, wide = false }: { label: string; value: string; wide?: boolean }) {

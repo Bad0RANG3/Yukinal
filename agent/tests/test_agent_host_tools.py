@@ -248,7 +248,9 @@ class HostActionToolTests(unittest.IsolatedAsyncioTestCase):
         cases = {
             "docker.restart": {"container": "api", "timeoutSeconds": 20},
             "systemd.restart": {"service": "api.service", "timeoutSeconds": 20},
-            "package.install": {"manager": "apt", "package": "nginx", "timeoutSeconds": 25},
+            # The tool schema admits only `auto`: the target's package manager is
+            # detected inside the SSH operation, not chosen by the model.
+            "package.install": {"manager": "auto", "package": "nginx", "timeoutSeconds": 25},
         }
 
         for index, (tool_name, arguments) in enumerate(cases.items(), start=1):
@@ -384,7 +386,9 @@ class HostActionToolTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(request["callId"], "call-1")
         self.assertEqual(timeout, 45.0)
 
-    async def test_server_exec_fails_closed_without_durable_plan_binding(self) -> None:
+    async def test_server_exec_runs_from_a_conversation_with_its_approval(self) -> None:
+        # A conversation has no task or plan. The exact per-call approval is what
+        # authorizes it; the host still re-checks target, ticket and denylist.
         host = FakeHost()
         registry = ToolRegistry(MemoryAuditSink())
         register_host_tools(registry, host)  # type: ignore[arg-type]
@@ -406,15 +410,16 @@ class HostActionToolTests(unittest.IsolatedAsyncioTestCase):
             allowed_target_ids=frozenset({"srv_stage1"}),
             approved_actions={fingerprint: "apr-host-ticket"},
             host_target={"host": "remote", "serverId": "srv_stage1", "environment": "staging"},
-            host_task_id="task-durable-1",
             context_target_id="srv_stage1",
         )
 
-        with self.assertRaises(ToolCallError) as raised:
-            await registry.execute("server.exec", arguments, context, call_id="call-1")
-
-        self.assertEqual(raised.exception.code, "durable_plan_required")
-        self.assertEqual(host.calls, [])
+        await registry.execute("server.exec", arguments, context, call_id="call-1")
+        request = host.calls[0][1]
+        self.assertEqual(request["toolName"], "server.exec")
+        self.assertEqual(request["approvalId"], "apr-host-ticket")
+        for field in ("taskId", "planId", "planStepId", "evidenceIds"):
+            self.assertNotIn(field, request, "a conversation must not fabricate a task binding")
+        self.assertEqual(request["target"]["serverId"], "srv_stage1")
 
 
 class FakeFilesystemHost:
@@ -527,15 +532,18 @@ class HostFilesystemToolTests(unittest.IsolatedAsyncioTestCase):
         registry = ToolRegistry(MemoryAuditSink())
         register_host_tools(registry, host)  # type: ignore[arg-type]
 
-        with self.assertRaises(ToolCallError) as no_plan:
-            await registry.execute(
-                "filesystem.edit",
-                arguments,
-                self.make_context(approved_actions={fingerprint: "approved-once"}, with_plan=False),
-                call_id="edit-no-plan",
-            )
-        self.assertEqual(no_plan.exception.code, "durable_plan_required")
-        self.assertEqual(host.calls, [])
+        # A conversation edit has no plan; the exact approval is what admits it,
+        # and no task/plan identifiers are invented for the host request.
+        await registry.execute(
+            "filesystem.edit",
+            arguments,
+            self.make_context(approved_actions={fingerprint: "approved-once"}, with_plan=False),
+            call_id="edit-no-plan",
+        )
+        self.assertEqual(len(host.calls), 1)
+        _method, request, _timeout = host.calls[0]
+        for field in ("taskId", "planId", "planStepId", "evidenceIds"):
+            self.assertNotIn(field, request, "a conversation must not fabricate a task binding")
 
         extra_output_host = FakeFilesystemHost(outputs={"filesystem.edit": {
             "path": "/etc/app.conf",

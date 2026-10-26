@@ -46,6 +46,18 @@ struct SshCommandResult {
                                                      const std::string& server_id,
                                                      int timeout_seconds);
 
+// Fixed read-only diagnostics: process table and listening sockets. The raw probe
+// output is parsed by the Python `ssh_tools` parsers; this wrapper only resolves
+// the target and applies the build guard.
+[[nodiscard]] SshCommandResult run_process_inventory(const DesktopDatabase& database,
+                                                     const CredentialStore& credentials,
+                                                     const std::string& server_id,
+                                                     int timeout_seconds);
+[[nodiscard]] SshCommandResult run_port_inventory(const DesktopDatabase& database,
+                                                  const CredentialStore& credentials,
+                                                  const std::string& server_id,
+                                                  int timeout_seconds);
+
 // The remaining bounded read-only Agent tool operations. They use the same
 // resolved target and credentials as the Python-driven C++ SSH service; the
 // caller applies the matching Python `*.normalize` RPC to the raw output.

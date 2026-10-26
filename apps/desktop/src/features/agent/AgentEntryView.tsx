@@ -26,7 +26,7 @@ import { conversationReplyCopyText } from "../../lib/conversation-reply-copy.js"
 import { approvalSourceLabel, decisionLabel, resultLabel, riskLabel } from "../../lib/labels.js";
 import { imageAttachmentUrl } from "./image-attachments.js";
 import { ApprovalCard } from "./ApprovalCard.js";
-import { agentFailureLabel, type Entry } from "./transcript.js";
+import { agentFailureLabel, toolExecutionNotice, type Entry } from "./transcript.js";
 
 export const AgentEntryView = memo(function AgentEntryView({
   entry,
@@ -187,6 +187,7 @@ function ToolCard({ entry, isNewEntry = false }: { entry: Extract<Entry, { kind:
         {entry.approvedBy ? <span className="decision-badge decision-source">{approvalSourceLabel(entry.approvedBy)}</span> : null}
         {result ? <span className="tool-duration">{result.durationMs} ms</span> : null}
       </div>
+      {result && toolExecutionNotice(result.executionState) ? <p className="tool-execution-notice" role="status">{toolExecutionNotice(result.executionState)}</p> : null}
       {result?.status === "failed" ? <p className="tool-failure-reason">{result.error || result.summary || "工具执行失败"}</p> : null}
       {result ? <ToolResultBody toolName={entry.toolName} summary={result.summary} failed={result.status === "failed"} /> : null}
       {result?.errorCode ? <code className="tool-error-code">{result.errorCode}</code> : null}
@@ -219,6 +220,7 @@ const TOOL_ACTION_LABELS: Record<string, string> = {
   "server.exec": "执行服务器操作", "filesystem.read": "读取文件", "filesystem.write": "写入文件", "filesystem.edit": "编辑文件", "filesystem.list": "查看目录", "filesystem.backup": "备份文件",
   "package.inspect": "检查软件包", "package.install": "安装软件包", "server.info": "读取服务器信息", "server.services": "检查服务", "server.logs": "读取日志",
   "ssh.disk_usage": "读取磁盘用量", "ssh.exec": "运行终端命令", "server.processes": "检查进程",
+  "server.ports": "检查监听端口",
   "server.containers": "检查容器", "server.files": "读取文件",
 };
 export function toolActionLabel(name: string): string { return TOOL_ACTION_LABELS[name] ?? name; }

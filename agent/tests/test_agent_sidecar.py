@@ -78,7 +78,9 @@ class PythonSidecarTests(unittest.TestCase):
         self.assertEqual(_allowed_tool_names(registry, "plan"), {"ssh.service_status"})
         self.assertEqual(_allowed_tool_names(registry, "readonly"), {"ssh.service_status"})
 
-    def test_plan_bound_host_actions_are_hidden_without_a_durable_remote_plan(self) -> None:
+    def test_host_actions_are_available_to_a_conversation_and_still_readonly_never(self) -> None:
+        # One permission model: a goal run exposes every registered tool and each
+        # call asks on its own. Mode is the only thing that narrows the set.
         registry = _registry()
 
         async def handler(_arguments: dict[str, Any], _context: ExecutionContext) -> str:
@@ -95,19 +97,12 @@ class PythonSidecarTests(unittest.TestCase):
         ))
         request = {
             "taskId": "task-1",
-            "hostTarget": {"host": "remote", "serverId": "srv_stage1", "environment": "staging"},
-        }
-        self.assertEqual(
-            _allowed_tools_for_run(registry, "goal", request),
-            {"ssh.service_status"},
-        )
-
-        request["planBinding"] = {
-            "planId": "plan-1", "planStepId": "step-1", "evidenceIds": [],
+            "hostTarget": {"host": "remote", "serverId": "srv_stage1", "environment": "production"},
         }
         self.assertEqual(
             _allowed_tools_for_run(registry, "goal", request),
             {"ssh.service_status", "filesystem.edit"},
+            "a conversation may execute; production no longer silently removes the tool",
         )
         self.assertEqual(
             _allowed_tools_for_run(registry, "readonly", request),

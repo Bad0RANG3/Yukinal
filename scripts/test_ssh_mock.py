@@ -468,8 +468,26 @@ def start_ssh_mock(
             elif command == b"systemctl show --no-pager --property=LoadState,ActiveState,SubState,Description --value -- 'nginx.service' 2>&1":
                 channel.sendall(b"loaded\nactive\nrunning\nNginx web server\n")
                 channel.send_exit_status(0)
-            elif command == b"if command -v apt-get >/dev/null 2>&1 && command -v dpkg-query >/dev/null 2>&1; then dpkg-query --showformat='${Status}\\t${Version}\\n' --show -- 'nginx' 2>/dev/null || printf '%s\\n' absent; else printf '%s\\n' unsupported; fi":
+            elif (
+                # The service captures the query and publishes only its own one-line
+                # verdict, so match the stable parts of that probe rather than the
+                # exact shell string: an added exit-status guard must not silently
+                # turn a supported fixture into an "inactive" mock reply.
+                b"dpkg-query --showformat" in command
+                and b"'nginx'" in command
+                and b"status=$?" in command
+            ):
                 channel.sendall(b"install ok installed\t1.27.0-1\n")
+                channel.send_exit_status(0)
+            elif (
+                b"manager=apt" in command
+                and b"manager=dnf" in command
+                and b"manager=yum" in command
+                and b"manager=unsupported" in command
+                and b"rpm --queryformat" in command
+                and b"'fastfetch'" in command
+            ):
+                channel.sendall(b"__YUKINAL_MANAGER__=yum\nabsent\n")
                 channel.send_exit_status(0)
             elif command == b"docker restart --time 15 -- 'api' 2>&1":
                 channel.sendall(b"api\n")
@@ -478,6 +496,13 @@ def start_ssh_mock(
                 channel.send_exit_status(0)
             elif command == b"DEBIAN_FRONTEND=noninteractive apt-get install --yes --no-install-recommends --no-remove -- 'nginx=1.27.0' 2>&1":
                 channel.sendall(b"Setting up nginx (1.27.0)\n")
+                channel.send_exit_status(0)
+            elif (
+                b"manager=yum" in command
+                and b"yum install --assumeyes --" in command
+                and b"fastfetch" in command
+            ):
+                channel.sendall(b"Installed: fastfetch\n")
                 channel.send_exit_status(0)
             elif command == b"systemctl is-active -- nginx.service":
                 channel.sendall(b"active\n")
@@ -1844,6 +1869,17 @@ def run_test(service_binary: Path, *, agent_runtime_only: bool = False) -> None:
             )
             if package_inspect.exit_code != 0 or "1.27.0-1" not in package_inspect.stdout:
                 raise AssertionError(f"unexpected structured package inspect: {package_inspect!r}")
+            auto_package_inspect = client._execute_operation(
+                "srv_stage1",
+                "package_inspect",
+                {"manager": "auto", "package": "fastfetch"},
+                timeout_seconds=5,
+            )
+            if (
+                auto_package_inspect.exit_code != 0
+                or auto_package_inspect.stdout != "__YUKINAL_MANAGER__=yum\nabsent\n"
+            ):
+                raise AssertionError(f"unexpected automatic package inspect: {auto_package_inspect!r}")
             docker_restart = client._execute_operation(
                 "srv_stage1",
                 "docker_restart",
@@ -1873,6 +1909,14 @@ def run_test(service_binary: Path, *, agent_runtime_only: bool = False) -> None:
             )
             if package_install.exit_code != 0 or "Setting up nginx" not in package_install.stdout:
                 raise AssertionError(f"unexpected structured package install: {package_install!r}")
+            auto_package_install = client._execute_operation(
+                "srv_stage1",
+                "package_install",
+                {"manager": "auto", "package": "fastfetch", "timeout_seconds": 30},
+                timeout_seconds=30,
+            )
+            if auto_package_install.exit_code != 0 or "Installed: fastfetch" not in auto_package_install.stdout:
+                raise AssertionError(f"unexpected automatic package install: {auto_package_install!r}")
 
             inventory = client.service_inventory("srv_stage1", timeout_seconds=5)
             if inventory.operation != "service_inventory" or "__YUKINAL_SOURCE__=systemd" not in inventory.stdout:

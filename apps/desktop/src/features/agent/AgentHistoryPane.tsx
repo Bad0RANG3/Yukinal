@@ -371,7 +371,10 @@ export function AgentHistoryPane({
           <p className="agent-history-summary">{summary}</p>
         </div>
         <div className="agent-history-heading-actions">
-          {onResetContext ? <button type="button" className="text-button agent-context-reset" disabled={resetting || busy} title="清空当前模型上下文，保留对话记录与已保存记忆" onClick={onResetContext}>{resetting ? "重置中…" : "重置上下文"}</button> : null}
+          {/* 重置从不 canned 的 `disabled`：它就在记录列表的表头里，和列表里的每一行
+              一样要保住焦点（见 `AgentHistoryRow` 的规则）。写入在途时用 `aria-disabled` +
+              事件早退，读屏听到的是同一件事，而焦点留在原处。 */}
+          {onResetContext ? <button type="button" className="text-button agent-context-reset" aria-disabled={resetting || busy || undefined} title={busy ? "对话正在运行，结束后再重置上下文" : "清空当前模型上下文，保留对话记录与已保存记忆"} onClick={() => { if (!resetting && !busy) onResetContext(); }}>{resetting ? "重置中…" : "重置上下文"}</button> : null}
           <button type="button" className="button-secondary agent-history-new" onClick={onNewSession} disabled={busy}>
             <Icon name="plus" size="sm" />新建任务
           </button>

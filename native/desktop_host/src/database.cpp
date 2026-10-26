@@ -3242,6 +3242,50 @@ std::optional<nlohmann::json> DesktopDatabase::create_investigation_task(
   return load_investigation_task_row(connection_, field("id"));
 }
 
+bool DesktopDatabase::update_investigation_phase(
+    const std::string& task_id, const std::string& run_id, const std::string& phase,
+    const std::string& updated_at) const {
+  if (!is_one_of(phase, {"investigating", "decision", "execution", "verification", "recovery"})) {
+    throw std::invalid_argument("unsupported investigation phase");
+  }
+  std::lock_guard lock(mutex_);
+  if (connection_ == nullptr) return false;
+  Transaction transaction(connection_);
+  auto task = load_investigation_task_row(connection_, task_id);
+  if (!task.has_value()) return false;
+  // Only the run that currently owns this task may move its phase; a finished
+  // task keeps the phase its terminal event recorded.
+  if (task->value("activeRunId", std::string()) != run_id) return false;
+  if (is_one_of(task->value("status", std::string()),
+                {"completed", "failed", "stopped", "expired"})) {
+    return false;
+  }
+  auto run = load_investigation_run_row(connection_, run_id);
+  if (!run.has_value() || run->value("taskId", std::string()) != task_id) return false;
+  if (!is_one_of(run->value("status", std::string()), {"admitted", "running"})) return false;
+  if (task->value("phase", std::string()) == phase &&
+      run->value("phase", std::string()) == phase) {
+    return false;
+  }
+  Statement update(connection_, "UPDATE investigation_tasks SET phase = ?2, updated_at = ?3 WHERE id = ?1");
+  bind_text(connection_, update.get(), 1, task_id);
+  bind_text(connection_, update.get(), 2, phase);
+  bind_text(connection_, update.get(), 3, updated_at);
+  if (sqlite3_step(update.get()) != SQLITE_DONE) throw std::runtime_error(sqlite3_errmsg(connection_));
+  // The same phase on the run keeps the run/task projections consistent. Written
+  // directly: `update_investigation_run` takes the same lock.
+  Statement run_update(connection_,
+                       "UPDATE investigation_runs SET phase = ?2, updated_at = ?3 WHERE id = ?1");
+  bind_text(connection_, run_update.get(), 1, run_id);
+  bind_text(connection_, run_update.get(), 2, phase);
+  bind_text(connection_, run_update.get(), 3, updated_at);
+  if (sqlite3_step(run_update.get()) != SQLITE_DONE) {
+    throw std::runtime_error(sqlite3_errmsg(connection_));
+  }
+  transaction.commit();
+  return true;
+}
+
 std::optional<nlohmann::json> DesktopDatabase::update_investigation_task_progress(
     const std::string& task_id, const std::string& status, const std::string& phase,
     const std::optional<std::string>& active_run_id,

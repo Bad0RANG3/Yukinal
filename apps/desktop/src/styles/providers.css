@@ -115,6 +115,21 @@
   gap: 14px 12px;
 }
 
+.provider-model-control {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  align-items: stretch;
+  gap: 8px;
+}
+
+.provider-model-control .button-secondary {
+  white-space: nowrap;
+}
+
+.provider-model-field {
+  min-width: 0;
+}
+
 .field-wide {
   grid-column: 1 / -1;
 }

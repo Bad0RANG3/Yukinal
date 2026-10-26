@@ -1,7 +1,6 @@
 import type { AnimationEventHandler, RefObject } from "react";
 import type { AgentPermissionMode, AgentRunMode, Environment } from "@yukinal/shared";
 import { Icon } from "../../components/Icon.js";
-import type { AgentRole } from "../agent-nist/agent-nist.js";
 import { APPROVAL_ORDER, RUN_MODE_ORDER, approvalOptionSpec, runModeSpec } from "./run-mode.js";
 import { RUN_POLICY_ORDER, policyEnvironmentWarning, runPolicySpec, type RunPolicyChoice } from "./run-policy.js";
 
@@ -22,9 +21,6 @@ export interface ConversationSettingsProps {
   targetEnvironment: Environment;
   delivery: "async" | "sync";
   onDeliveryChange: (value: "async" | "sync") => void;
-  roles: readonly AgentRole[];
-  selectedRoleId: string | null;
-  onSelectRole?: (roleId: string | null) => void;
 }
 
 /** Controlled presentation: closing the panel never changes the next request. */
@@ -74,13 +70,6 @@ export function ConversationSettings(props: ConversationSettingsProps) {
           </ul>
         </div>
         <p className="agent-settings-warning" id={`${props.id}-policy`} role="status">当前 Agent Node 暂不支持策略选择；请求携带策略标识会被拒绝。运行由“运行方式”和“批准方式”约束。{warning ? ` ${warning}` : ""}</p>
-        {props.roles.length ? <label className="agent-settings-field"><span>处理角色</span>
-          <select aria-label="处理角色" value={props.selectedRoleId ?? ""} disabled={!editable}
-            onChange={(event) => { if (editable) props.onSelectRole?.(event.target.value || null); }}>
-            <option value="">协调助手自动安排</option>
-            {props.roles.map((role) => <option key={role.id} value={role.id}>{role.name}</option>)}
-          </select>
-        </label> : null}
         <div className="agent-settings-delivery" role="group" aria-label="投递方式">
           {([["async", "流式返回"], ["sync", "等待完成"]] as const).map(([value, label]) =>
             <button key={value} type="button" className={`agent-settings-option${value === props.delivery ? " is-selected" : ""}`}

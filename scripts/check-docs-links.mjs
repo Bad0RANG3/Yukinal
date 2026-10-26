@@ -23,6 +23,8 @@ import { spawnSync } from "node:child_process";
 import { existsSync, readFileSync } from "node:fs";
 import path from "node:path";
 
+import { headingAnchors } from "./lib/doc-anchors.mjs";
+
 const root = process.cwd();
 
 const listed = spawnSync("git", ["ls-files", "-z", "--cached", "--others", "--exclude-standard"], {
@@ -46,28 +48,13 @@ if (files.length === 0) {
 const anchorCache = new Map();
 function anchorsOf(file) {
   if (!anchorCache.has(file)) {
-    const set = new Set();
-    const source = readFileSync(path.join(root, file), "utf8");
-    let fenced = false;
-    for (const line of source.split("\n")) {
-      if (/^\s*```/.test(line)) fenced = !fenced;
-      if (fenced) continue;
-      const heading = /^#{1,6}\s+(.*)$/.exec(line);
-      if (heading) set.add(anchorize(heading[1]));
-    }
-    anchorCache.set(file, set);
+    // CRLF normalisation lives in the shared helper. A heading line ending in `\r`
+    // used to anchor as the empty string, so a link into such a document reported a
+    // heading that was visibly present as missing. Line endings are invisible; the
+    // gate must not depend on them.
+    anchorCache.set(file, new Set(headingAnchors(readFileSync(path.join(root, file), "utf8"))));
   }
   return anchorCache.get(file);
-}
-
-function anchorize(heading) {
-  return heading
-    .trim()
-    .toLowerCase()
-    .replace(/[`*_~]/g, "")
-    .replace(/[^\p{L}\p{N}\s-]/gu, "")
-    .trim()
-    .replace(/\s+/g, "-");
 }
 
 let links = 0;

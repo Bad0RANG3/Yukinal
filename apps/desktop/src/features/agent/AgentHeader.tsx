@@ -7,15 +7,17 @@
 
 import type { ReactNode, RefObject } from "react";
 
-import type { AgentContextUsage, AgentTokenUsage } from "@yukinal/shared";
+import type { AgentContextUsage, AgentStage, AgentTokenUsage } from "@yukinal/shared";
 
 import { Icon } from "../../components/Icon.js";
 import { runStateLabel } from "./transcript.js";
+import { agentStageLabel } from "./stage-labels.js";
 import { REASONING_LABELS } from "./reasoning.js";
 
 export function AgentHeader({
   running,
   runState,
+  stage = null,
   tokenUsage,
   agentReady,
   agentOpen,
@@ -34,6 +36,8 @@ export function AgentHeader({
 }: {
   running: boolean;
   runState: string | null;
+  /** Derived operating stage; omitted callers keep the run-state label. */
+  stage?: AgentStage | null;
   tokenUsage: AgentTokenUsage | null;
   agentReady: boolean;
   agentOpen: boolean;
@@ -70,7 +74,7 @@ export function AgentHeader({
         {context}
       </div>
       <div className="agent-header-actions">
-        {showStatus ? <AgentRunStatus running={running} runState={runState} tokenUsage={tokenUsage} contextUsage={contextUsage} agentReady={agentReady} shell={shell} /> : null}
+        {showStatus ? <AgentRunStatus running={running} runState={runState} stage={stage} tokenUsage={tokenUsage} contextUsage={contextUsage} agentReady={agentReady} shell={shell} /> : null}
         {workspaceControls ? <div className="agent-workspace-controls">{workspaceControls}</div> : null}
         {!workspace ? <button
           ref={closeButtonRef}
@@ -90,9 +94,11 @@ export function AgentHeader({
 }
 
 /** Shared diagnostics for the header and the collapsed conversation settings. */
-export function AgentRunStatus({ running, runState, tokenUsage, contextUsage, agentReady, shell, compact = false, preview = false }: {
+export function AgentRunStatus({ running, runState, stage = null, tokenUsage, contextUsage, agentReady, shell, compact = false, preview = false }: {
   running: boolean;
   runState: string | null;
+  /** Derived operating stage; shown only while it says more than the run state. */
+  stage?: AgentStage | null;
   tokenUsage: AgentTokenUsage | null;
   contextUsage?: AgentContextUsage | null;
   agentReady: boolean;
@@ -100,7 +106,9 @@ export function AgentRunStatus({ running, runState, tokenUsage, contextUsage, ag
   compact?: boolean;
   preview?: boolean;
 }) {
-  const label = runStateLabel(runState);
+  // A visible stage is more informative than the generic "thinking…" while the
+  // run is working, and it is derived from executed results rather than prose.
+  const label = (running ? agentStageLabel(stage) : null) ?? runStateLabel(runState);
   const usageLabel = tokenUsage ? tokenUsage.reportedRequests === 0 ? "用量未上报" : `${tokenUsage.unreportedRequests ? "≥ " : ""}${(tokenUsage.inputTokens + tokenUsage.outputTokens).toLocaleString()} tokens` : "";
   const lowerBound = tokenUsage?.unreportedRequests ? "≥ " : "";
   const statusLabel = preview ? "模拟数据 · 发送已停用" : label ?? (!shell ? "预览" : agentReady ? "已就绪" : "未启动");

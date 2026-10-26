@@ -37,6 +37,11 @@ class CredentialStore;
 [[nodiscard]] nlohmann::json resolve_ssh_service_filesystem_read_target(
     const DesktopDatabase& database, const CredentialStore& credentials,
     const nlohmann::json& request);
+// Directory listing uses the same path policy as a read: an Agent may inspect a
+// directory it may read, and never one the blocklist protects.
+[[nodiscard]] nlohmann::json resolve_ssh_service_filesystem_list_target(
+    const DesktopDatabase& database, const CredentialStore& credentials,
+    const nlohmann::json& request);
 [[nodiscard]] nlohmann::json resolve_ssh_service_filesystem_write_target(
     const DesktopDatabase& database, const CredentialStore& credentials,
     const nlohmann::json& request);

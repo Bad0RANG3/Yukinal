@@ -24,6 +24,21 @@ if (previewOnlyValue !== "0" && previewOnlyValue !== "1") {
   throw new Error("YUKINAL_DESKTOP_PREVIEW_ONLY must be 0 or 1.");
 }
 const previewOnly = previewOnlyValue === "1";
+const configuredHostBinary = process.env.YUKINAL_DESKTOP_HOST_BINARY
+  ? resolve(root, process.env.YUKINAL_DESKTOP_HOST_BINARY)
+  : undefined;
+if (configuredHostBinary && !existsSync(configuredHostBinary)) {
+  throw new Error(`Configured C++ desktop host not found: ${configuredHostBinary}`);
+}
+const configuredServiceBinary = !previewOnly && process.env.YUKINAL_SSH_SERVICE_BINARY
+  ? resolve(root, process.env.YUKINAL_SSH_SERVICE_BINARY)
+  : undefined;
+if (configuredServiceBinary && !existsSync(configuredServiceBinary)) {
+  throw new Error(`Configured SSH service not found: ${configuredServiceBinary}`);
+}
+if (!previewOnly && configuredServiceBinary && !configuredHostBinary) {
+  throw new Error("A prebuilt SSH service must be paired with a desktop host built with the SSH core.");
+}
 const opensslRoot = process.env.YUKINAL_OPENSSL_ROOT ?? process.env.OPENSSL_ROOT_DIR;
 const port = Number(process.env.YUKINAL_DESKTOP_DEV_PORT ?? "1420");
 if (!Number.isInteger(port) || port < 1 || port > 65535) {
@@ -144,32 +159,37 @@ async function main() {
   const sharedBuild = resolveCommandInvocation("pnpm", ["--filter", "@yukinal/shared", "build"]);
   await run(sharedBuild.command, sharedBuild.args);
 
-  const configureArgs = [
-    "-S", native,
-    "-B", buildDirectory,
-    `-DYUKINAL_BUILD_SSH_SERVICE=${previewOnly ? "OFF" : "ON"}`,
-    "-DYUKINAL_BUILD_DESKTOP_HOST=ON",
-    "-DYUKINAL_BUILD_TESTS=OFF",
-    "-DYUKINAL_FETCH_DEPS=ON",
-    "-DYUKINAL_BUNDLE_WINDOWS_OPENSSL=OFF",
-  ];
-  if (!previewOnly && opensslRoot) {
-    configureArgs.push(`-DOPENSSL_ROOT_DIR=${resolve(opensslRoot)}`);
+  const buildHost = !configuredHostBinary;
+  const buildService = !previewOnly && !configuredServiceBinary;
+  if (buildHost || buildService) {
+    const configureArgs = [
+      "-S", native,
+      "-B", buildDirectory,
+      `-DYUKINAL_BUILD_SSH_SERVICE=${buildService ? "ON" : "OFF"}`,
+      "-DYUKINAL_BUILD_DESKTOP_HOST=ON",
+      "-DYUKINAL_BUILD_TESTS=OFF",
+      "-DYUKINAL_FETCH_DEPS=ON",
+      `-DYUKINAL_BUNDLE_WINDOWS_OPENSSL=${buildService && process.platform === "win32" ? "ON" : "OFF"}`,
+    ];
+    if (buildService && opensslRoot) {
+      configureArgs.push(`-DOPENSSL_ROOT_DIR=${resolve(opensslRoot)}`);
+    }
+    await run("cmake", configureArgs);
+
+    const buildArgs = ["--build", buildDirectory, "--config", "Debug"];
+    const targets = [];
+    if (buildHost) targets.push("yukinal-desktop-host");
+    if (buildService) targets.push("yukinal-ssh-service");
+    if (targets.length > 0) buildArgs.push("--target", ...targets);
+    await run("cmake", buildArgs);
   }
-  await run("cmake", configureArgs);
-  await run("cmake", [
-    "--build", buildDirectory,
-    "--target", "yukinal-desktop-host",
-    ...(previewOnly ? [] : ["yukinal-ssh-service"]),
-    "--config", "Debug",
-  ]);
   const viteEntry = join(desktop, "node_modules", "vite", "bin", "vite.js");
   if (!existsSync(viteEntry)) {
     throw new Error("Vite is not installed. Run pnpm install --frozen-lockfile first.");
   }
   // Check before starting Vite so an incomplete native build cannot open a
   // seemingly functional desktop whose terminal worker is absent.
-  const serviceBinary = sshServiceExecutable();
+  const serviceBinary = previewOnly ? undefined : configuredServiceBinary ?? sshServiceExecutable();
   const url = `http://127.0.0.1:${port}`;
   const vite = spawnLongRunning(process.execPath, [
     viteEntry, "--host", "127.0.0.1", "--port", String(port), "--strictPort",
@@ -196,6 +216,7 @@ async function main() {
       // An inherited autoconfig flag must not silently reactivate SSH in a
       // session whose owner explicitly requested a visual preview only.
       delete hostEnvironment.YUKINAL_SSH_SERVICE_AUTOCONFIG;
+      delete hostEnvironment.YUKINAL_SSH_SERVICE_BINARY;
     }
     if (!hostEnvironment.YUKINAL_AGENT_PYTHON && existsSync(venvPython)) {
       hostEnvironment.YUKINAL_AGENT_PYTHON = venvPython;
@@ -204,7 +225,7 @@ async function main() {
       hostEnvironment.YUKINAL_AGENT_SOURCE = join(root, "agent", "src");
     }
     // SW_HIDE in STARTUPINFO overrides the WebView's first ShowWindow call.
-    host = spawnLongRunning(hostExecutable(), ["--dev-url", url], { env: hostEnvironment, windowsHide: false });
+    host = spawnLongRunning(configuredHostBinary ?? hostExecutable(), ["--dev-url", url], { env: hostEnvironment, windowsHide: false });
     console.log(previewOnly
       ? "Desktop preview-only mode is running; SSH is disabled by explicit request."
       : "Desktop development is running with the SSH core and terminal worker; saved UI changes update this window automatically.");

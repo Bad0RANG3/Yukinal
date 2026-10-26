@@ -38,6 +38,15 @@ export type ToolOutcome = {
   /** Already-redacted event fields, never raw command output. */
   error?: string;
   errorCode?: string;
+  /**
+   * A bounded interruption state from `agent.tool_result.executionState`.
+   *
+   * `result_unknown` / `timed_out` / `cancelled` all mean the remote effect may
+   * have happened. The activity view already says so; the conversation tool card
+   * used to drop the field, so the same evidence read as a plain failure here and
+   * as "unknown" there. Both views now carry it.
+   */
+  executionState?: "timed_out" | "cancelled" | "result_unknown";
 };
 
 /**
@@ -200,7 +209,7 @@ export function toolResultSummary(toolName: string, outputSummary: string): stri
 }
 
 /** Keep the safe failure explanation; outputSummary may contain only a generic code. */
-export function toolOutcomeFromEvent(event: { toolName: string; outputSummary: string; status: ToolOutcome["status"]; durationMs: number; error?: string; errorCode?: string }): ToolOutcome {
+export function toolOutcomeFromEvent(event: { toolName: string; outputSummary: string; status: ToolOutcome["status"]; durationMs: number; error?: string; errorCode?: string; executionState?: ToolOutcome["executionState"] }): ToolOutcome {
   const error = event.error?.trim().slice(0, 4_000);
   return {
     status: event.status,
@@ -208,7 +217,21 @@ export function toolOutcomeFromEvent(event: { toolName: string; outputSummary: s
     summary: toolResultSummary(event.toolName, event.outputSummary),
     ...(event.status === "failed" && error ? { error } : {}),
     ...(event.errorCode ? { errorCode: event.errorCode } : {}),
+    ...(event.executionState ? { executionState: event.executionState } : {}),
   };
+}
+
+/**
+ * The one sentence a card shows when the remote effect is unknown.
+ *
+ * It is deliberately not phrased as a failure: the call may have succeeded, and
+ * telling the operator "failed" is how a completed restart gets repeated.
+ */
+export function toolExecutionNotice(state: ToolOutcome["executionState"]): string | null {
+  if (state === "result_unknown") return "执行结果未知：远端可能已经生效，继续操作前请先读取实际状态。";
+  if (state === "timed_out") return "执行超时：效果可能已经发生，不要直接重试。";
+  if (state === "cancelled") return "执行已取消：效果可能已经发生。";
+  return null;
 }
 
 export const RUN_STATE_LABEL: Record<string, string> = {

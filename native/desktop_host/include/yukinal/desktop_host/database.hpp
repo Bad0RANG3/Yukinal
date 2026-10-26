@@ -177,6 +177,13 @@ class DesktopDatabase {
   [[nodiscard]] std::optional<nlohmann::json> apply_investigation_run_progress(
       const std::string& task_id, const std::string& run_id, const std::string& status,
       const std::optional<nlohmann::json>& failure, const std::string& updated_at) const;
+  // Records the Agent's derived operating stage on the durable task. Only the
+  // owning active run may update it, and a terminal task is immutable; a late or
+  // duplicate stage is a no-op. The phase vocabulary is the host's, so the caller
+  // passes an already-mapped phase (investigating/decision/execution/verification/recovery).
+  [[nodiscard]] bool update_investigation_phase(
+      const std::string& task_id, const std::string& run_id, const std::string& phase,
+      const std::string& updated_at) const;
   // Conservatively blocks an unchanged running step after its bound run failed
   // or was cancelled. This never increments attempts or claims remote execution.
   // The terminal run/session/checkpoint, latest revision and absence of a newer

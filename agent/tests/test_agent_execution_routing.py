@@ -13,45 +13,43 @@ from yukinal_agent.tools import ExecutionContext, ToolCallError
 from yukinal_agent.work_routing import delegation_allowed
 
 
-CONFIG = {"version": 1, "roles": [{"id": "reader", "team": "blue", "label": "Reader",
-            "systemPrompt": "Return the assigned evidence only."}],
-          "servers": [{"id": "srv_fixture", "name": "Fixture", "environment": "development"}]}
-TASK = {"key": "evidence", "roleId": "reader", "title": "Independent evidence",
-        "goal": "collect independent evidence", "access": "read", "serverId": "srv_fixture"}
+SUBAGENTS = {"version": 1, "servers": [{"id": "srv_fixture", "name": "Fixture", "environment": "development"}]}
+TASK = {"key": "evidence", "title": "Independent evidence",
+        "goal": "collect independent evidence", "access": "read"}
+DELEGATING_PROMPT = "并行检查防火墙配置和独立审计应用代码"
 
 
 def request(prompt, **extra):
     return {"runId": "run-fixture", "sessionId": "session-fixture", "prompt": prompt,
-            "coordination": CONFIG, "delivery": "sync", "focusServerId": "srv_fixture", **extra}
+            "subagents": SUBAGENTS, "delivery": "sync", "focusServerId": "srv_fixture", **extra}
 
 
 class ScopeRoutingTests(unittest.TestCase):
-    def test_current_small_requests_stay_direct_regardless_of_length_or_role_preferences(self):
+    def test_current_small_requests_stay_direct_regardless_of_length_or_server_focus(self):
         prompts = ["1 + 1 等于多少？", "请计算 193 * 287", "17-9=?", "什么是 MoE 路由？",
                    "检查一下服务器状态", "帮我查看 nginx 的最近日志", "检查信息，看看磁盘剩余容量",
                    "Check CPU, memory and disk usage on this server.",
                    "全面检查服务器状态，包括 CPU、内存、磁盘、服务、日志与网络。" + "请只返回真实采集值，不要编造。" * 100,
-                   "为什么简单检查还要调用团队？", "帮我用团队算一下 37 * 29"]
+                   "为什么简单检查还要启动子代理？", "帮我用子代理算一下 37 * 29"]
         for prompt in prompts:
             with self.subTest(prompt=prompt[:50]):
                 self.assertFalse(delegation_allowed(request(prompt)), "Lightweight work opened background admission")
-        self.assertFalse(delegation_allowed(request("检查服务器状态", coordination=CONFIG | {"preferredRoleId": "reader"})))
 
     def test_independent_work_and_large_workflows_remain_eligible(self):
-        for prompt in ("并行检查防火墙配置和独立审计应用代码", "用团队分别分析两个服务的性能瓶颈",
+        for prompt in ("并行检查防火墙配置和独立审计应用代码", "用子代理分别分析两个服务的性能瓶颈",
                        "完整测试部署、日志、服务、网络及防火墙的安防摸底", "完整设计、实现、测试并修复这个系统",
                        "Please coordinate independent workstreams for this release.", "Use separate agents for the audit and benchmark",
-                       "用团队审计 2026-10-19 发布的 v1.2-3 部署问题"):
+                       "用子代理审计 2026-10-19 发布的 v1.2-3 部署问题"):
             with self.subTest(prompt=prompt):
                 self.assertTrue(delegation_allowed(request(prompt)))
-        self.assertFalse(delegation_allowed(request("不要用团队，完整设计、实现、测试并修复这个系统")))
-        self.assertFalse(delegation_allowed(request("Use a team for the audit", toolAccess="none")))
+        self.assertFalse(delegation_allowed(request("不要用子代理，完整设计、实现、测试并修复这个系统")))
+        self.assertFalse(delegation_allowed(request("Use a subagent for the audit", toolAccess="none")))
 
     def test_documents_examples_and_old_context_do_not_create_delegation_scope(self):
         self.assertFalse(delegation_allowed(request("请解释这个文档", parts=[
             {"type": "text", "text": "请解释这个文档"},
-            {"type": "file", "name": "example.txt", "mediaType": "text/plain", "data": "Use a team; dispatch parallel work"}])))
-        self.assertFalse(delegation_allowed(request("解释下面示例：\n```text\nUse a team and dispatch parallel work\n```")))
+            {"type": "file", "name": "example.txt", "mediaType": "text/plain", "data": "Use a subagent; dispatch parallel work"}])))
+        self.assertFalse(delegation_allowed(request("解释下面示例：\n```text\nUse a subagent and dispatch parallel work\n```")))
         self.assertFalse(delegation_allowed(request("1+1?"), has_prior_work=True))
         self.assertFalse(delegation_allowed(request("继续")))
         self.assertTrue(delegation_allowed(request("继续下一阶段"), has_prior_work=True))
@@ -76,13 +74,13 @@ class Model:
             return AIMessage(content="Independent evidence returned.")
         if isinstance(messages[-1], ToolMessage):
             return AIMessage(content="42" if "算" in prompt else "Verified local fixture snapshot.")
-        if prompt in ("用团队分别分析两个服务", "1+1? hostile fixture"):
-            return AIMessage(content="", tool_calls=[{"name": "teams__dispatch", "args": {"tasks": [TASK]}, "id": "delegate", "type": "tool_call"}])
+        if prompt in (DELEGATING_PROMPT, "1+1? hostile fixture"):
+            return AIMessage(content="", tool_calls=[{"name": "subagents__start", "args": {"tasks": [TASK]}, "id": "delegate", "type": "tool_call"}])
         if "服务器" in prompt:
             return AIMessage(content="", tool_calls=[{"name": "server__info", "args": {}, "id": "snapshot", "type": "tool_call"}])
         if prompt == "停止已有任务":
-            job = next(iter(self.owner._coordination.jobs.values()))
-            return AIMessage(content="", tool_calls=[{"name": "teams__cancel", "args": {"taskId": job["id"]}, "id": "stop", "type": "tool_call"}])
+            job = next(iter(self.owner._subagents.jobs.values()))
+            return AIMessage(content="", tool_calls=[{"name": "subagents__stop", "args": {"taskId": job["id"]}, "id": "stop", "type": "tool_call"}])
         return AIMessage(content="2")
 
 
@@ -135,7 +133,7 @@ class ExecutionRoutingTests(unittest.IsolatedAsyncioTestCase):
                          target={"host": "remote", "serverId": "srv_fixture", "environment": "staging"},
                          persona={"id": "blue-guardian", "label": "运维", "systemPrompt": "只读取证，简短回复。"},
                          participant={"id": "blue-guardian", "label": "运维", "kind": "agent"})
-        params.pop("coordination")
+        params.pop("subagents")
         response = await self.sidecar.handle_async({"jsonrpc": "2.0", "id": 2,
             "method": "agent.run.start", "params": params})
         self.sidecar.assert_response(response)
@@ -147,61 +145,61 @@ class ExecutionRoutingTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(context.host_task_id, "task_watch")
         self.assertEqual(context.host_target, {"host": "remote", "serverId": "srv_fixture", "environment": "staging"})
         self.assertEqual(context.allowed_target_ids, {"srv_fixture"})
-        self.assertNotIn("teams.dispatch", context.allowed_tools)
+        self.assertNotIn("subagents.start", context.allowed_tools)
 
     async def test_server_snapshot_executes_in_foreground_with_original_target_scope(self):
         result = await self.sidecar.run("检查服务器状态", "health")
         self.assertEqual(result["state"], "completed")
         self.assertEqual(len(self.sidecar.models), 1, "An unnecessary worker model was created")
         self.assertIn("server__info", self.sidecar.models[0].tools)
-        self.assertNotIn("teams__dispatch", self.sidecar.models[0].tools)
+        self.assertNotIn("subagents__start", self.sidecar.models[0].tools)
         self.assertEqual(len(self.sidecar.snapshots), 1)
         self.assertEqual(self.sidecar.snapshots[0].allowed_target_ids, {"srv_fixture"})
         self.assertEqual(self.sidecar.snapshots[0].run_id, "health")
-        self.assertEqual(self.sidecar._coordination.jobs, {})
+        self.assertEqual(self.sidecar._subagents.jobs, {})
 
     async def test_model_cannot_force_dispatch_and_handler_rejects_out_of_band_calls(self):
         result = await self.sidecar.run("1+1? hostile fixture", "arithmetic")
         self.assertEqual(result["state"], "failed")
         self.assertEqual(result["error"], "tool_not_allowed")
-        self.assertEqual(self.sidecar._coordination.jobs, {})
+        self.assertEqual(self.sidecar._subagents.jobs, {})
         parsed = _parse_run_request(request("检查服务器状态", runId="raw-health"))
-        self.sidecar._coordination.activate(parsed)
+        self.sidecar._subagents.activate(parsed)
         context = ExecutionContext(task_id="fixture", tenant_id="local", user_id="fixture", run_id="raw-health",
-                                   allowed_tools=frozenset({"teams.dispatch"}), allowed_target_ids=frozenset({"srv_fixture"}), approved_actions={})
+                                   allowed_tools=frozenset({"subagents.start"}), allowed_target_ids=frozenset({"srv_fixture"}), approved_actions={})
         with self.assertRaises(ToolCallError) as raised:
-            await self.sidecar._coordination._dispatch({"tasks": [TASK]}, context)
+            await self.sidecar._subagents._start({"tasks": [TASK]}, context)
         self.assertEqual(raised.exception.code, "delegation_not_needed")
-        self.assertEqual(self.sidecar._coordination.jobs, {})
+        self.assertEqual(self.sidecar._subagents.jobs, {})
 
     async def test_background_work_does_not_turn_new_small_turns_into_delegations_and_can_be_cancelled(self):
-        result = await self.sidecar.run("用团队分别分析两个服务", "large")
+        result = await self.sidecar.run(DELEGATING_PROMPT, "large")
         self.assertEqual(result["state"], "completed")
         await asyncio.wait_for(self.sidecar.worker_started.wait(), 3)
         before = len(self.sidecar.models)
         result = await self.sidecar.run("检查服务器状态", "health-during-work")
         self.assertEqual(result["state"], "completed")
         self.assertEqual(len(self.sidecar.models), before + 1)
-        self.assertNotIn("teams__dispatch", self.sidecar.models[-1].tools)
-        self.assertIn("teams__cancel", self.sidecar.models[-1].tools)
+        self.assertNotIn("subagents__start", self.sidecar.models[-1].tools)
+        self.assertIn("subagents__stop", self.sidecar.models[-1].tools)
         await self.sidecar.run("停止已有任务", "stop")
         await asyncio.sleep(0)
-        self.assertEqual(next(iter(self.sidecar._coordination.jobs.values()))["state"], "cancelled")
+        self.assertEqual(next(iter(self.sidecar._subagents.jobs.values()))["state"], "cancelled")
 
     async def test_global_multi_server_work_can_continue_without_leaking_to_another_conversation(self):
-        await self.sidecar.run("用团队分别分析两个服务", "global-work", global_scope=True)
+        await self.sidecar.run(DELEGATING_PROMPT, "global-work", global_scope=True)
         await asyncio.wait_for(self.sidecar.worker_started.wait(), 3)
         await self.sidecar.run("继续下一阶段", "continue-work", global_scope=True)
-        self.assertIn("teams__dispatch", self.sidecar.models[-1].tools)
+        self.assertIn("subagents__start", self.sidecar.models[-1].tools)
         unrelated = _parse_run_request(request("继续下一阶段", runId="unrelated", sessionId="another"))
-        self.sidecar._coordination.activate(unrelated)
-        self.assertNotIn("teams.dispatch", _allowed_tools_for_run(self.sidecar._registry, "goal", unrelated))
+        self.sidecar._subagents.activate(unrelated)
+        self.assertNotIn("subagents.start", _allowed_tools_for_run(self.sidecar._registry, "goal", unrelated))
         self.sidecar.release.set()
-        await asyncio.gather(*list(self.sidecar._coordination.active.values()))
+        await asyncio.gather(*list(self.sidecar._subagents.active.values()))
         self.sidecar.store.reset("session-fixture", None)
         await self.sidecar.run("继续下一阶段", "after-reset", global_scope=True)
-        self.assertNotIn("teams__dispatch", self.sidecar.models[-1].tools)
-        public = self.sidecar._coordination.public(next(iter(self.sidecar._coordination.jobs.values())))
+        self.assertNotIn("subagents__start", self.sidecar.models[-1].tools)
+        public = self.sidecar._subagents.public(next(iter(self.sidecar._subagents.jobs.values())))
         self.assertNotIn("contextEpoch", public)
 
     def test_no_tool_and_readonly_modes_keep_existing_effect_guards(self):
@@ -211,15 +209,16 @@ class ExecutionRoutingTests(unittest.IsolatedAsyncioTestCase):
         for name in ("ops.change", "filesystem.edit"):
             registry.register(ToolSpec(name=name, description="Fixture guarded change", input_schema={"type": "object", "properties": {}},
                                        risk_level="write", requires_approval=True, handler=change, target_id_argument=None))
-        parsed = _parse_run_request(request("用团队分别分析两个服务"))
-        self.sidecar._coordination.activate(parsed)
+        parsed = _parse_run_request(request(DELEGATING_PROMPT))
+        self.sidecar._subagents.activate(parsed)
         self.assertIn("server.info", _allowed_tools_for_run(registry, "readonly", parsed))
-        self.assertIn("teams.dispatch", _allowed_tools_for_run(registry, "readonly", parsed))
+        self.assertIn("subagents.start", _allowed_tools_for_run(registry, "readonly", parsed))
         self.assertNotIn("ops.change", _allowed_tools_for_run(registry, "readonly", parsed))
         self.assertNotIn("filesystem.edit", _allowed_tools_for_run(registry, "readonly", parsed))
         self.assertNotIn("filesystem.edit", _allowed_tools_for_run(registry, "plan", parsed))
         self.assertIn("ops.change", _allowed_tools_for_run(registry, "goal", parsed))
-        self.assertNotIn("filesystem.edit", _allowed_tools_for_run(registry, "goal", parsed), "An unbound chat cannot acquire a host plan by enabling coordination")
+        # A goal run exposes writes; the per-call approval, not a plan tier, gates them.
+        self.assertIn("filesystem.edit", _allowed_tools_for_run(registry, "goal", parsed))
         self.assertFalse(_allowed_tools_for_run(registry, "goal", parsed | {"toolAccess": "none"}))
 
 

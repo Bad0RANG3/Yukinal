@@ -102,6 +102,14 @@ class ConversationStore:
             );
             CREATE INDEX IF NOT EXISTS coordinator_team_tasks_session
                 ON coordinator_team_tasks(session_id, updated_at);
+            CREATE TABLE IF NOT EXISTS agent_subagent_tasks (
+                id TEXT PRIMARY KEY,
+                session_id TEXT NOT NULL,
+                payload_json TEXT NOT NULL,
+                updated_at TEXT NOT NULL
+            );
+            CREATE INDEX IF NOT EXISTS agent_subagent_tasks_session
+                ON agent_subagent_tasks(session_id, updated_at);
             CREATE TABLE IF NOT EXISTS saved_memories (
                 id TEXT PRIMARY KEY,
                 scope TEXT NOT NULL CHECK (scope IN ('global', 'server')),
@@ -136,18 +144,29 @@ class ConversationStore:
         self._connection.execute("INSERT INTO conversation_search(rowid, run_id, terms) VALUES (?, ?, ?)",
                                  (row["ordinal"], run_id, " ".join(_search_terms(summary))))
 
-    def save_team_task(self, task: dict[str, Any]) -> None:
+    def save_subagent_task(self, task: dict[str, Any]) -> None:
         with self._connection:
             self._connection.execute(
-                "INSERT INTO coordinator_team_tasks(id, session_id, payload_json, updated_at) VALUES (?, ?, ?, ?) "
+                "INSERT INTO agent_subagent_tasks(id, session_id, payload_json, updated_at) VALUES (?, ?, ?, ?) "
                 "ON CONFLICT(id) DO UPDATE SET payload_json = excluded.payload_json, updated_at = excluded.updated_at",
                 (task["id"], task["sessionId"], _json(task), task["updatedAt"]),
             )
 
-    def team_tasks(self) -> list[dict[str, Any]]:
-        return [json.loads(row["payload_json"]) for row in self._connection.execute(
-            "SELECT payload_json FROM coordinator_team_tasks ORDER BY updated_at, id"
+    def subagent_tasks(self) -> list[dict[str, Any]]:
+        # Read older task records into the new role-free view. The old table is
+        # retained only as a one-way migration source for existing installations.
+        tasks = [json.loads(row["payload_json"]) for row in self._connection.execute(
+            "SELECT payload_json FROM agent_subagent_tasks ORDER BY updated_at, id"
         )]
+        known = {task["id"] for task in tasks}
+        for row in self._connection.execute("SELECT payload_json FROM coordinator_team_tasks ORDER BY updated_at, id"):
+            task = json.loads(row["payload_json"])
+            if task.get("id") in known:
+                continue
+            for field in ("team", "roleId"):
+                task.pop(field, None)
+            tasks.append(task)
+        return tasks
 
     def close(self) -> None:
         self._connection.close()

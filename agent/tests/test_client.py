@@ -346,7 +346,7 @@ class ClientTests(unittest.TestCase):
     def test_package_install_uses_a_validated_structured_operation(self) -> None:
         self.server.response_body["operation"] = "package_install"
         result = self.client.package_install(
-            "staging-web-01", "apt", "nginx", "1.27.0-1", 180
+            "staging-web-01", "auto", "nginx", "1.27.0-1", 180
         )
         self.assertEqual(result.operation, "package_install")
         self.assertEqual(
@@ -355,7 +355,7 @@ class ClientTests(unittest.TestCase):
                 "target_id": "staging-web-01",
                 "operation": "package_install",
                 "parameters": {
-                    "manager": "apt",
+                    "manager": "auto",
                     "package": "nginx",
                     "version": "1.27.0-1",
                     "timeout_seconds": 180,

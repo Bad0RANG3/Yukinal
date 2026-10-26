@@ -193,7 +193,12 @@ void WatchScheduler::on_event(const nlohmann::json& event, const std::string& no
     if (event.contains("taskId") && event.at("taskId") != entry->second.task_id) return;
     if (type == "agent.tool_result" && event.value("status", std::string()) == "success") {
       const auto name = event.value("toolName", std::string());
-      if (name == "server.info" || name == "server.logs" || name == "server.services" || name == "filesystem.read") {
+      // Any successful read counts as having seen the target, not only the four
+      // tools this list started with; the stage map below covers the rest.
+      if (name == "server.info" || name == "server.logs" || name == "server.services" ||
+          name == "filesystem.read" || name == "filesystem.list" || name == "server.processes" ||
+          name == "server.ports" || name == "docker.ps" || name == "docker.inspect" ||
+          name == "docker.logs" || name == "systemd.inspect" || name == "package.inspect") {
         entry->second.observed = true;
       }
     }
@@ -203,6 +208,13 @@ void WatchScheduler::on_event(const nlohmann::json& event, const std::string& no
   }
   // Only operational metadata crosses this channel. Watch text and approvals never enter chat.
   if (type == "agent.started") activity(id, active, "thinking", now);
+  else if (type == "agent.stage") {
+    // The runtime derives this stage from executed results. The watch strip keeps
+    // its existing three working states, so map instead of widening the contract.
+    const auto stage = event.value("stage", std::string());
+    const auto mapped = stage == "change" ? "running_tool" : "thinking";
+    activity(id, active, mapped, now);
+  }
   else if (type == "agent.waiting_approval") activity(id, active, "waiting_approval", now);
   else if (type == "agent.tool_call" || type == "agent.tool_result") {
     const auto call = event.value("callId", std::string());

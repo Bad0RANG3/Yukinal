@@ -1122,6 +1122,9 @@ constexpr const char* kToolSystemdRestart = "systemd.restart";
 constexpr const char* kToolPackageInspect = "package.inspect";
 constexpr const char* kToolPackageInstall = "package.install";
 constexpr const char* kToolFilesystemRead = "filesystem.read";
+constexpr const char* kToolFilesystemList = "filesystem.list";
+constexpr const char* kToolServerProcesses = "server.processes";
+constexpr const char* kToolServerPorts = "server.ports";
 constexpr const char* kToolFilesystemBackup = "filesystem.backup";
 constexpr const char* kToolFilesystemBackupList = "filesystem.backup.list";
 constexpr const char* kToolFilesystemBackupRetention = "filesystem.backup.retention";
@@ -1932,6 +1935,7 @@ bool host_tool_is_plan_bound_observation(const std::string& tool_name) {
   return is_one_of(tool_name, {kToolServerInfo, kToolServerLogs, kToolServerServices,
                                kToolDockerPs, kToolDockerLogs, kToolDockerInspect,
                                kToolSystemdInspect, kToolPackageInspect, kToolFilesystemRead,
+                               kToolFilesystemList, kToolServerProcesses, kToolServerPorts,
                                kToolFilesystemBackupList, kToolFilesystemBackupRetention});
 }
 
@@ -3322,6 +3326,9 @@ bool ascii_lower_equal(const std::string& left, const std::string& right) {
 
 void validate_ssh_filesystem_action_binding(DesktopDatabase& database,
                                             const FilesystemActionBinding& binding) {
+  // A conversation run has no task or plan; a task-bound run must still match its
+  // task scope and current action step. Everything that protects the target —
+  // remote host, server id, environment, workspace, path policy — applies to both.
   const auto reject = [](const char* message) { return std::runtime_error(message); };
   if (json_text_field(binding.target, "host") != "remote" ||
       json_text_field(binding.target, "serverId") != binding.server_id ||
@@ -3336,9 +3343,13 @@ void validate_ssh_filesystem_action_binding(DesktopDatabase& database,
       }
     }
   }
-  auto task = load_investigation_task(database, binding.task_id);
-  if (!task.has_value()) {
-    throw reject("the durable investigation task was not found");
+  const bool durable = !binding.task_id.empty();
+  std::optional<nlohmann::json> task;
+  if (durable) {
+    task = load_investigation_task(database, binding.task_id);
+    if (!task.has_value()) {
+      throw reject("the durable investigation task was not found");
+    }
   }
   const nlohmann::json* server = nullptr;
   const auto servers = database.list_servers().value("servers", nlohmann::json::array());
@@ -3369,6 +3380,7 @@ void validate_ssh_filesystem_action_binding(DesktopDatabase& database,
       throw reject("the SSH filesystem action target is not attached to that workspace");
     }
   }
+  if (!durable) return;
   if (auto deviation = check_plan_for_tool(database, *task, binding.tool_name, binding.target,
                                            binding.input, binding.plan_id, binding.plan_step_id,
                                            binding.evidence_ids);
@@ -3397,6 +3409,17 @@ void validate_ssh_filesystem_action_binding(DesktopDatabase& database,
 std::string required_host_text(const nlohmann::json& params, const char* key) {
   const auto found = params.find(key);
   if (found == params.end() || !found->is_string()) {
+    throw std::runtime_error("The SSH filesystem backup request is invalid");
+  }
+  return found->get<std::string>();
+}
+
+// An absent or empty value means "no durable task binding" (a conversation call);
+// a present non-string value is still a malformed request.
+std::string optional_host_text(const nlohmann::json& params, const char* key) {
+  const auto found = params.find(key);
+  if (found == params.end() || found->is_null()) return {};
+  if (!found->is_string()) {
     throw std::runtime_error("The SSH filesystem backup request is invalid");
   }
   return found->get<std::string>();
@@ -3529,9 +3552,9 @@ nlohmann::json handle_filesystem_backup_register(DesktopDatabase& database,
   const auto path = required_host_text(params, "path");
   const auto backup_path = required_host_text(params, "backupPath");
   const auto revision = required_host_text(params, "revision");
-  const auto task_id = required_host_text(params, "taskId");
-  const auto plan_id = required_host_text(params, "planId");
-  const auto plan_step_id = required_host_text(params, "planStepId");
+  const auto task_id = optional_host_text(params, "taskId");
+  const auto plan_id = optional_host_text(params, "planId");
+  const auto plan_step_id = optional_host_text(params, "planStepId");
   const auto trace_id = required_host_text(params, "traceId");
   const auto call_id = required_host_text(params, "callId");
   const auto bytes_field = params.find("bytesBackedUp");
@@ -3592,9 +3615,9 @@ nlohmann::json handle_filesystem_backup_restored(DesktopDatabase& database,
   const auto backup_path = required_host_text(params, "backupPath");
   const auto expected_revision = required_host_text(params, "expectedRevision");
   const auto revision = required_host_text(params, "revision");
-  const auto task_id = required_host_text(params, "taskId");
-  const auto plan_id = required_host_text(params, "planId");
-  const auto plan_step_id = required_host_text(params, "planStepId");
+  const auto task_id = optional_host_text(params, "taskId");
+  const auto plan_id = optional_host_text(params, "planId");
+  const auto plan_step_id = optional_host_text(params, "planStepId");
   const auto trace_id = required_host_text(params, "traceId");
   const auto call_id = required_host_text(params, "callId");
   const auto read_bytes = [&params](const char* key) {
@@ -3657,9 +3680,9 @@ nlohmann::json handle_filesystem_backup_deleted(DesktopDatabase& database,
   }
   const auto server_id = required_host_text(params, "serverId");
   const auto revision = required_host_text(params, "revision");
-  const auto task_id = required_host_text(params, "taskId");
-  const auto plan_id = required_host_text(params, "planId");
-  const auto plan_step_id = required_host_text(params, "planStepId");
+  const auto task_id = optional_host_text(params, "taskId");
+  const auto plan_id = optional_host_text(params, "planId");
+  const auto plan_step_id = optional_host_text(params, "planStepId");
   const auto trace_id = required_host_text(params, "traceId");
   const auto call_id = required_host_text(params, "callId");
   const auto bytes_field = params.find("bytesDeleted");
@@ -3739,9 +3762,9 @@ nlohmann::json handle_ssh_filesystem_backup_target(DesktopDatabase& database,
   }
   const auto server_id = required_host_text(params, "serverId");
   const auto path = required_host_text(params, "path");
-  const auto task_id = required_host_text(params, "taskId");
-  const auto plan_id = required_host_text(params, "planId");
-  const auto plan_step_id = required_host_text(params, "planStepId");
+  const auto task_id = optional_host_text(params, "taskId");
+  const auto plan_id = optional_host_text(params, "planId");
+  const auto plan_step_id = optional_host_text(params, "planStepId");
   const nlohmann::json input = {{"path", path}};
   validate_ssh_filesystem_action_binding(
       database,
@@ -3767,9 +3790,9 @@ nlohmann::json handle_ssh_filesystem_restore_target(DesktopDatabase& database,
   const auto path = required_host_text(params, "path");
   const auto backup_path = required_host_text(params, "backupPath");
   const auto expected_revision = required_host_text(params, "expectedRevision");
-  const auto task_id = required_host_text(params, "taskId");
-  const auto plan_id = required_host_text(params, "planId");
-  const auto plan_step_id = required_host_text(params, "planStepId");
+  const auto task_id = optional_host_text(params, "taskId");
+  const auto plan_id = optional_host_text(params, "planId");
+  const auto plan_step_id = optional_host_text(params, "planStepId");
   require_agent_restore_request(path, backup_path, expected_revision);
   const nlohmann::json input = {{"path", path},
                                 {"backupPath", backup_path},
@@ -3809,9 +3832,9 @@ nlohmann::json handle_ssh_filesystem_cleanup_target(DesktopDatabase& database,
     throw std::runtime_error("the SSH filesystem cleanup target request is invalid");
   }
   const auto server_id = required_host_text(params, "serverId");
-  const auto task_id = required_host_text(params, "taskId");
-  const auto plan_id = required_host_text(params, "planId");
-  const auto plan_step_id = required_host_text(params, "planStepId");
+  const auto task_id = optional_host_text(params, "taskId");
+  const auto plan_id = optional_host_text(params, "planId");
+  const auto plan_step_id = optional_host_text(params, "planStepId");
   const auto run_id = required_host_text(params, "runId");
   const auto trace_id = required_host_text(params, "traceId");
   const auto call_id = required_host_text(params, "callId");
@@ -4165,8 +4188,8 @@ std::optional<nlohmann::json> validate_ssh_effectful_action_input(
         !input.at("manager").is_string() || !input.at("package").is_string()) {
       return fail("package.install input is invalid");
     }
-    if (!is_one_of(input.at("manager").get<std::string>(), {"apt", "dnf", "yum"})) {
-      return fail("package manager must be apt, dnf, or yum");
+    if (!is_one_of(input.at("manager").get<std::string>(), {"auto", "apt", "dnf", "yum"})) {
+      return fail("package manager must be auto, apt, dnf, or yum");
     }
     if (!safe_package_ref(input.at("package").get<std::string>())) {
       return fail("package must be a safe reference without shell metacharacters");
@@ -4301,9 +4324,11 @@ nlohmann::json handle_ssh_effectful_action_target(
   const auto target = tool_call.value("target", nlohmann::json::object());
   const auto server_id = json_text_field(target, "serverId");
   const auto task_id = json_text_field(tool_call, "taskId");
-  if (server_id.empty() || task_id.empty()) {
-    return host_tool_failed("durable_plan_required",
-                            "this SSH action requires a durable remote action plan", false,
+  if (server_id.empty()) {
+    // A conversation "wish-style" execution still needs a resolved remote target;
+    // only the durable task/plan binding below is optional.
+    return host_tool_failed("denied_by_policy",
+                            "this SSH action requires a resolved remote server", false,
                             std::nullopt);
   }
   if (json_text_field(target, "host") != "remote" || server_id.rfind("srv_", 0) != 0) {
@@ -4317,11 +4342,20 @@ nlohmann::json handle_ssh_effectful_action_target(
                             "the SSH action requires a valid durable run identity", false,
                             std::nullopt);
   }
-  if (effectful_action_requires_durable_plan(tool_call, nullptr)) {
-    return host_tool_failed("durable_plan_required",
-                            "this SSH action requires a durable task, ChangePlan and action step",
-                            false, nlohmann::json{{"code", "durable_plan_required"}});
+  const auto plan_id = json_text_field(tool_call, "planId");
+  const auto plan_step_id = json_text_field(tool_call, "planStepId");
+  const bool durable = !task_id.empty() && !plan_id.empty() && !plan_step_id.empty();
+  const bool partial_binding =
+      task_id.empty() != plan_id.empty() || task_id.empty() != plan_step_id.empty();
+  if (partial_binding) {
+    return host_tool_failed("invalid_input",
+                            "this SSH action has a partial task/plan/step binding", false,
+                            std::nullopt);
   }
+  // A conversation approval is bound to its exact run, call, target, input and the
+  // single-use host ticket: it is never reusable and carries no task or plan, so it
+  // cannot authorize a durable-task call later. The task/plan checks below are
+  // skipped for that shape, and the target, denylist and ticket checks are not.
   const nlohmann::json* server = nullptr;
   const auto servers = database.list_servers().value("servers", nlohmann::json::array());
   for (const auto& candidate : servers) {
@@ -4353,20 +4387,22 @@ nlohmann::json handle_ssh_effectful_action_target(
           std::nullopt);
     }
   }
-  auto task = load_investigation_task(database, task_id);
-  if (!task.has_value()) {
-    return host_tool_failed("not_found", "the durable investigation task was not found", false,
-                            std::nullopt);
-  }
-  if (json_text_field(*task, "serverId") != server_id) {
-    return host_tool_failed(
-        "denied_by_policy", "the SSH action target does not match the task's registered server",
-        false, std::nullopt);
-  }
-  if (!same_investigation_target(task->value("scope", nlohmann::json::object()), target)) {
-    return host_tool_failed("denied_by_policy",
-                            "the SSH action target does not match the task scope", false,
-                            std::nullopt);
+  if (durable) {
+    auto task = load_investigation_task(database, task_id);
+    if (!task.has_value()) {
+      return host_tool_failed("not_found", "the durable investigation task was not found",
+                              false, std::nullopt);
+    }
+    if (json_text_field(*task, "serverId") != server_id) {
+      return host_tool_failed(
+          "denied_by_policy", "the SSH action target does not match the task's registered server",
+          false, std::nullopt);
+    }
+    if (!same_investigation_target(task->value("scope", nlohmann::json::object()), target)) {
+      return host_tool_failed("denied_by_policy",
+                              "the SSH action target does not match the task scope", false,
+                              std::nullopt);
+    }
   }
   const auto input = tool_call.value("input", nlohmann::json::object());
   // Operator policy: the `server.exec` command blacklist is enforced here, BEFORE
@@ -4401,29 +4437,30 @@ nlohmann::json handle_ssh_effectful_action_target(
       }
     }
   }
-  if (auto violation = task_guardrail_violation(*task, tool_name, input);
-      violation.has_value()) {
-    const auto code = json_text_field(*violation, "code");
-    std::optional<nlohmann::json> detail = std::nullopt;
-    if (!code.empty()) detail = nlohmann::json{{"code", code}};
-    return host_tool_failed("denied_by_policy", json_text_field(*violation, "message"), false,
-                            detail);
-  }
-  const auto binding_field = [&tool_call](const char* key) -> std::optional<nlohmann::json> {
-    const auto found = tool_call.find(key);
-    if (found == tool_call.end() || found->is_null()) return std::nullopt;
-    return *found;
-  };
-  const auto plan_id = json_text_field(tool_call, "planId");
-  const auto plan_step_id = json_text_field(tool_call, "planStepId");
-  if (auto deviation = check_plan_for_tool(
-          database, *task, tool_name, target, input,
-          plan_id.empty() ? std::nullopt : std::optional<std::string>(plan_id),
-          plan_step_id.empty() ? std::nullopt : std::optional<std::string>(plan_step_id),
-          binding_field("evidenceIds"));
-      deviation.has_value()) {
-    return host_tool_failed("plan_deviation", json_text_field(*deviation, "message"), false,
-                            *deviation);
+  if (durable) {
+    const auto task = load_investigation_task(database, task_id);
+    if (auto violation = task_guardrail_violation(*task, tool_name, input);
+        violation.has_value()) {
+      const auto code = json_text_field(*violation, "code");
+      std::optional<nlohmann::json> detail = std::nullopt;
+      if (!code.empty()) detail = nlohmann::json{{"code", code}};
+      return host_tool_failed("denied_by_policy", json_text_field(*violation, "message"), false,
+                              detail);
+    }
+    const auto binding_field = [&tool_call](const char* key) -> std::optional<nlohmann::json> {
+      const auto found = tool_call.find(key);
+      if (found == tool_call.end() || found->is_null()) return std::nullopt;
+      return *found;
+    };
+    if (auto deviation = check_plan_for_tool(
+            database, *task, tool_name, target, input,
+            plan_id.empty() ? std::nullopt : std::optional<std::string>(plan_id),
+            plan_step_id.empty() ? std::nullopt : std::optional<std::string>(plan_step_id),
+            binding_field("evidenceIds"));
+        deviation.has_value()) {
+      return host_tool_failed("plan_deviation", json_text_field(*deviation, "message"), false,
+                              *deviation);
+    }
   }
   if (!supports_ssh_service_target(database, server_id)) {
     return host_tool_failed("unsupported_route",
@@ -4472,10 +4509,9 @@ nlohmann::json handle_ssh_effectful_action_target(
   binding.workspace_id =
       workspace_id.empty() ? std::nullopt : std::optional<std::string>(workspace_id);
   binding.environment = json_text_field(target, "environment");
-  binding.task_id = std::optional<std::string>(task_id);
-  binding.plan_id = plan_id.empty() ? std::nullopt : std::optional<std::string>(plan_id);
-  binding.plan_step_id =
-      plan_step_id.empty() ? std::nullopt : std::optional<std::string>(plan_step_id);
+  binding.task_id = durable ? std::optional<std::string>(task_id) : std::nullopt;
+  binding.plan_id = durable ? std::optional<std::string>(plan_id) : std::nullopt;
+  binding.plan_step_id = durable ? std::optional<std::string>(plan_step_id) : std::nullopt;
   if (tool_call.contains("evidenceIds") && tool_call.at("evidenceIds").is_array()) {
     std::vector<std::string> ids;
     for (const auto& item : tool_call.at("evidenceIds")) {
@@ -6096,10 +6132,27 @@ void persist_investigation_agent_event(DesktopDatabase& database,
   if (!event.is_object()) return;
   const auto type = json_text_field(event, "type");
   if (!is_one_of(type, {"agent.started", "agent.waiting_approval", "agent.completed",
-                       "agent.failed"})) return;
+                       "agent.failed", "agent.stage"})) return;
   const auto task_id = json_text_field(event, "taskId");
   const auto run_id = json_text_field(event, "runId");
   if (task_id.empty() || run_id.empty() || task_id.size() > 256 || run_id.size() > 256) return;
+  if (type == "agent.stage") {
+    // The Agent derives this stage from executed results. It is only ever an
+    // observation of durable task progress; it cannot complete a task or grant
+    // anything. A stage the host does not know is ignored rather than guessed.
+    const auto stage = json_text_field(event, "stage");
+    const auto phase = stage == "evidence" ? std::string("investigating")
+                     : stage == "diagnosis" ? std::string("recovery")
+                     : stage == "plan" ? std::string("decision")
+                     : stage == "change" ? std::string("execution")
+                     : stage == "verify" ? std::string("verification")
+                     : std::string();
+    if (phase.empty()) return;
+    const auto run = database.get_investigation_run(run_id);
+    if (!run.has_value() || json_text_field(*run, "taskId") != task_id) return;
+    (void)database.update_investigation_phase(task_id, run_id, phase, iso8601_now());
+    return;
+  }
   const auto run = database.get_investigation_run(run_id);
   if (!run.has_value() || json_text_field(*run, "taskId") != task_id) return;
 
@@ -8112,7 +8165,7 @@ IpcReply IpcRouter::invoke(const std::string& method, nlohmann::json params) {
 
   if (method == "agent_context_reset" || method == "agent_context_reset_all" ||
       method == "agent_memory_list" || method == "agent_memory_save" || method == "agent_memory_delete" ||
-      method == "agent_run_start" || method == "agent_run_stop" || method == "agent_team_tasks" ||
+      method == "agent_run_start" || method == "agent_run_stop" || method == "agent_subagent_tasks" ||
       method == "agent_approval_respond") {
     return agent_run_command(method, params);
   }
@@ -9531,8 +9584,15 @@ void IpcRouter::configure_sidecar() {
     if (waiting_approval) {
       const bool host_action = is_host_approval_tool_name(
           params.at("approval").value("toolName", std::string()));
+      const bool auto_approved = params.at("approval").value("autoApproved", false);
       try {
-        if (host_action) {
+        if (host_action && auto_approved) {
+          // Auto-approval mode: the run asked for changes without a human. The
+          // host still mints its exact one-shot ticket, bound to run, call,
+          // target, input and any plan step, and marks it approved. A malformed
+          // event mints nothing, so the action later fails closed.
+          approvals_.record_auto_approved_event(params, now_epoch_seconds());
+        } else if (host_action) {
           approvals_.record_waiting_event(params, now_epoch_seconds());
         } else {
           // Every other approval is sidecar-owned: the host holds no admission
@@ -9660,7 +9720,7 @@ IpcReply IpcRouter::agent_run_command(const std::string& method,
   static const std::map<std::string, std::string> kMethods = {
       {"agent_run_start", "agent.run.start"},
       {"agent_run_stop", "agent.run.stop"},
-      {"agent_team_tasks", "agent.teams.list"},
+      {"agent_subagent_tasks", "agent.subagents.list"},
       {"agent_approval_respond", "agent.approval.respond"},
       {"agent_context_reset", "agent.context.reset"},
       {"agent_context_reset_all", "agent.context.resetAll"},
@@ -9676,7 +9736,7 @@ IpcReply IpcRouter::agent_run_command(const std::string& method,
     return failure("INVALID_PARAMS", method + " requires an object payload");
   }
   auto forwarded_params = params;
-  if ((method == "agent_run_start" || method == "agent_context_reset" || method == "agent_team_tasks") &&
+  if ((method == "agent_run_start" || method == "agent_context_reset" || method == "agent_subagent_tasks") &&
       params.contains("sessionId") && params["sessionId"].is_string() && database_) {
     try {
       const auto session = database_->get_chat_session(params["sessionId"].get<std::string>()).at("session");
@@ -10580,7 +10640,7 @@ nlohmann::json IpcRouter::default_host_tool_run(
   if (tool_name == kToolPackageInspect) {
     if (!only_fields(input, {"manager", "package"}, {"manager", "package"}) ||
         !input.at("manager").is_string() || !input.at("package").is_string() ||
-        !is_one_of(input.at("manager").get<std::string>(), {"apt", "dnf", "yum"}) ||
+        !is_one_of(input.at("manager").get<std::string>(), {"auto", "apt", "dnf", "yum"}) ||
         !safe_package_ref(input.at("package").get<std::string>())) {
       throw std::runtime_error("package.inspect input is invalid");
     }
@@ -10599,6 +10659,44 @@ nlohmann::json IpcRouter::default_host_tool_run(
     }
     return normalize("package.inspect.normalize", raw.stdout_text,
                      {{"manager", manager}, {"package", package}});
+  }
+
+  if (tool_name == kToolServerProcesses || tool_name == kToolServerPorts) {
+    if (!input.is_object() || !input.empty()) {
+      throw std::runtime_error(std::string(tool_name) + " accepts an empty object");
+    }
+    SshCommandResult raw;
+    try {
+      raw = tool_name == kToolServerProcesses
+                ? run_process_inventory(*database_, *credentials_, server_id, 20)
+                : run_port_inventory(*database_, *credentials_, server_id, 20);
+    } catch (const std::exception& error) {
+      throw HostToolTransportError(error.what());
+    }
+    if (!raw.error_code.empty()) {
+      throw HostToolTransportError(raw.error_message.empty() ? raw.error_code
+                                                             : raw.error_message);
+    }
+    return normalize(tool_name == kToolServerProcesses ? "server.processes.normalize"
+                                                       : "server.ports.normalize",
+                     raw.stdout_text, nlohmann::json::object());
+  }
+
+  if (tool_name == kToolFilesystemList) {
+    if (!only_fields(input, {"path"}, {"path"}) || !input.at("path").is_string()) {
+      throw std::runtime_error("filesystem.list input is invalid");
+    }
+    const auto path = input.at("path").get<std::string>();
+    // The desktop target resolver applies the Agent credential blocklist before
+    // the SSH service starts; this is only the shape check it expects.
+    if (!valid_remote_query_path(path)) {
+      throw std::runtime_error("filesystem.list path is invalid");
+    }
+    try {
+      return run_remote_file_list(*database_, *credentials_, server_id, path, 20);
+    } catch (const std::exception& error) {
+      throw HostToolTransportError(error.what());
+    }
   }
 
   if (tool_name == kToolFilesystemRead) {
@@ -11050,6 +11148,7 @@ nlohmann::json IpcRouter::handle_host_request(
     }
   }
   if (method == "host.ssh.service_target" || method == "host.ssh.filesystem_read_target" ||
+      method == "host.ssh.filesystem_list_target" ||
       method == "host.ssh.filesystem_write_target" ||
       method == "host.ssh.filesystem_edit_target" ||
       method == "host.ssh.filesystem_backup_target" ||
@@ -11072,6 +11171,9 @@ nlohmann::json IpcRouter::handle_host_request(
       }
       if (method == "host.ssh.filesystem_read_target") {
         return resolve_ssh_service_filesystem_read_target(*database_, *credentials_, params);
+      }
+      if (method == "host.ssh.filesystem_list_target") {
+        return resolve_ssh_service_filesystem_list_target(*database_, *credentials_, params);
       }
       if (method == "host.ssh.filesystem_write_target") {
         return resolve_ssh_service_filesystem_write_target(*database_, *credentials_, params);

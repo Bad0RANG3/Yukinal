@@ -148,6 +148,53 @@ class SshServiceClient:
         """List services through the fixed, read-only inventory operation."""
         return self._execute_operation(target_id, "service_inventory", {}, timeout_seconds)
 
+    def process_inventory(self, target_id: str, timeout_seconds: int = 10) -> SshOperationResult:
+        """Read the fixed, read-only process table; no caller-supplied flags."""
+        return self._execute_operation(target_id, "process_inventory", {}, timeout_seconds)
+
+    def port_inventory(self, target_id: str, timeout_seconds: int = 10) -> SshOperationResult:
+        """Read the fixed, read-only listening-socket table."""
+        return self._execute_operation(target_id, "port_inventory", {}, timeout_seconds)
+
+    def sftp_list(
+        self, target_id: str, path: str, timeout_seconds: int = 10
+    ) -> list[dict[str, Any]]:
+        """List one remote directory level without following symlinks."""
+        self._validate_sftp_path(path)
+        if not path.startswith("/") or "\r" in path or "\n" in path:
+            raise ValueError("path must be an absolute SFTP path without line breaks")
+        result = self._execute_operation(
+            target_id, "sftp_list", {"path": path}, timeout_seconds
+        )
+        try:
+            entries = json.loads(result.stdout)
+        except json.JSONDecodeError:
+            raise SshServiceTransportError(
+                "invalid_response", "SSH service returned an invalid directory listing"
+            ) from None
+        if not isinstance(entries, list) or len(entries) > 4096:
+            raise SshServiceTransportError(
+                "invalid_response", "SSH service returned an invalid directory listing"
+            )
+        listing: list[dict[str, Any]] = []
+        for entry in entries:
+            if (
+                not isinstance(entry, dict)
+                or set(entry) != {"name", "file_type", "size"}
+                or not isinstance(entry["name"], str)
+                or not entry["name"]
+                or len(entry["name"]) > 4096
+                or entry["file_type"] not in {"file", "directory", "symlink", "other"}
+                or isinstance(entry["size"], bool)
+                or not isinstance(entry["size"], int)
+                or entry["size"] < 0
+            ):
+                raise SshServiceTransportError(
+                    "invalid_response", "SSH service returned an invalid directory entry"
+                )
+            listing.append({"name": entry["name"], "type": entry["file_type"], "size": entry["size"]})
+        return listing
+
     def docker_ps(
         self, target_id: str, include_all_containers: bool = False, timeout_seconds: int = 10
     ) -> SshOperationResult:
@@ -235,8 +282,8 @@ class SshServiceClient:
     def package_inspect(
         self, target_id: str, manager: str, package: str, timeout_seconds: int = 10
     ) -> SshOperationResult:
-        if manager not in ("apt", "dnf", "yum"):
-            raise ValueError("manager must be apt, dnf, or yum")
+        if manager not in ("auto", "apt", "dnf", "yum"):
+            raise ValueError("manager must be auto, apt, dnf, or yum")
         if not isinstance(package, str) or not _PACKAGE_REF.fullmatch(package):
             raise ValueError("package must be a safe package reference")
         return self._execute_operation(
@@ -252,8 +299,8 @@ class SshServiceClient:
         timeout_seconds: int = 180,
     ) -> SshOperationResult:
         """Install one validated apt, dnf, or yum package through the structured operation."""
-        if manager not in ("apt", "dnf", "yum"):
-            raise ValueError("manager must be apt, dnf, or yum")
+        if manager not in ("auto", "apt", "dnf", "yum"):
+            raise ValueError("manager must be auto, apt, dnf, or yum")
         if not isinstance(package, str) or not _PACKAGE_REF.fullmatch(package):
             raise ValueError("package must be a safe package reference")
         if version is not None and (

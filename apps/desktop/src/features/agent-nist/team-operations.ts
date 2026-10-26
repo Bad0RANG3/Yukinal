@@ -1,5 +1,5 @@
 import type { AgentTokenUsage } from "@yukinal/shared";
-import type { AgentTeam } from "./agent-nist.js";
+import type { AgentTeam } from "./agent-teams.js";
 
 export const TEAM_HEARTBEAT_MS = 30_000;
 export const TEAM_WORK: Record<AgentTeam, { job: string; output: string }> = {

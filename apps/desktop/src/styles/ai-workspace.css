@@ -1,9 +1,9 @@
-/* AI owns the center. Both sidebars use the same inner and outer inset; the
-   center fills its track so a second, viewport-dependent gutter cannot build up.
-   Keep enough usable sidebar width for controls without squeezing their labels. */
+/* AI owns the center. Keep navigation compact and give the right inspector its
+   own wider track for forms such as provider setup; the center fills the rest. */
 .app-shell.ai-first,
 .native-workspace .app-shell.ai-first {
-  --workspace-side-width: clamp(280px, calc(100px + 11vw), 360px);
+  --workspace-nav-width: clamp(280px, calc(100px + 11vw), 360px);
+  --workspace-inspector-width: clamp(340px, calc(150px + 14vw), 400px);
   --workspace-side-inset: var(--space-group);
   --ai-frame-width: 100%;
   --ai-reading-width: 760px;
@@ -11,7 +11,7 @@
   --ai-chat-line-height: 1.6;
   --ai-content-inset: var(--space-group);
   display: grid;
-  grid-template-columns: var(--workspace-side-width) minmax(0, 1fr) var(--workspace-side-width);
+  grid-template-columns: var(--workspace-nav-width) minmax(0, 1fr) var(--workspace-inspector-width);
   gap: 0;
   padding: 0;
   min-width: 0;

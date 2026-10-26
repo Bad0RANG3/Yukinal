@@ -77,5 +77,5 @@ export function ConversationWatchStatus({ onOpen }: { onOpen?: () => void }) {
   const serverId = useWorkspaceStore((state) => state.selectedServerId);
   const schedules = query.data?.schedules.filter((schedule) => serverId && query.data.tasks.find((task) => task.id === schedule.taskId)?.scope.serverId === serverId && schedule.status !== "revoked") ?? [];
   if (!schedules.length) return null;
-  return <button type="button" className="conversation-watch-status" onClick={() => { useTeamRuntimeStore.getState().setPanelView("watch"); if (onOpen) onOpen(); else useWorkspaceStore.getState().setPrimary("agents"); }} title="在团队面板查看已登记的值守计划"><Icon name="activity" size="sm" /><span>值守计划 · {schedules.length}</span><span>{schedules.filter((schedule) => schedule.status === "active").length} 已启用</span><Icon name="chevronRight" size="xs" /></button>;
+  return <button type="button" className="conversation-watch-status" onClick={() => { useTeamRuntimeStore.getState().setPanelView("watch"); if (onOpen) onOpen(); else useWorkspaceStore.getState().setPrimary("agents"); }} title="在运维 Agent 页面查看已登记的值守计划"><Icon name="activity" size="sm" /><span>值守计划 · {schedules.length}</span><span>{schedules.filter((schedule) => schedule.status === "active").length} 已启用</span><Icon name="chevronRight" size="xs" /></button>;
 }

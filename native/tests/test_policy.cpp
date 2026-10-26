@@ -83,6 +83,32 @@ YUKINAL_TEST(policy_accepts_service_inventory_without_parameters) {
   YUKINAL_REQUIRE(error.code == "invalid_parameters");
 }
 
+YUKINAL_TEST(policy_accepts_read_only_process_and_port_inventory) {
+  for (const auto* operation : {"process_inventory", "port_inventory"}) {
+    ExecRequest request;
+    ApiError error;
+    const bool accepted = parse_exec_request(
+        {{"target_id", "staging-web-01"},
+         {"operation", operation},
+         {"parameters", json::object()},
+         {"timeout_seconds", 8}},
+        &request, &error);
+    YUKINAL_REQUIRE(accepted);
+    YUKINAL_REQUIRE(request.operation == operation);
+    YUKINAL_REQUIRE(request.timeout_seconds == 8);
+
+    // These probes are fixed strings: any supplied parameter is a contract error.
+    const bool parameter_accepted = parse_exec_request(
+        {{"target_id", "staging-web-01"},
+         {"operation", operation},
+         {"parameters", {{"command", "id"}}},
+         {"timeout_seconds", 8}},
+        &request, &error);
+    YUKINAL_REQUIRE(!parameter_accepted);
+    YUKINAL_REQUIRE(error.code == "invalid_parameters");
+  }
+}
+
 YUKINAL_TEST(policy_accepts_disk_usage_without_parameters) {
   ExecRequest request;
   ApiError error;
@@ -244,11 +270,11 @@ YUKINAL_TEST(policy_bounds_systemd_and_package_inspection) {
   const bool package_accepted = parse_exec_request(
       {{"target_id", "staging-web-01"},
        {"operation", "package_inspect"},
-       {"parameters", {{"manager", "apt"}, {"package", "python3.12-dev"}}},
+       {"parameters", {{"manager", "auto"}, {"package", "python3.12-dev"}}},
        {"timeout_seconds", 10}},
       &request, &error);
   YUKINAL_REQUIRE(package_accepted);
-  YUKINAL_REQUIRE(request.package_manager == "apt");
+  YUKINAL_REQUIRE(request.package_manager == "auto");
   YUKINAL_REQUIRE(request.package == "python3.12-dev");
 
   const bool unsupported_manager_accepted = parse_exec_request(
@@ -314,14 +340,14 @@ YUKINAL_TEST(policy_bounds_effectful_docker_systemd_and_package_operations) {
   const bool package_install_accepted = parse_exec_request(
       {{"target_id", "staging-web-01"},
        {"operation", "package_install"},
-       {"parameters", {{"manager", "apt"},
+       {"parameters", {{"manager", "auto"},
                         {"package", "nginx"},
                         {"version", "1.27.0"},
                         {"timeout_seconds", 180}}},
        {"timeout_seconds", 180}},
       &request, &error);
   YUKINAL_REQUIRE(package_install_accepted);
-  YUKINAL_REQUIRE(request.package_manager == "apt");
+  YUKINAL_REQUIRE(request.package_manager == "auto");
   YUKINAL_REQUIRE(request.package == "nginx");
   YUKINAL_REQUIRE(request.package_version == "1.27.0");
   YUKINAL_REQUIRE(request.timeout_seconds == 180);

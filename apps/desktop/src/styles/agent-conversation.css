@@ -310,3 +310,7 @@
 .agent-widget-block { min-width: 0; }
 .conversation-widget-disclosure { max-height: min(320px, 40svh); overflow: auto; }
 .conversation-widget-disclosure:focus-visible { outline: var(--focus-width) solid var(--focus-line); outline-offset: calc(-1 * var(--focus-width)); }
+
+/* 「结果未知」不是失败的另一种说法：它说的是远端可能已经生效。用警示色而不是错误色，
+   并在文案里要求先读取实际状态，避免用户照着「失败」去重试一次已经成功的变更。 */
+.tool-execution-notice { margin: 6px 0 0; padding: 6px 8px; border-left: 3px solid var(--warn-line); background: var(--warn-surface); color: var(--text); font-size: 12px; line-height: 1.6; }

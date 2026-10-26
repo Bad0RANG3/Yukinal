@@ -4,7 +4,7 @@
  * These types are the vocabulary between: React <-> agent-sdk <-> apps/agent <-> LLM.
  */
 
-import type { AGENT_RUN_STATES, TOOL_RESULT_STATUSES } from "./enums.js";
+import type { AGENT_RUN_STATES, AgentStage, TOOL_RESULT_STATUSES } from "./enums.js";
 import type { AgentPermissionMode, AgentRunMode, PermissionApprovalSource, PermissionMode, RiskLevel } from "./risk.js";
 import type { ToolError, ToolOrigin, ToolTarget } from "./tool.js";
 import type { TaskBudget } from "./investigation.js";
@@ -292,21 +292,17 @@ export type AgentPromptPart =
 export const AGENT_REASONING_EFFORTS = ["none", "low", "high", "max"] as const;
 export type AgentReasoningEffort = (typeof AGENT_REASONING_EFFORTS)[number];
 
-/** A foreground turn owns this frozen roster; credentials stay in the host. */
-export interface AgentCoordinationConfig {
+/** A role-free background task launched by the single foreground Agent. */
+export interface AgentSubagentConfig {
   version: 1;
-  roles: Array<{ id: string; team: "blue" | "red" | "purple" | "white" | "yellow" | "orange" | "green"; label: string; systemPrompt: string; providerId?: string; model?: string }>;
   servers: Array<{ id: string; name: string; environment: ToolTarget["environment"] }>;
-  preferredRoleId?: string;
 }
 
-export interface AgentTeamTask {
+export interface AgentSubagentTask {
   id: string;
   runId: string;
   sessionId: string;
   parentRunId: string;
-  roleId: string;
-  team: AgentCoordinationConfig["roles"][number]["team"];
   title: string;
   serverId: string | null;
   access: "read" | "write";
@@ -375,7 +371,7 @@ export interface AgentRunRequest {
   /** Omitted uses the provider default; explicit values require adapter support. */
   reasoningEffort?: AgentReasoningEffort;
   toolAccess?: "none";
-  coordination?: AgentCoordinationConfig;
+  subagents?: AgentSubagentConfig;
 }
 
 /** `agent.run.stop` params: stop decouples from the run only by its id. */
@@ -447,6 +443,8 @@ export interface ApprovalRequest {
    * older sidecar; the UI then keeps offering the button, as it always did.
    */
   sessionGrantable?: boolean;
+  /** Auto mode already accepted this call; it is a record, not a pending decision. */
+  autoApproved?: boolean;
 }
 
 /**
@@ -481,8 +479,9 @@ export interface ApprovalResponse {
  * apart is not answering the question people actually ask of it (ADR 0014).
  */
 export type AgentStreamEvent =
-  | { type: "agent.team_task"; runId: string; task: AgentTeamTask; at: string }
+  | { type: "agent.subagent_task"; runId: string; task: AgentSubagentTask; at: string }
   | { type: "agent.started"; runId: string; at: string }
+  | { type: "agent.stage"; runId: string; taskId?: string; stage: AgentStage; previous: AgentStage; at: string }
   | { type: "agent.thinking"; runId: string; textDelta?: string; at: string }
   | { type: "agent.text"; runId: string; textDelta: string; at: string }
   | { type: "agent.usage"; runId: string; usage: AgentTokenUsage; at: string }

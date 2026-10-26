@@ -2629,11 +2629,42 @@ ExecResult package_inspect(const TargetConfig& target, const std::string& manage
     return result;
   }
   const std::string package_arg = "'" + package + "'";
-  const std::string command = manager == "apt"
-      ? "if command -v apt-get >/dev/null 2>&1 && command -v dpkg-query >/dev/null 2>&1; then dpkg-query --showformat='${Status}\\t${Version}\\n' --show -- " +
-            package_arg + " 2>/dev/null || printf '%s\\n' absent; else printf '%s\\n' unsupported; fi"
-      : "if command -v " + manager + " >/dev/null 2>&1 && command -v rpm >/dev/null 2>&1; then rpm --queryformat='installed\\t%{VERSION}-%{RELEASE}\\n' --query -- " +
-            package_arg + " 2>/dev/null || printf '%s\\n' absent; else printf '%s\\n' unsupported; fi";
+  // `rpm -q` prints "package X is not installed" on STDOUT (not stderr) and exits
+  // non-zero, and `dpkg-query` may print several records. Publishing the raw
+  // query would hand the parser a second line that is not our status, so capture
+  // it, trust the exit status, and print only our own one-line verdict.
+  const std::string apt_query =
+      "out=$(dpkg-query --showformat='${Status}\\t${Version}\\n' --show -- " + package_arg +
+      " 2>/dev/null); status=$?; if [ $status -eq 0 ] && [ -n \"$out\" ]; then "
+      "printf '%s\\n' \"$out\"; else printf '%s\\n' absent; fi";
+  const std::string rpm_query =
+      "out=$(rpm --queryformat='installed\\t%{VERSION}-%{RELEASE}\\n' --query -- " +
+      package_arg + " 2>/dev/null); status=$?; if [ $status -eq 0 ] && [ -n \"$out\" ]; then "
+      "printf '%s\\n' \"$out\"; else printf '%s\\n' absent; fi";
+  if (manager != "auto") {
+    const std::string command = manager == "apt"
+        ? "if command -v apt-get >/dev/null 2>&1 && command -v dpkg-query >/dev/null 2>&1; then " +
+              apt_query + "; else printf '%s\\n' unsupported; fi"
+        : "if command -v " + manager + " >/dev/null 2>&1 && command -v rpm >/dev/null 2>&1; then " +
+              rpm_query + "; else printf '%s\\n' unsupported; fi";
+    return run_ssh_command(target, command, timeout_seconds);
+  }
+  const std::string detect_manager =
+      "if command -v apt-get >/dev/null 2>&1 && command -v dpkg-query >/dev/null 2>&1; then manager=apt; "
+      "elif command -v dnf >/dev/null 2>&1 && command -v rpm >/dev/null 2>&1; then manager=dnf; "
+      "elif command -v yum >/dev/null 2>&1 && command -v rpm >/dev/null 2>&1; then manager=yum; "
+      "else manager=unsupported; fi; ";
+  const std::string command = "manager=''; " + detect_manager +
+      "case \"$manager\" in "
+      "apt) printf '__YUKINAL_MANAGER__=apt\\n'; "
+      "if command -v apt-get >/dev/null 2>&1 && command -v dpkg-query >/dev/null 2>&1; then " +
+      apt_query + "; else printf '%s\\n' unsupported; fi ;; "
+      "dnf|yum) printf '__YUKINAL_MANAGER__=%s\\n' \"$manager\"; "
+      "if command -v \"$manager\" >/dev/null 2>&1 && command -v rpm >/dev/null 2>&1; then " +
+      rpm_query + "; else printf '%s\\n' unsupported; fi ;; "
+      // The marker already carries the verdict; a second status line would make
+      // the parser report a malformed result instead of "no package manager".
+      "*) printf '__YUKINAL_MANAGER__=unsupported\\n' ;; esac";
   return run_ssh_command(target, command, timeout_seconds);
 }
 
@@ -2674,15 +2705,32 @@ ExecResult package_install(const TargetConfig& target, const std::string& manage
     fail(&result, "invalid_parameters", "The package install parameters are invalid");
     return result;
   }
-  std::string specification = package;
-  if (!version.empty()) specification += manager == "apt" ? "=" + version : "-" + version;
-  const std::string package_arg = "'" + specification + "'";
-  const std::string command = manager == "apt"
-      ? "DEBIAN_FRONTEND=noninteractive apt-get install --yes --no-install-recommends --no-remove -- " +
-            package_arg + " 2>&1"
-      : (manager == "dnf"
-             ? "dnf install --assumeyes --setopt=install_weak_deps=False -- " + package_arg + " 2>&1"
-             : "yum install --assumeyes -- " + package_arg + " 2>&1");
+  if (manager != "auto") {
+    std::string specification = package;
+    if (!version.empty()) specification += manager == "apt" ? "=" + version : "-" + version;
+    const std::string package_arg = "'" + specification + "'";
+    const std::string command = manager == "apt"
+        ? "DEBIAN_FRONTEND=noninteractive apt-get install --yes --no-install-recommends --no-remove -- " +
+              package_arg + " 2>&1"
+        : (manager == "dnf"
+               ? "dnf install --assumeyes --setopt=install_weak_deps=False -- " + package_arg + " 2>&1"
+               : "yum install --assumeyes -- " + package_arg + " 2>&1");
+    return run_ssh_command_with_timeout_limit(target, command, timeout_seconds, 600);
+  }
+  const std::string detect_manager =
+      "if command -v apt-get >/dev/null 2>&1 && command -v dpkg-query >/dev/null 2>&1; then manager=apt; "
+      "elif command -v dnf >/dev/null 2>&1 && command -v rpm >/dev/null 2>&1; then manager=dnf; "
+      "elif command -v yum >/dev/null 2>&1 && command -v rpm >/dev/null 2>&1; then manager=yum; "
+      "else manager=unsupported; fi; ";
+  const std::string command = "manager=''; package='" + package + "'; version='" + version + "'; " +
+      detect_manager +
+      "if [ -n \"$version\" ]; then if [ \"$manager\" = apt ]; then specification=\"$package=$version\"; "
+      "else specification=\"$package-$version\"; fi; else specification=$package; fi; "
+      "case \"$manager\" in "
+      "apt) DEBIAN_FRONTEND=noninteractive apt-get install --yes --no-install-recommends --no-remove -- \"$specification\" 2>&1 ;; "
+      "dnf) dnf install --assumeyes --setopt=install_weak_deps=False -- \"$specification\" 2>&1 ;; "
+      "yum) yum install --assumeyes -- \"$specification\" 2>&1 ;; "
+      "*) printf '%s\\n' 'No supported package manager is available on the target' >&2; exit 127 ;; esac";
   return run_ssh_command_with_timeout_limit(target, command, timeout_seconds, 600);
 }
 
@@ -2734,6 +2782,50 @@ ExecResult service_inventory(const TargetConfig& target, int timeout_seconds) {
       bounded_inventory_source_command(
           "docker ps -a --format '{{.Names}}\\t{{.State}}\\t{{.Status}}\\t{{.Image}}' 2>/dev/null",
           "docker", 200) +
+      "; if [ $? -eq 0 ]; then exit 0; fi; fi; "
+      "printf '__YUKINAL_SOURCE__=unavailable\\n'";
+  return run_ssh_command(target, command, timeout_seconds);
+}
+
+ExecResult process_inventory(const TargetConfig& target, int timeout_seconds) {
+  if (timeout_seconds < 1 || timeout_seconds > 30) {
+    ExecResult result;
+    fail(&result, "invalid_parameters", "The process inventory parameters are invalid");
+    return result;
+  }
+  // Same fixed probe on every call: the model selects no field, host, or flag.
+  // A minimal target without GNU `ps` falls back to `busybox ps`, and a target
+  // with neither reports `unavailable` instead of an empty, misleading table.
+  const std::string command =
+      "if command -v ps >/dev/null 2>&1; then " +
+      bounded_inventory_source_command(
+          "ps -eo pid=,ppid=,user=,pcpu=,pmem=,stat=,etimes=,comm= --sort=-pcpu 2>/dev/null",
+          "ps", 256) +
+      "; if [ $? -eq 0 ]; then exit 0; fi; fi; "
+      "if command -v busybox >/dev/null 2>&1; then " +
+      bounded_inventory_source_command(
+          "busybox ps -o pid,ppid,user,pcpu,pmem,stat,etimes,comm 2>/dev/null",
+          "busybox", 256) +
+      "; if [ $? -eq 0 ]; then exit 0; fi; fi; "
+      "printf '__YUKINAL_SOURCE__=unavailable\\n'";
+  return run_ssh_command(target, command, timeout_seconds);
+}
+
+ExecResult port_inventory(const TargetConfig& target, int timeout_seconds) {
+  if (timeout_seconds < 1 || timeout_seconds > 30) {
+    ExecResult result;
+    fail(&result, "invalid_parameters", "The port inventory parameters are invalid");
+    return result;
+  }
+  // Listening sockets only. `-p` needs privilege and is unavailable to a normal
+  // user; the process column is then absent and the caller says so rather than
+  // guessing an owner.
+  const std::string command =
+      "if command -v ss >/dev/null 2>&1; then " +
+      bounded_inventory_source_command("ss -H -lntup 2>/dev/null", "ss", 256) +
+      "; if [ $? -eq 0 ]; then exit 0; fi; fi; "
+      "if command -v netstat >/dev/null 2>&1; then " +
+      bounded_inventory_source_command("netstat -lntup 2>/dev/null", "netstat", 256) +
       "; if [ $? -eq 0 ]; then exit 0; fi; fi; "
       "printf '__YUKINAL_SOURCE__=unavailable\\n'";
   return run_ssh_command(target, command, timeout_seconds);
@@ -3985,6 +4077,12 @@ ExecResult run_operation(const TargetConfig& target, const ExecRequest& request)
   }
   if (request.operation == "service_inventory") {
     return service_inventory(target, request.timeout_seconds);
+  }
+  if (request.operation == "process_inventory") {
+    return process_inventory(target, request.timeout_seconds);
+  }
+  if (request.operation == "port_inventory") {
+    return port_inventory(target, request.timeout_seconds);
   }
   if (request.operation == "server_logs") {
     return server_logs(target, request.since_seconds, request.unit, request.timeout_seconds);
