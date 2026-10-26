@@ -1,6 +1,6 @@
 {
   "name": "@yukinal/desktop",
-  "version": "2.0.0-preview.2",
+  "version": "2.0.1",
   "private": true,
   "type": "module",
   "description": "React desktop UI for the C++ host",
@@ -18,7 +18,7 @@
     "@xterm/xterm": "^5.5.0",
     "react": "^19.2.8",
     "react-dom": "^19.2.8",
-    "zod": "^4.5.4",
+    "zod": "^4.6.6",
     "zustand": "^5.0.15"
   },
   "devDependencies": {
@@ -27,7 +27,7 @@
     "@vitejs/plugin-react": "^6.1.1",
     "tsx": "^4.23.13",
     "typescript": "^7.0.2",
-    "vite": "^8.2.2"
+    "vite": "^8.2.4"
   },
   "license": "MIT"
 }

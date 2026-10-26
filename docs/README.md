@@ -1,37 +1,38 @@
 # Yukinal 文档
 
-Yukinal 的目标是让 AI 借助已配置的工具与受控 SSH 能力完成服务器任务，让运维工程师在工作区观察和接管，并能直接拖放、预览和传输文件。文档按“产品目标 → 施工交接 → 安全边界 → 交付证据”的顺序组织。
+当前版本 `2.0.1`。负责人于 2026-10-27 确认 Agent 能力验收合格，授权正式发行。界面采用四按钮切换主工具、Agent 浮栏继续对话。
 
 ## 从哪里开始
 
-| 你要做什么 | 阅读 |
+| 目的 | 阅读 |
 | --- | --- |
-| 了解目标用户、核心场景和功能取舍 | [产品定义](./product.md) |
-| 交给 agent 施工或逐项验收 | [目标架构与施工交接](./architecture-and-build-plan.md) |
-| 统一 Windows 窗体、主体与状态功能的方向 | [桌面窗口方向](./desktop-window-direction.md) |
-| 查看工作页顶部标签栏的结构与取舍 | [工作页标签栏设计说明](./workspace-tabs-spec.md) |
-| 规划 C++ 接管与删除 Rust/Tauri | [C++ 接管与 Rust 移除计划](./rust-removal-plan.md) |
-| 接手 C++ 桌面宿主实现细节 | [C++ 桌面宿主迁移](./native-desktop-host.md) |
-| 按命令级清单接手桌面宿主重写 | [C++ 桌面施工交接](./cpp-desktop-handoff.md) |
-| 接手剩余目标（命令/RPC/验收清单） | [剩余目标交接手册](./handover.md) |
-| 复现构建测试并接手真实环境验收 | [SSH + Agent 验收交接手册](./acceptance-handoff.md) |
-| 查看 C++/Python 重写当前阶段与接口 | [重写方案](./rewrite-cpp-python.md) |
-| 判断 Agent 能做什么、何时需要批准 | [安全与数据边界](./security.md) |
-| 安装、开发、测试或准备发布 | [交付与发布](./release.md) |
-| 调整圆角、材质、控件与后续主题皮肤 | [界面表达与皮肤约定](./ui-design-system.md) |
-| 了解长任务循环、推理与上下文预算 | [AI 运行与对话体验](./ai-runtime-performance.md) |
-| 为对话输出二维和三维图形 | [AI 绘图协议](./ai-visual-protocol.md) |
-| 扩展服务器资源与安全检测 | [服务器检测工具包](./server-toolkit.md) |
-| 了解运维 Agent 的方法、权限与内置场景手册 | [运维 Agent 的处理流程](./ops-agent-procedure.md) |
-| 看审计发现了什么、怎么修的、还剩什么 | [第五轮审计与修复](./audit-round5.md) |
-| 查看版本记录 | [变更记录](./changelog.md) |
+| 了解和启动项目 | [中文 README](../README.zh-CN.md)、[English README](../README.md) |
+| 本版变化与安装包状态 | [2.0.1 发行说明](./releases/2.0.1.md)、[交付与发布](./release.md) |
+| 四工具、浮栏、状态和键盘行为 | [工作区交互说明](./workspace-tabs-spec.md) |
+| 布局与控件 | [桌面窗口与工作区](./desktop-window-direction.md)、[界面表达与皮肤约定](./ui-design-system.md) |
+| 用户路径与功能范围 | [产品定义](./product.md) |
+| Agent 权限与方法 | [安全与数据边界](./security.md)、[运维 Agent 处理流程](./ops-agent-procedure.md) |
+| 长任务、推理和上下文 | [AI 运行与对话体验](./ai-runtime-performance.md) |
+| 图形与检测扩展 | [AI 绘图协议](./ai-visual-protocol.md)、[服务器检测工具包](./server-toolkit.md) |
+| 审计与版本 | [第五轮审计](./audit-round5.md)、[变更记录](./changelog.md) |
 
-第一次接触项目可先读仓库 [README](../README.md)；参与开发再读 [贡献指南](../CONTRIBUTING.md)。
+## 实现与历史交接
+
+旧日期的“当前”记录按其时间和源码理解；发行状态以[交付与发布](./release.md)为准。
+
+| 主题 | 阅读 |
+| --- | --- |
+| C++ 宿主与重写 | [原生宿主](./native-desktop-host.md)、[重写方案](./rewrite-cpp-python.md) |
+| 施工与命令清单 | [目标架构](./architecture-and-build-plan.md)、[剩余目标交接](./handover.md)、[桌面施工交接](./cpp-desktop-handoff.md) |
+| 迁移历史 | [C++ 接管与 Rust 移除](./rust-removal-plan.md) |
+| 早期验收 | [SSH + Agent 验收交接](./acceptance-handoff.md)、[旧发布记录](./release-history-20261020.md) |
 
 ## 文档规则
 
-- 用户可见的能力必须与代码和实际验收证据一致。构建、模拟测试和真实主机验收分别记录。
-- [目标架构与施工交接](./architecture-and-build-plan.md)记录目标、当前工作树快照、施工顺序和验收条件；它不是用户目标已通过真实环境验收的证明。
-- 涉及凭据、审批或远端副作用的变更，先更新[安全与数据边界](./security.md)，再更新用户文案。
-- 功能没有通过目标平台或真实端点验证时，在[交付与发布](./release.md)中继续标为未验证。
-- 版本变化写入[变更记录](./changelog.md)；历史设计讨论可在 Git 历史中追溯。
+- 当前说明与代码一致；旧设计在 Git 历史或标明日期的归档中保留。
+- 负责人验收、自动测试、模拟 UI 和真实平台记录分别标注，不互相冒充证据。
+- 新版本同步应用版本、README、变更记录和 `releases/<version>.md`。
+- 凭据、审批、远端副作用变更同步[安全与数据边界](./security.md)，秘密不入文档。
+- 平台或外部端点没有独立证据时，不扩大既有通过结论的范围。
+
+贡献方式见[贡献指南](../CONTRIBUTING.md)。

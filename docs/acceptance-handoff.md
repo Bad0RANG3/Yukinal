@@ -1,5 +1,7 @@
 # SSH + Agent 验收交接手册
 
+> **2026-10-27 状态更新：** 项目负责人已确认 Agent 能力验收合格，并授权 `2.0.1` 正式发布。当前发行与证据范围以[交付与发布](./release.md)为准；当前界面以[工作区交互说明](./workspace-tabs-spec.md)为准。下文保留此前施工、缺口与验收快照，旧日期的“Agent 待验收”、安装器未实现和标签栏方案不能作为当前状态。未单独记录的平台 GUI、拖放与升级组合仍不作已验收声明。
+
 本文档面向**接手验收的人**，目标是在一台干净机器上复现构建与测试，并完成本机（开发机）无法完成的真实环境验收。任务输入是工作区里的 `ssh_agent_development_brief.md`；**它不在仓库内**，也**不要提交它**（仓库的构建和门禁都不依赖它的存在）。
 
 > **变更提示（Rust/Tauri 已删除）**：`crates/`、`apps/desktop/src-tauri/`、`Cargo.*`、`rust-toolchain.toml`、`.cargo/` 和 legacy Node agent（`apps/agent/`）已从仓库移除；`pnpm check` 不再跑 cargo，桌面宿主只有 C++。本文中失效的 Rust 命令是历史信息；旧 Node `test:live` 入口已由第 6.2 节的 Python live Provider 探针替代。后续实现指导见 [`rust-removal-plan.md`](./rust-removal-plan.md)。

@@ -248,6 +248,7 @@ jobs:
             exit 1
           fi
 
+          test -s "docs/releases/$tag_version.md" || { echo "Missing release notes for $tag_version" >&2; exit 1; }
           mkdir -p target/release/assets
           for artifact in target/release/downloads/yukinal-release-*; do
             [[ -d "$artifact" ]] || { echo "No downloaded package artifact: $artifact" >&2; exit 1; }
@@ -278,4 +279,4 @@ jobs:
             --verify-tag \
             --latest \
             --title "Yukinal ${GITHUB_REF_NAME#v}" \
-            --notes "Windows NSIS, macOS DMG, and Debian Linux installers. These binaries are unsigned and the macOS app is not notarized; complete interactive/provider/SSH/file-transfer acceptance before broad production deployment."
+            --notes-file "docs/releases/${GITHUB_REF_NAME#v}.md"

@@ -12,29 +12,29 @@ controlled AI Agent with a hardened, structured SSH service.
 [**English**](README.md) · [中文](README.zh-CN.md)
 
 [![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](./LICENSE)
-[![Version](https://img.shields.io/badge/interface-2.0.0--preview.2-informational.svg)](./packages/shared/src/version.ts)
+[![Version](https://img.shields.io/badge/interface-2.0.1-informational.svg)](./packages/shared/src/version.ts)
 [![Platform](https://img.shields.io/badge/platform-Windows%20%7C%20macOS%20%7C%20Linux-6f42c1.svg)](#build-and-run)
 [![Python](https://img.shields.io/badge/python-3.11%2B-3776ab.svg)](./agent/README.md)
 [![Node](https://img.shields.io/badge/node-%3E%3D24-339933.svg)](package.json)
-[![Acceptance](https://img.shields.io/badge/status-acceptance%20pending-orange.svg)](./docs/release.md)
+[![Acceptance](https://img.shields.io/badge/Agent-accepted-success.svg)](./docs/release.md)
 
 </div>
 
 ---
 
-> **Status:** Yukinal `2.0.0` was published on 2026-10-20 with Windows NSIS, macOS
-> DMG, and Debian Linux installers. `2.0.0-preview.2` is the current preview of the
-> C++ WebView host, structured SSH service, Python Agent, and React interface. The
-> public stable installers have a first-run Provider loading defect; the [PR #11
-> fix](https://github.com/Bad0RANG3/Yukinal/pull/11) is included in this preview.
-> Preview installers are being validated. Real Provider/MCP/SSH tasks, installed
-> GUI and file-transfer acceptance, signing, and notarization remain release
-> limitations. See [rewrite status](./docs/rewrite-cpp-python.md) and
-> [release status](./docs/release.md).
+> **Release: `2.0.1`.** The project owner confirmed Agent capability acceptance
+> on 2026-10-27 and approved a stable release. This revision includes the Provider
+> cold-start fix, Agent improvements, and a simpler workspace: Files, Terminal,
+> Logs, and Services switch the main view directly; the Agent conversation stays
+> available in a floating panel. See [release notes](./docs/releases/2.0.1.md)
+> and [delivery status](./docs/release.md) for build evidence and package availability.
+> Windows NSIS, macOS DMG, and Debian Linux packages are built by CI. Packages
+> remain unsigned; the macOS application is not notarized.
 
 ## Contents
 
 - [What is Yukinal?](#what-is-yukinal)
+- [Workspace interaction](#workspace-interaction)
 - [Architecture](#architecture)
 - [Repository layout](#repository-layout)
 - [Feature status](#feature-status)
@@ -63,6 +63,19 @@ The product is built around three user paths:
 
 The model proposes plans and selects tools. **Authorization, approval, and
 execution boundaries are enforced by program code, never by the prompt.**
+
+## Workspace interaction
+
+Choose a server, then use **Files / Terminal / Logs / Services** to switch the
+main workspace. There is one visible tool view, with no extra tab strip or add-tab
+menu. Continue talking to the Agent in the floating conversation panel while you
+work. Switching tools keeps the terminal session, file directory, log filter,
+and conversation draft. Switching servers opens that tool for the selected
+server and preserves the previous server's terminal session.
+
+Token usage opens in an anchored popup without moving the status row. Model and
+settings menus stay within the viewport and close with Escape or an outside click.
+The [interaction guide](./docs/workspace-tabs-spec.md) describes state and keyboard behavior.
 
 ## Architecture
 
@@ -117,14 +130,15 @@ desktop path.
 | Proxy routes (HTTP/HTTPS CONNECT, SOCKS5/SOCKS5H) and bypass rules | ✅ Implemented |
 | Bounded SFTP list/stat/read/write/backup, guarded atomic replace | ✅ Implemented |
 | C++ desktop host: window, IPC router, SQLite, credentials, approvals | ✅ Implemented |
-| Python Agent: LangGraph loop, Tool Registry, policy, redacted audit | ✅ Implemented |
+| Python Agent: LangGraph loop, Tool Registry, policy, redacted audit | ✅ Owner acceptance confirmed, 2026-10-27 |
 | MCP clients (stdio + Streamable HTTP) with approval-required defaults | ✅ Implemented |
 | Model factory: OpenAI-compatible, Anthropic, Gemini | ✅ Implemented |
 | Durable approvals with per-call fingerprint binding and expiry | ✅ Implemented |
 | Control plane: tenants, nodes, tasks, approvals, policy, audit | ✅ Implemented (SQLite-verified) |
 | Durable task/plan recovery | 🚧 Partial |
-| Windows NSIS, macOS DMG, Debian Linux installers | 🧪 Candidate CI build and install smoke |
-| Code signing, notarization, real provider/SSH and GUI acceptance | ❌ Pending |
+| Windows NSIS, macOS DMG, Debian Linux installers | Stable tag triggers three-platform build, smoke, and publication |
+| Code signing and macOS notarization | Not configured |
+| Platform-specific GUI, drag/drop, upgrade evidence | See release status; Agent acceptance is recorded separately |
 
 Full detail and evidence live in the [rewrite log](./docs/rewrite-cpp-python.md)
 and [release status](./docs/release.md).

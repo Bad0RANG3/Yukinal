@@ -12,27 +12,27 @@
 [English](README.md) · [**中文**](README.zh-CN.md)
 
 [![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](./LICENSE)
-[![Version](https://img.shields.io/badge/interface-2.0.0--preview.2-informational.svg)](./packages/shared/src/version.ts)
+[![Version](https://img.shields.io/badge/interface-2.0.1-informational.svg)](./packages/shared/src/version.ts)
 [![Platform](https://img.shields.io/badge/platform-Windows%20%7C%20macOS%20%7C%20Linux-6f42c1.svg)](#构建与运行)
 [![Python](https://img.shields.io/badge/python-3.11%2B-3776ab.svg)](./agent/README.md)
 [![Node](https://img.shields.io/badge/node-%3E%3D24-339933.svg)](package.json)
-[![Acceptance](https://img.shields.io/badge/status-acceptance%20pending-orange.svg)](./docs/release.md)
+[![Acceptance](https://img.shields.io/badge/Agent-accepted-success.svg)](./docs/release.md)
 
 </div>
 
 ---
 
-> **状态：** Yukinal `2.0.0` 于 2026-10-20 发布，包含 Windows NSIS、macOS DMG
-> 和 Debian Linux 安装包。`2.0.0-preview.2` 是 C++ WebView 宿主、结构化 SSH 服务、
-> Python Agent 与 React 界面的当前预览。已发布的稳定安装包存在首次启动时读取
-> Provider 配置失败的问题；[PR #11 的修复](https://github.com/Bad0RANG3/Yukinal/pull/11)
-> 已包含在本预览中。预览安装包正在验收；真实 Provider/MCP/SSH 任务、安装版 GUI
-> 与文件传输、代码签名和公证仍是发布限制。详见[重写状态](./docs/rewrite-cpp-python.md)
-> 与[交付与发布](./docs/release.md)。
+> **发行版本：`2.0.1`。** 项目负责人于 2026-10-27 确认 Agent 能力验收合格，
+> 同意正式发布。本版包含 Provider 冷启动修复、Agent 改进与简化后的工作区：
+> 文件、终端、日志、服务四个按钮直接切换主界面，Agent 对话保留在浮栏中。
+> 具体变化见[发行说明](./docs/releases/2.0.1.md)，构建证据和安装包状态见
+> [交付与发布](./docs/release.md)。Windows NSIS、macOS DMG 与 Debian Linux 安装包
+> 由 CI 构建；安装包仍未签名，macOS 应用未公证。
 
 ## 目录
 
 - [项目简介](#项目简介)
+- [工作区交互](#工作区交互)
 - [架构](#架构)
 - [仓库结构](#仓库结构)
 - [功能状态](#功能状态)
@@ -60,6 +60,16 @@ Yukinal 是面向少量 Linux 服务器运维的桌面工作区。用户提出�
 
 模型只负责提出计划和选择工具。**权限、审批与执行边界由程序代码强制执行，
 绝不由提示词决定。**
+
+## 工作区交互
+
+选择服务器后，用 **文件 / 终端 / 日志 / 服务** 四个按钮直接切换主界面。
+每次只显示一个工具视图，不再叠加标签栏或新增标签菜单；继续与 Agent 沟通时，
+直接使用右侧浮动对话栏。工具切换保留终端会话、文件目录、日志筛选和对话草稿。
+切换服务器后，当前工具跟随选中目标；原服务器的终端会话保留。
+
+Token 用量在按钮旁展开，不挤动状态行；模型与设置菜单受视口边界约束，
+支持 Escape 和点击外部关闭。状态保留与键盘操作见[工作区交互说明](./docs/workspace-tabs-spec.md)。
 
 ## 架构
 
@@ -113,14 +123,15 @@ Yukinal 是面向少量 Linux 服务器运维的桌面工作区。用户提出�
 | 代理路由（HTTP/HTTPS CONNECT、SOCKS5/SOCKS5H）与 bypass 规则 | ✅ 已实现 |
 | 有界 SFTP 列举/元数据/读取/写入/备份、守卫式原子替换 | ✅ 已实现 |
 | C++ 桌面宿主：窗口、IPC 路由、SQLite、凭据、审批 | ✅ 已实现 |
-| Python Agent：LangGraph 循环、Tool Registry、策略、脱敏审计 | ✅ 已实现 |
+| Python Agent：LangGraph 循环、Tool Registry、策略、脱敏审计 | ✅ 负责人于 2026-10-27 确认验收合格 |
 | MCP 客户端（stdio + Streamable HTTP），默认需要审批 | ✅ 已实现 |
 | 模型工厂：OpenAI 兼容、Anthropic、Gemini | ✅ 已实现 |
 | 持久审批：逐次调用指纹绑定与有效期 | ✅ 已实现 |
 | 控制平面：租户、节点、任务、审批、策略、审计 | ✅ 已实现（SQLite 验证） |
 | 任务/计划持久恢复 | 🚧 部分完成 |
-| Windows NSIS、macOS DMG、Debian Linux 安装包 | 🧪 候选 CI 构建与安装冒烟 |
-| 代码签名、公证、真实 Provider/SSH 与 GUI 验收 | ❌ 待完成 |
+| Windows NSIS、macOS DMG、Debian Linux 安装包 | 稳定标签触发三平台构建、冒烟与发布 |
+| 代码签名与 macOS 公证 | 未配置 |
+| 平台 GUI、拖放及升级证据 | 见交付状态；Agent 验收独立记录 |
 
 完整细节与证据见[重写方案](./docs/rewrite-cpp-python.md)与[交付与发布](./docs/release.md)。
 

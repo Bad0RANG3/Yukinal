@@ -13,7 +13,7 @@
  * file and the manifests that gate names; it does not know about any prose, so a release
  * note has to be updated by hand.
  */
-export const APP_VERSION = "2.0.0-preview.2";
+export const APP_VERSION = "2.0.1";
 
 /**
  * The Python Agent's version, which has its own release cadence.
