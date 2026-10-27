@@ -63,7 +63,6 @@ import {
   verifyReleaseManifest,
 } from "./lib/release-artifacts.mjs";
 import { renderUnixLauncher, renderWindowsLauncher } from "./lib/launchers.mjs";
-import { wrapPngAsIco } from "./lib/png-ico.mjs";
 
 const root = resolve(dirname(fileURLToPath(import.meta.url)), "..");
 const executableSuffix = process.platform === "win32" ? ".exe" : "";
@@ -598,9 +597,9 @@ async function stage(options) {
     join(root, "apps", "desktop", "design", "app-icon.png"),
     join(payloadRoot, "assets", "app-icon.png"),
   );
-  writeFileSync(
+  copyFileSync(
+    join(root, "apps", "desktop", "design", "yukinal.ico"),
     join(payloadRoot, "assets", "yukinal.ico"),
-    wrapPngAsIco(readFileSync(join(root, "apps", "desktop", "src", "assets", "brand-mark.png"))),
   );
   await writeFile(join(payloadRoot, "yukinal.cmd"), renderWindowsLauncher(), "utf8");
   await writeFile(join(payloadRoot, "yukinal"), renderUnixLauncher(), { encoding: "utf8", mode: 0o755 });

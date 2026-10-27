@@ -108,9 +108,10 @@ test("platform launchers wire the frozen sidecars and packaged UI by relative pa
   assert.match(unix, /exec \"\$APP_DIR\/yukinal-desktop-host\" --ui-dir \"\$APP_DIR\/ui\" \"\$@\"/);
 });
 
-test("Windows installer icon embeds the product PNG in a portable ICO container", async () => {
+test("Windows host and installer share the checked-in Yukinal ICO resource", async () => {
   const png = await readFile(join(process.cwd(), "apps/desktop/src/assets/brand-mark.png"));
-  const ico = wrapPngAsIco(png);
+  const ico = await readFile(join(process.cwd(), "apps/desktop/design/yukinal.ico"));
+  const generated = wrapPngAsIco(png);
   assert.equal(ico.readUInt16LE(0), 0);
   assert.equal(ico.readUInt16LE(2), 1);
   assert.equal(ico.readUInt16LE(4), 1);
@@ -119,6 +120,13 @@ test("Windows installer icon embeds the product PNG in a portable ICO container"
   assert.equal(ico.readUInt32LE(14), png.length);
   assert.equal(ico.readUInt32LE(18), 22);
   assert.deepEqual(ico.subarray(22), png);
+  assert.deepEqual(ico, generated, "the ICO must stay in sync with the existing product mark");
+  const cmake = await readFile(join(process.cwd(), "native/CMakeLists.txt"), "utf8");
+  const resource = await readFile(join(process.cwd(), "native/desktop_host/windows/yukinal.rc.in"), "utf8");
+  const packageScript = await readFile(join(process.cwd(), "scripts/package.mjs"), "utf8");
+  assert.match(cmake, /apps\/desktop\/design\/yukinal\.ico/u);
+  assert.match(resource, /YUKINAL_DESKTOP_ICON_RESOURCE\s+ICON/u);
+  assert.match(packageScript, /apps", "desktop", "design", "yukinal\.ico/u);
   assert.throws(() => wrapPngAsIco(Buffer.from("not a PNG")), /complete PNG image/);
 });
 

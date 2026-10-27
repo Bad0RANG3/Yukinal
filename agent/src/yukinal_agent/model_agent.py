@@ -8,7 +8,7 @@ import time
 import uuid
 from dataclasses import asdict, dataclass
 from datetime import UTC, datetime
-from typing import Any, TypedDict
+from typing import Any, Awaitable, Callable, TypedDict
 
 from langchain_core.messages import AIMessage, AIMessageChunk, HumanMessage, SystemMessage, ToolMessage, message_chunk_to_message
 from langgraph.checkpoint.memory import InMemorySaver
@@ -198,6 +198,7 @@ class ModelDrivenAgent:
         inference_profile: dict[str, Any] | None = None,
         goal_loop: bool = False,
         auto_approval: bool = False,
+        plan_step_result: Callable[[dict[str, Any]], Awaitable[Any]] | None = None,
     ) -> None:
         self._registry = registry
         self._budget = budget or AgentBudget()
@@ -208,6 +209,7 @@ class ModelDrivenAgent:
         # Only an auto-approved call runs without a person seeing it, so only in that
         # mode does the next turn need to confirm what the target actually became.
         self._auto_approval = bool(auto_approval)
+        self._plan_step_result = plan_step_result
         self._review_model = model.bind(max_tokens=min(1536, self._budget.max_model_output_tokens)) if goal_loop else None
         self._request_timing: dict[str, Any] = {}
         self._approval_checkpoints: set[str] = set()
@@ -1549,6 +1551,74 @@ class ModelDrivenAgent:
                 "error_code": "tool_failed",
             }
 
+        settlement_update: dict[str, Any] = {}
+        settlement_failed = False
+        current_plan_id = state.get("plan_id")
+        current_plan_step_id = state.get("plan_step_id")
+        host_task_id = state.get("host_task_id")
+        if (
+            self._plan_step_result is not None
+            and isinstance(host_task_id, str)
+            and isinstance(current_plan_id, str)
+            and isinstance(current_plan_step_id, str)
+            and request["name"] != "investigation.plan"
+        ):
+            try:
+                settlement = await self._plan_step_result({
+                    "taskId": host_task_id,
+                    "planId": current_plan_id,
+                    "stepId": current_plan_step_id,
+                    "callId": call_id,
+                    "status": "success",
+                    "retryable": False,
+                    "outputSummary": _tool_output_summary(result.value),
+                })
+                if not isinstance(settlement, dict) or settlement.get("recorded") is not True:
+                    raise ValueError("the host did not record the plan step result")
+                updated_plan = settlement.get("plan")
+                if (
+                    not isinstance(updated_plan, dict)
+                    or updated_plan.get("id") != current_plan_id
+                    or updated_plan.get("taskId") != host_task_id
+                ):
+                    raise ValueError("the host returned a mismatched plan after step settlement")
+                next_step_id = updated_plan.get("currentStepId")
+                if next_step_id is None:
+                    if updated_plan.get("status") != "completed":
+                        raise ValueError("the host returned an unfinished plan without an active step")
+                    settlement_update = {
+                        "plan_id": None,
+                        "plan_step_id": None,
+                        "evidence_ids": [],
+                    }
+                else:
+                    plan_steps = updated_plan.get("steps")
+                    next_step = next(
+                        (step for step in plan_steps
+                         if isinstance(step, dict) and step.get("id") == next_step_id),
+                        None,
+                    ) if isinstance(plan_steps, list) else None
+                    next_evidence_ids = next_step.get("evidenceIds") if next_step else None
+                    if (
+                        next_step is None
+                        or not isinstance(next_evidence_ids, list)
+                        or len(next_evidence_ids) > 128
+                        or any(not isinstance(item, str) or len(item) > 256 for item in next_evidence_ids)
+                    ):
+                        raise ValueError("the host returned an invalid next plan step")
+                    settlement_update = {
+                        "plan_id": current_plan_id,
+                        "plan_step_id": next_step_id,
+                        "evidence_ids": list(next_evidence_ids),
+                    }
+            except asyncio.CancelledError:
+                raise
+            except Exception:
+                # The operation already succeeded. Stop this run without asking the
+                # model to retry it; the same call id makes a later settlement retry
+                # idempotent at the host.
+                settlement_failed = True
+
         self._emit_tool_result(
             event_base,
             started_at=started_at,
@@ -1589,6 +1659,13 @@ class ModelDrivenAgent:
             "status": "running",
             "error_code": None,
         }
+        update.update(settlement_update)
+        if settlement_failed:
+            update.update({
+                "calls": [],
+                "status": "failed",
+                "error_code": "plan_step_settlement_failed",
+            })
         if (self._auto_approval
                 and _effective_risk(spec, state.get("calls", ()), call_id) != "read"
                 and not state.get("confirm_after_change")):

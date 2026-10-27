@@ -353,6 +353,7 @@ test("a tool result reports a finished status, not a lifecycle status", () => {
     startedAt: "2026-01-01T00:00:00Z",
     endedAt: "2026-01-01T00:00:01Z",
     durationMs: 1000,
+    approvalWaitMs: 250,
     at: "2026-01-01T00:00:01Z",
   };
   const schema = AGENT_EVENT_MEMBER_SCHEMAS["agent.tool_result"];

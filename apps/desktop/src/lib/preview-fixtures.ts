@@ -297,7 +297,7 @@ const PREVIEW_CHAT_MESSAGES = [
     id: "msg_preview_assistant_2",
     sessionId: PREVIEW_CHAT_SESSION.id,
     role: "assistant",
-    participant: { id: "green-observability", label: "绿队 · 可观测性共建", kind: "agent" },
+    participant: { id: "operations-agent", label: "运维 Agent", kind: "agent" },
     model: "preview-code-reasoning-128k",
     content: [
       "下面是模拟排查结果，仅供界面评估。连接池等待与 p95 1840ms 同时出现，迁移工作进程在 9 分钟前失败。",

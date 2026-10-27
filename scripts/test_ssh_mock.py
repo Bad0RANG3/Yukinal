@@ -1780,7 +1780,15 @@ def run_test(service_binary: Path, *, agent_runtime_only: bool = False) -> None:
                     f"verified HTTPS CONNECT proxy did not carry SSH: {https_result!r}"
                 )
             expected_authority = f"127.0.0.1:{ssh_port}"
-            if HTTPS_PROXY_CONNECT_TARGETS != [expected_authority, expected_authority]:
+            # There are two successful client operations below. The test client
+            # retries a mock-only transient KEX failure before authentication, up
+            # to three attempts per operation; each retry opens another CONNECT
+            # tunnel to the same SSH authority. Check both the bounded count and
+            # every destination without assuming no transient retry occurred.
+            if (
+                not 2 <= len(HTTPS_PROXY_CONNECT_TARGETS) <= 6
+                or any(target != expected_authority for target in HTTPS_PROXY_CONNECT_TARGETS)
+            ):
                 raise AssertionError(
                     f"HTTPS CONNECT used an unexpected target: {HTTPS_PROXY_CONNECT_TARGETS!r}"
                 )

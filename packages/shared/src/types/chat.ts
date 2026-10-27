@@ -532,6 +532,7 @@ export type AgentStreamEvent =
       startedAt: string;
       endedAt: string;
       durationMs: number;
+      approvalWaitMs?: number;
       at: string;
     }
   | { type: "agent.waiting_approval"; runId: string; taskId?: string; approval: ApprovalRequest; at: string }

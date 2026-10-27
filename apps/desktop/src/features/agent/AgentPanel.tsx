@@ -94,6 +94,7 @@ export function AgentPanel({ onCloseStart, onCloseEnd, workspace = false, worksp
   const spawnAgent = useSpawnAgent();
   const selectedServerId = useWorkspaceStore((state) => state.selectedServerId);
   const selectedTaskId = useWorkspaceStore((state) => state.selectedTaskId);
+  const explicitGlobalScope = useWorkspaceStore((state) => state.agentScopeMode === "global");
   const requestedOpen = useWorkspaceStore((state) => state.agentOpen);
   const agentOpen = workspace || requestedOpen;
   const setAgentOpen = useWorkspaceStore((state) => state.setAgentOpen);
@@ -242,15 +243,15 @@ export function AgentPanel({ onCloseStart, onCloseEnd, workspace = false, worksp
     const text = raw.trim();
     const parts = promptPartsWithAttachments(text, sendAttachments);
     if (!parts.length || !canSend || run.running) return;
-    // @服务器始终优先。没有选择范围时，唯一已连接的服务器就是默认目标：用户不必
-    // 为了说「装个 fastfetch」先手动选一台机器，Agent 也能自己读取目标是否需要操作。
+    // @服务器始终优先。自动范围且没有选择服务器时，唯一已连接的服务器是默认目标；
+    // 用户明确切换到全局范围后，不能再用这个回退覆盖选择。
     // 之前这里按关键词判断，导致「尝试装好 fastfetch」这类请求没有目标而直接失败。
     const mentioned = resolveMentionedServer(text, mentionCandidates);
     const onlyConfiguredServer = servers.data?.length === 1 ? servers.data[0] : undefined;
-    const implicitServerId = !selectedServerId && onlyConfiguredServer?.status === "connected"
+    const implicitServerId = !explicitGlobalScope && !selectedServerId && onlyConfiguredServer?.status === "connected"
       ? onlyConfiguredServer.id
       : null;
-    const focusServerId = agentScope(text, mentionCandidates, selectedServerId, implicitServerId);
+    const focusServerId = agentScope(text, mentionCandidates, selectedServerId, implicitServerId, explicitGlobalScope);
     const targetView = scopeViews.current.get(focusServerId);
     const targetDraft = recalledDraft(drafts.current, focusServerId, targetView?.session?.id ?? null);
     if (focusServerId !== scopeRef.current && (targetDraft.prompt.length || targetDraft.attachments.length)) {
@@ -295,7 +296,7 @@ export function AgentPanel({ onCloseStart, onCloseEnd, workspace = false, worksp
       team: "blue",
       uiContext,
       participant: { id: "operations-agent", label: "运维 Agent", kind: "agent" },
-      taskId: preview ? null : selectedTaskId,
+      taskId: preview || explicitGlobalScope ? null : selectedTaskId,
       parts,
       persistUserMessage: (messageId, promptParts) =>
         sessions.recordUserMessage(text, messageId, preview ? null : focusServerId, promptParts),
@@ -516,7 +517,7 @@ export function AgentPanel({ onCloseStart, onCloseEnd, workspace = false, worksp
                 </>}
                 status={<>
                   {livePreviewChat ? <span>模拟服务器 · 仅对话</span> : null}
-                  <button type="button" className="agent-composer-tool agent-scope-trigger" disabled={run.running || !selectedServerId} aria-label={selectedServerId ? `当前范围：${focusServer?.name ?? selectedServerId}，切换到全局对话` : "当前范围：全局工作区"} title={run.running ? runContext ?? "运行中" : selectedServerId ? `${focusServer?.name ?? selectedServerId} · 切换到全局` : "全局工作区"} onClick={() => useWorkspaceStore.getState().selectServer(null)}><Icon name={selectedServerId ? "servers" : "projects"} size="md" /></button>
+                  <button type="button" className="agent-composer-tool agent-scope-trigger" disabled={run.running || !selectedServerId} aria-label={selectedServerId ? `当前范围：${focusServer?.name ?? selectedServerId}，切换到全局对话` : "当前范围：全局工作区"} title={run.running ? runContext ?? "运行中" : selectedServerId ? `${focusServer?.name ?? selectedServerId} · 切换到全局` : "全局工作区"} onClick={() => useWorkspaceStore.getState().selectGlobalScope()}><Icon name={selectedServerId ? "servers" : "projects"} size="md" /></button>
                   <AgentRunStatus compact={workspace && workpagesVisible} preview={preview && !livePreviewChat} running={run.running} runState={run.runState} stage={run.stage} tokenUsage={run.tokenUsage ?? diagnostics?.tokenUsage ?? null} contextUsage={run.contextUsage ?? diagnostics?.contextUsage ?? null} agentReady={agentRunning} shell={shell} />
                 </>}
                 prompt={prompt}

@@ -15,7 +15,7 @@ const modules = [
   "test_tool_schema_repair", "test_tool_repetition_guard", "test_runtime_output_budget", "test_model_shell_policy",
   "test_agent_streaming", "test_agent_model_loop", "test_agent_conversation_context", "test_agent_subagents",
   "test_agent_stage", "test_operations_policy", "test_agent_auto_approval",
-  "test_agent_run_finalization", "test_provider_store", "test_agent_sidecar",
+  "test_agent_run_finalization", "test_provider_store", "test_agent_sidecar", "test_agent_host_tools",
   "test_reasoning_effort", "test_agent_reasoning_loop",
   "test_agent_long_workflow", "test_agent_capability_gates", "test_agent_live_acceptance_fixes",
   "test_system_snapshot", "test_network_snapshot", "test_server_toolkit",

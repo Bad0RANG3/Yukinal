@@ -220,6 +220,7 @@ export const AGENT_EVENT_MEMBER_SCHEMAS = {
     startedAt: TimestampSchema,
     endedAt: TimestampSchema,
     durationMs: z.number().nonnegative(),
+    approvalWaitMs: z.number().nonnegative().optional(),
     at: TimestampSchema,
   }),
   "agent.waiting_approval": z.strictObject({ type: z.literal("agent.waiting_approval"), runId: RunIdSchema, taskId: RunIdSchema.optional(), approval: ApprovalRequestSchema, at: TimestampSchema }),

@@ -2615,6 +2615,87 @@ int main(int argc, char** argv) {
                 recorded_plan.at("plan").at("status") == "active",
             "host.investigation.plan.record should persist a plan through the host RPC");
 
+      auto plan_record_task = task;
+      plan_record_task["id"] = "itask_plan_record_pending";
+      check(database.create_investigation_task(plan_record_task).has_value(),
+            "plan-record state fixture task should be persisted");
+      auto fresh_plan = plan;
+      fresh_plan["id"] = "iplan_record_pending";
+      fresh_plan["taskId"] = "itask_plan_record_pending";
+      const auto recorded_fresh_plan = router.handle_host_request(
+          "host.investigation.plan.record", {{"plan", fresh_plan}});
+      const auto persisted_fresh_plan =
+          database.latest_investigation_plan("itask_plan_record_pending");
+      check(recorded_fresh_plan.value("recorded", false) && persisted_fresh_plan.has_value() &&
+                persisted_fresh_plan->at("approval").at("status") == "pending" &&
+                persisted_fresh_plan->at("currentStepId") == "step_collect" &&
+                persisted_fresh_plan->at("steps").at(0).at("status") == "pending" &&
+                !persisted_fresh_plan->at("steps").at(0).contains("startedAt"),
+            "a saved plan waiting for user choice must not persist its first step as running");
+
+      auto progress_task = task;
+      progress_task["id"] = "itask_plan_progress";
+      check(database.create_investigation_task(progress_task).has_value(),
+            "plan progress fixture task should be persisted");
+      auto progress_plan = fresh_plan;
+      progress_plan["id"] = "iplan_plan_progress";
+      progress_plan["taskId"] = "itask_plan_progress";
+      auto next_step = progress_plan["steps"][0];
+      next_step["id"] = "step_verify";
+      next_step["ordinal"] = 1;
+      next_step["kind"] = "evidence";
+      next_step["title"] = "Verify collected evidence";
+      progress_plan["steps"].push_back(next_step);
+      const auto saved_progress_plan = router.handle_host_request(
+          "host.investigation.plan.record", {{"plan", progress_plan}});
+      check(saved_progress_plan.value("recorded", false) &&
+                saved_progress_plan.at("plan").at("currentStepId") == "step_collect",
+            "plan progress fixture should start at its first pending step");
+      const nlohmann::json first_step_result = {
+          {"taskId", "itask_plan_progress"},
+          {"planId", "iplan_plan_progress"},
+          {"stepId", "step_collect"},
+          {"callId", "call-plan-step-1"},
+          {"status", "success"},
+          {"retryable", false},
+          {"outputSummary", "The host returned a successful read."},
+      };
+      const auto advanced_plan = router.handle_host_request(
+          "host.investigation.plan.step_result", first_step_result);
+      check(advanced_plan.value("recorded", false) &&
+                advanced_plan.at("plan").at("currentStepId") == "step_verify" &&
+                advanced_plan.at("plan").at("steps").at(0).at("status") == "succeeded" &&
+                advanced_plan.at("plan").at("steps").at(0).at("attempts") == 1 &&
+                advanced_plan.at("plan").at("steps").at(1).at("status") == "running",
+            "a successful durable tool result should persist and advance the active plan step");
+      const auto replayed_plan_result = router.handle_host_request(
+          "host.investigation.plan.step_result", first_step_result);
+      check(replayed_plan_result.value("recorded", false) &&
+                replayed_plan_result.value("replayed", false) &&
+                replayed_plan_result.at("plan").at("steps").at(0).at("attempts") == 1,
+            "replaying the same durable tool result should not count the plan step twice");
+      auto conflicting_step_result = first_step_result;
+      conflicting_step_result["outputSummary"] = "A different result for the same call.";
+      const auto conflicting_plan_result = router.handle_host_request(
+          "host.investigation.plan.step_result", conflicting_step_result);
+      check(!conflicting_plan_result.value("recorded", true) &&
+                conflicting_plan_result.at("error").at("code") == "invalid_input",
+            "a durable call identity cannot be reused for different plan result data");
+      const auto completed_plan = router.handle_host_request(
+          "host.investigation.plan.step_result",
+          {{"taskId", "itask_plan_progress"},
+           {"planId", "iplan_plan_progress"},
+           {"stepId", "step_verify"},
+           {"callId", "call-plan-step-2"},
+           {"status", "success"},
+           {"retryable", false},
+           {"outputSummary", "Verification read completed."}});
+      check(completed_plan.value("recorded", false) &&
+                completed_plan.at("plan").at("status") == "completed" &&
+                completed_plan.at("plan").at("currentStepId").is_null() &&
+                completed_plan.at("plan").at("steps").at(1).at("status") == "succeeded",
+            "the final successful durable tool result should persist plan completion");
+
       const nlohmann::json host_content = {{"note", "host-recorded"}};
       const nlohmann::json host_evidence = {
           {"id", "iev_host"},

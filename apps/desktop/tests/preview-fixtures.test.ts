@@ -140,6 +140,9 @@ test("saved chat covers long diagnostic tables and code without starting a run",
   assert.match(summary?.content ?? "", /\| 观察项 \| 结果 \|/);
   assert.ok(summary?.content.includes("```sh\n"));
   assert.match(summary?.content ?? "", /仅供界面评估/);
+  assert.equal(summary?.participant?.id, "operations-agent");
+  assert.equal(summary?.participant?.label, "运维 Agent");
+  assert.equal(summary?.participant?.kind, "agent");
 });
 
 test("fixture history follows explicit global/server scope and search without leaking a different target", () => {

@@ -63,17 +63,25 @@ void expect_runtime_error(F&& call, const char* message) {
   std::exit(1);
 }
 
-// Points `YUKINAL_SSH_SERVICE_CONFIG` at `value`; an empty `value` clears it.
-void set_service_config_environment(const std::string& value) {
+// Points an environment variable at `value`; an empty `value` clears it.
+void set_environment_value(const char* name, const std::string& value) {
 #ifdef _WIN32
-  _putenv_s("YUKINAL_SSH_SERVICE_CONFIG", value.c_str());
+  _putenv_s(name, value.c_str());
 #else
   if (value.empty()) {
-    unsetenv("YUKINAL_SSH_SERVICE_CONFIG");
+    unsetenv(name);
   } else {
-    setenv("YUKINAL_SSH_SERVICE_CONFIG", value.c_str(), 1);
+    setenv(name, value.c_str(), 1);
   }
 #endif
+}
+
+void set_service_config_environment(const std::string& value) {
+  set_environment_value("YUKINAL_SSH_SERVICE_CONFIG", value);
+}
+
+void set_denylist_config_environment(const std::string& value) {
+  set_environment_value("YUKINAL_SSH_SERVER_EXEC_DENYLIST_CONFIG", value);
 }
 
 void write_text(const std::filesystem::path& path, const std::string& text) {
@@ -92,9 +100,10 @@ void check_server_exec_denylist_loader() {
   const auto missing_path = scratch.path / "absent.json";
 
   set_service_config_environment("");
+  set_denylist_config_environment("");
   const auto unset = load_configured_server_exec_denylist_for_test();
   check(unset.at("loaded") == true && unset.at("entries").empty(),
-        "no configured service config should allow everything");
+        "no configured denylist path should allow everything");
 
   set_service_config_environment("   ");
   const auto blank = load_configured_server_exec_denylist_for_test();
@@ -132,6 +141,29 @@ void check_server_exec_denylist_loader() {
   check(padded.at("loaded") == true && padded.at("entries").size() == 2,
         "a whitespace-padded service config path should still load");
   set_service_config_environment("");
+
+  // A standalone host policy file is independent of service target/autoconfig.
+  const auto policy_path = scratch.path / "denylist-only.json";
+  write_text(policy_path, R"({"server_exec_denylist":["forbidden-test-command"]})");
+  set_denylist_config_environment(policy_path.string());
+  const auto dedicated = load_configured_server_exec_denylist_for_test();
+  check(dedicated.at("loaded") == true && dedicated.at("entries").size() == 1 &&
+            dedicated.at("entries").at(0).at("pattern") == "forbidden-test-command",
+        "a standalone denylist policy must load without SSH service target fields");
+
+  // A configured dedicated path is authoritative and fails closed; it must not
+  // silently fall back to a valid legacy service file.
+  set_denylist_config_environment(missing_path.string());
+  set_service_config_environment(configured_path.string());
+  const auto dedicated_missing = load_configured_server_exec_denylist_for_test();
+  check(dedicated_missing.at("loaded") == false,
+        "a missing dedicated denylist policy must fail closed over the legacy config");
+  set_denylist_config_environment("");
+  const auto legacy_fallback = load_configured_server_exec_denylist_for_test();
+  check(legacy_fallback.at("loaded") == true && legacy_fallback.at("entries").size() == 2,
+        "the legacy SSH service config should remain a denylist fallback");
+  set_service_config_environment("");
+  set_denylist_config_environment("");
 
   // Absent key: valid file, no policy configured.
   const auto no_key_path = scratch.path / "no-key.json";

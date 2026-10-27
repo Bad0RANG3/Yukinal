@@ -236,6 +236,30 @@ test("a forwarded response keeps its known fields, and the addition stays observ
   assert.deepEqual([...keys].sort(), ["sidecarAddedField", "sidecarAddedNestedField"]);
 });
 
+test("unknown response-key reporting follows a discriminated-union branch", () => {
+  const response = {
+    message: {
+      id: "msg_1",
+      sessionId: "session_1",
+      role: "user",
+      content: "hello",
+      parts: [{ type: "text", text: "hello" }],
+      createdAt: "2026-01-01T00:00:00Z",
+    },
+  };
+
+  assert.deepEqual(unknownResponseKeys(IPC_SCHEMAS.chat_message_append.response, response), []);
+  assert.deepEqual(
+    unknownResponseKeys(IPC_SCHEMAS.chat_message_append.response, {
+      message: {
+        ...response.message,
+        parts: [{ type: "text", text: "hello", sidecarAddedField: true }],
+      },
+    }),
+    ["sidecarAddedField"],
+  );
+});
+
 test("tolerating an addition did not stop rejecting a missing field or a wrong type", () => {
   const missing = IPC_SCHEMAS.agent_run_start.response.safeParse({ started: true });
   assert.equal(missing.success, false, "a response without its required runId must still fail");

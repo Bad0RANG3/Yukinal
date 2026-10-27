@@ -1,13 +1,13 @@
 # Yukinal 文档
 
-当前版本 `2.0.1`（已发行）。**Agent 能力验收已重开**：同日实机验收发现并修复 4 项缺陷，同时确认挂起审批在桌面端重启后无法恢复，见[Agent 实机验收记录](./agent-live-acceptance-20261027.md)。界面采用四按钮切换主工具、Agent 浮栏继续对话。
+当前发行版本为 `2.0.3`。Computer Use 已验证真实只读工具调用、`server.info` 计划步骤结算与桌面重启恢复、任务/计划持久恢复、未批准操作自然超时，以及 host denylist 和桌面 SSH autoconfig 协同。Windows 宿主现嵌入任务栏/窗口图标。真实多目标并行和长时间压力、安装版 GUI、签名与公证仍未覆盖。详细证据见[2.0.3 发行说明](./releases/2.0.3.md)、[Agent 实机验收记录](./agent-live-acceptance-20261027.md)和[交付与发布](./release.md)。界面采用四按钮切换主工具、Agent 浮栏继续对话。
 
 ## 从哪里开始
 
 | 目的 | 阅读 |
 | --- | --- |
 | 了解和启动项目 | [中文 README](../README.zh-CN.md)、[English README](../README.md) |
-| 本版变化与安装包状态 | [2.0.1 发行说明](./releases/2.0.1.md)、[交付与发布](./release.md) |
+| 本版变化与安装包状态 | [2.0.3 发行说明](./releases/2.0.3.md)、[交付与发布](./release.md) |
 | 四工具、浮栏、状态和键盘行为 | [工作区交互说明](./workspace-tabs-spec.md) |
 | 布局与控件 | [桌面窗口与工作区](./desktop-window-direction.md)、[界面表达与皮肤约定](./ui-design-system.md) |
 | 用户路径与功能范围 | [产品定义](./product.md) |

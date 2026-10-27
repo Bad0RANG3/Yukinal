@@ -27,6 +27,8 @@ export interface WorkspaceState {
   selectedProviderId: string | null;
   selectedModel: string | null;
   selectedTaskId: string | null;
+  /** `auto` may infer the sole connected server; `global` is an explicit user choice. */
+  agentScopeMode: "auto" | "global";
   /** Kept for run/approval integration; the central AI workspace stays visible. */
   agentOpen: boolean;
   agentDraft: string;
@@ -47,6 +49,7 @@ export interface WorkspaceState {
   setPrimary(primary: PrimaryNav): void;
   setServerPage(page: ServerPage): void;
   selectServer(serverId: string | null): void;
+  selectGlobalScope(): void;
   syncServerSelection(serverIds: readonly string[]): void;
   selectProvider(providerId: string | null, model?: string | null): void;
   selectModel(model: string | null): void;
@@ -63,6 +66,7 @@ export const useWorkspaceStore = create<WorkspaceState>((set) => ({
   selectedProviderId: null,
   selectedModel: null,
   selectedTaskId: null,
+  agentScopeMode: "auto",
   agentOpen: true,
   agentDraft: "",
   agentContextEpoch: 0,
@@ -80,9 +84,16 @@ export const useWorkspaceStore = create<WorkspaceState>((set) => ({
   setServerPage: (serverPage) => set({ serverPage, primary: "servers", serverDetailOpen: true }),
   selectServer: (selectedServerId) => set((state) => state.agentBusy && selectedServerId !== state.selectedServerId ? state : ({
     selectedServerId,
+    ...(selectedServerId ? { agentScopeMode: "auto" as const } : {}),
     primary: selectedServerId ? "servers" : state.primary,
     serverDetailOpen: Boolean(selectedServerId),
     serverPage: selectedServerId === state.selectedServerId ? state.serverPage : "overview",
+  })),
+  selectGlobalScope: () => set((state) => state.agentBusy ? state : ({
+    selectedServerId: null,
+    selectedTaskId: null,
+    agentScopeMode: "global",
+    serverDetailOpen: false,
   })),
   // Background refreshes can reconcile a deleted selection without taking the
   // user away from Settings or resetting a still-valid server tab.
@@ -90,11 +101,13 @@ export const useWorkspaceStore = create<WorkspaceState>((set) => ({
     if (state.selectedServerId === null || state.agentBusy) return state;
     if (state.selectedServerId && serverIds.includes(state.selectedServerId)) return state;
     const selectedServerId = serverIds[0] ?? null;
-    return selectedServerId === state.selectedServerId ? state : { selectedServerId, serverPage: "overview" };
+    return selectedServerId === state.selectedServerId ? state : { selectedServerId, serverPage: "overview", agentScopeMode: "auto" };
   }),
   selectProvider: (selectedProviderId, selectedModel = null) => set({ selectedProviderId, selectedModel }),
   selectModel: (selectedModel) => set({ selectedModel }),
-  selectTask: (selectedTaskId) => set({ selectedTaskId }),
+  selectTask: (selectedTaskId) => set(selectedTaskId
+    ? { selectedTaskId, agentScopeMode: "auto" }
+    : { selectedTaskId }),
   setAgentOpen: (agentOpen) => set({ agentOpen }),
   toggleAgent: () => set((state) => ({ agentOpen: !state.agentOpen })),
 }));

@@ -227,9 +227,51 @@ C++ SSH 服务侧的 `server.exec` / `server.logs` 输出按字节原样返回�
 已知限制：`TerminalPane` 里的 xterm 主题仍是单色，因此**交互式终端**里的
 `ls --color` 依然不显示颜色；本次只覆盖 Agent 工具卡片中的命令输出。
 
+## Computer Use 实机复验 — 2026-10-27
+
+通过 Yukinal C++ 桌面宿主和已配置的 DeepSeek Provider，在已连接的测试服务器上运行一次只读 Agent 请求。
+LangGraph 在第 1 轮调用 `server.exec` 读取 `uname -s`、`uptime`，再调用 `server.info` 交叉核对；
+三次工具调用均成功，内核和运行时长相符。该请求没有写入、删除、安装、改配置、重启或停止服务。
+操作记录显示两条命令和 `server.info` 的结果；本次可见证据中没有 API 密钥或 SSH 凭据。
+
+Computer Use 也检查了当前设置页和运维 Agent 模型页：所选连接/模型显示为 `deepseek · deepseek-flash`，
+Agent 页面说明它与启动的 subagent 共用当前对话模型；没有显示旧的彩色角色队列或系统提示词编辑器。工具设置页
+显示尚无 MCP 服务器配置；这不影响本次经已连接 SSH 工具完成的只读循环，也不作为 MCP 端点验收。
+
+随后关闭并重新打开桌面宿主。在“目标任务”页看到两份任务记录，分别打开详情核对：两项任务均仍为
+“等待用户选择”，各自的计划修订 1 均保留六个只读步骤，六步全部为 `pending`，计划未获批准，也没有
+活动运行。由此验证了两份持久任务与计划在桌面重开后的恢复；本次没有批准或启动任何计划步骤。
+
+一次从普通历史对话发出的计划保存尝试没有关联 durable task，宿主以 `durable_task_required` 拒绝，
+没有改变任务或计划状态。任务看板中的计划在关闭前已存在，重开后仍保持原样；该拒绝是预期的
+fail-closed 结果，不作为计划已由本轮 Python Agent 成功创建的证据。
+
+本机随后重新运行完整 `pnpm check` 并通过：发布卫生与秘密扫描通过，文档链接 58 个文件/299 个链接通过，
+C++ CTest 17/17、control plane 157 项、Python Agent 345 项、桌面 640 项均通过；生产 UI bundle 与
+Python Agent sidecar smoke 也通过。Python 3.14 在部分测试清理时打印非致命 `ResourceWarning`，未造成门禁失败；
+针对 LangGraph 循环与会话持久化的单测复跑未重现该警告。
+
+### 本轮追加 Computer Use 验收
+
+- 在 Yukinal UI 中创建隔离的单步只读任务，计划仅含 `server.info`。工具调用返回成功，UI 显示步骤由宿主结算成功；任务列表刷新后调用记录仍在。该专用任务保持待用户选择，未批准或启动其他计划步骤。
+- 另建仅用于审批超时观察的任务，自动执行保持关闭。`server.exec` 的 `true` 调用进入待审批后无人批准；等待 120 秒后 UI 显示“审批已过期”，并记录审批发起时尚未执行。命令没有运行，也没有重试。
+- 原生界面检查了模型与 subagent 共用当前模型的说明、设置草稿跨分区保留、诊断日志保持收起、窗口最大化/还原，以及生成过程中手动上滚后未被拉回最新位置。禁发 Vite fixture 中另查看了合成资源趋势、历史表格和代码；发现并修复旧“绿队”参与者标签，样例现在显示“运维 Agent”，fixture 回归与浏览器可访问树均通过。修复后桌面 640 项测试、类型检查、`pnpm check:ai` 和全量 `pnpm check` 均通过；模拟预览不作为真实服务器数据或所有结构化回复组件的验收证据。
+- 为复验新增结算步骤的重启恢复，使用窗口关闭控件后等待超过 60 秒：Computer Use 的 `list_windows()` 始终没有返回 Yukinal 可操作窗口，而 `list_apps()` 仍报告应用运行且保留一个窗口条目；按应用标识启动也返回“未暴露可操作窗口”。没有用进程强杀、终端命令或服务器配置改动绕过该状态。此前两份既有任务/计划已由更早的一次桌面重开测试确认恢复，但不能据此宣称本次新增步骤也已完成重启恢复。
+- 2026-10-28 复验时用项目自带的 `pnpm desktop:dev:cpp` 启动开发 Host；裸 Host 可执行文件因缺少 `--dev-url`/`--ui-dir` 不会创建窗口。Computer Use 重新进入服务器范围后，目标任务仍为“等待选择”，显示 1 次 `completed` 运行；修订 1 的唯一 `server.info` 计划步骤为 `succeeded`、尝试 `1/1`，宿主验证条件仍显示成功。全局范围下历史列表为 0，切到服务器范围后恢复 11 条会话；这是范围筛选，不是数据丢失。此复验没有再次启动计划或读取主机输出。该运行是本机 C++ **开发构建**，不代表安装包 GUI 通过。
+- 2026-10-28 结构化回复与范围隔离：在原生开发窗口用真实 Provider 请求一条只含虚构数据的回复，五种 widget 均已渲染；指标趋势、进度值可访问，详情展开后显示完整正文。复制按钮反馈成功，粘贴到空白 composer 后确认卡片正文、步骤状态、指标值与趋势、进度及详情都在，测试结束后清空草稿。回到最近对话重开后，widget 正常显示，未观察到重复入场动画。
+- 2026-10-28 Python Agent durable task 再启动恢复：Computer Use 在“目标任务”中选中 Python Agent 验收任务，确认任务处于等待用户选择、计划修订待选择且四个步骤均为 `pending`；详情计数为 1 次计划创建运行、0 个计划步骤、0 条证据/发现/选项。关闭并重新启动 C++ 开发宿主后，同一任务和计划状态恢复。测试停在等待选择，没有批准计划或执行任何服务器步骤。单独从普通聊天发出的 `investigation.plan` 请求因未绑定 durable task 而被 `durable_task_required` 拒绝；该路径没有触发服务器工具，也不作为成功创建计划的证据。
+- 2026-10-28 denylist 与桌面 autoconfig 集成：新增 host-only `YUKINAL_SSH_SERVER_EXEC_DENYLIST_CONFIG`，策略文件只含 `server_exec_denylist`，不替换 `YUKINAL_SSH_SERVICE_AUTOCONFIG` 或桌面生成的目标配置。通过 Computer Use 重启 C++ 开发宿主后，已连接目标继续可用；真实 `server.info` 成功。随后请求一次 `server.exec true`，并对该精确 no-op 调用批准一次以到达 host 执行门禁；UI 返回 `denied_by_policy`，宿主没有把命令发往 SSH。模型在拒绝后又发起了 `system.time` 与 `ssh.disk_usage` 两个额外只读工具调用，虽与该请求中的“只调用一次”约束不符，但没有执行写操作；因此本次结果只证明 denylist 执行门禁与 autoconfig 组合，不作为自然语言单工具约束的证明。测试结束后关闭策略宿主并移除临时策略文件。
+- 首次发这条合成请求时，点过“切换到全局”但运行仍自动回退到唯一已连接服务器，并把残留的 `selectedTaskId` 附到旧目标任务会话。该轮只生成合成文本/UI 回复，界面没有显示工具事件，计划步骤没有启动。已修复：工作区显式记录 `auto/global` 范围，显式全局抑制唯一服务器回退并解绑所选 durable task；选择服务器或任务重新启用自动范围。热更新后从新会话显式切回全局再次发送，UI 保持“全局工作区”，会话为独立新对话，未见工具事件。`apps/desktop/tests/ui-logic.test.ts` 覆盖显式全局与自动唯一服务器两条路由；全套桌面回归覆盖流式/无效 widget 回退和历史入场状态。
+- 本次完整 `pnpm check` 最终为 green：显式配置的 CTest 14/14、control plane 157 项、Python Agent 345 项、桌面 641 项、生产 UI bundle 与 Python sidecar smoke 均通过。桌面类型检查通过，文档链接 58 个 Markdown/299 条链接通过。Python 3.14 测试输出有非致命 asyncio/SQLite 资源警告，未导致失败。
+
 ## 未能验证
 
-真实模型、真实 SSH 与界面显示已在本轮覆盖；**未覆盖**：审批超时（120 s 未等待）、
-命令黑名单（需 `YUKINAL_SSH_SERVICE_CONFIG`，会顶掉桌面 autoconfig 传输路径）、
-持久任务/计划（`investigation.plan`）链路、并行只读之外的多目标场景、以及任何
-压力或长时间稳定性。这些仍按 `docs/ai-acceptance.md` 单独记录。
+仍未覆盖：真实多目标并行、压力或长时间稳定性，以及本次源码对应的安装包 GUI。当前只配置一个可用真实目标，模拟预览不能替代多目标服务器证据。黑名单 host 配置与桌面 autoconfig 已在 C++ 开发宿主中联合验收；此项不等于多目标或安装包验收。
+原生结构化回复检查使用的是 C++ 桌面开发构建，不替代安装包或其他平台 GUI 验收。
+
+### 后续确定性回归补充
+
+Python Agent 的成功工具结果现已调用 `host.investigation.plan.step_result` 推进持久计划；
+同一 call ID 的结算重放不会重复推进，宿主返回拒绝时 Agent 会停止而不重跑已成功工具。
+该路径已加入 `pnpm check:ai`，C++ 宿主数据库回归也覆盖计划推进、完成和重放。当前本地确定性
+门禁通过；Computer Use 已在桌面重开后复核单步 `server.info` 结果仍为成功、尝试 `1/1`。

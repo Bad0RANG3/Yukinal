@@ -4,6 +4,7 @@ import { AGENT_PERMISSION_MODES, AGENT_RUN_MODES, IPC_COMMANDS, isReadOnlyRunMod
 import { callDesktop } from "../src/lib/ipc.js";
 import { installHost, removeHost } from "./host-mock.js";
 import { PRIMARY_NAV, useWorkspaceStore } from "../src/stores/workspace-store.js";
+import { agentScope } from "../src/features/agent/run-scope.js";
 import { buildServerInput, type ServerFormValues } from "../src/features/servers/server-form.js";
 import { resetAdmissionOnFailure, RunLifecycle, type PendingAdmission } from "../src/features/agent/run-lifecycle.js";
 import {
@@ -57,6 +58,25 @@ test("opening the task workspace from a selected server keeps that server availa
 
   assert.equal(useWorkspaceStore.getState().primary, "tasks");
   assert.equal(useWorkspaceStore.getState().selectedServerId, "srv_goal_target");
+});
+
+test("explicit global scope detaches a selected task and suppresses the sole-server fallback", () => {
+  const workspace = useWorkspaceStore.getState();
+  workspace.selectServer("srv_goal_target");
+  workspace.selectTask("task_goal_target");
+  assert.equal(useWorkspaceStore.getState().agentScopeMode, "auto");
+
+  useWorkspaceStore.getState().selectGlobalScope();
+
+  const global = useWorkspaceStore.getState();
+  assert.equal(global.selectedServerId, null);
+  assert.equal(global.selectedTaskId, null);
+  assert.equal(global.agentScopeMode, "global");
+  assert.equal(agentScope("show a synthetic UI sample", [], null, "srv_goal_target", true), null);
+  assert.equal(agentScope("show a synthetic UI sample", [], null, "srv_goal_target"), "srv_goal_target");
+
+  global.selectServer("srv_goal_target");
+  assert.equal(useWorkspaceStore.getState().agentScopeMode, "auto");
 });
 
 test("Activity replaces the dashboard and navigation preserves the current target and draft", () => {

@@ -1,6 +1,6 @@
 # 桌面窗口与工作区
 
-当前基线：`2.0.1`，2026-10-27。C++ WebView 宿主管理原生窗口，React 负责导航、主内容和参考信息。交互细则见[工作区交互说明](./workspace-tabs-spec.md)，共用样式见[界面表达与皮肤约定](./ui-design-system.md)。
+当前基线：`2.0.3`，2026-10-28。C++ WebView 宿主管理原生窗口，React 负责导航、主内容和参考信息。Windows 宿主在可执行文件中嵌入 Yukinal ICO，为主窗口及独立工作页显式设置大小图标和稳定 AppUserModelID。交互细则见[工作区交互说明](./workspace-tabs-spec.md)，共用样式见[界面表达与皮肤约定](./ui-design-system.md)。
 
 ## 窗口与标题栏
 

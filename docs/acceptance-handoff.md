@@ -1,6 +1,6 @@
 # SSH + Agent 验收交接手册
 
-> **2026-10-27 状态更新：** 项目负责人已确认 Agent 能力验收合格，并授权 `2.0.1` 正式发布。当前发行与证据范围以[交付与发布](./release.md)为准；当前界面以[工作区交互说明](./workspace-tabs-spec.md)为准。下文保留此前施工、缺口与验收快照，旧日期的“Agent 待验收”、安装器未实现和标签栏方案不能作为当前状态。未单独记录的平台 GUI、拖放与升级组合仍不作已验收声明。
+> **2026-10-28 / 2.0.3 状态：** Computer Use 验证真实只读 Provider/SSH 工具循环、`server.info` 计划步骤成功结算并在桌面重开后恢复、待选择任务和计划重开恢复、未批准命令自然过期且从未执行，以及 host denylist 与桌面 autoconfig 联合工作。结构化回复组件、复制、历史回开和任务范围绑定有原生窗口/本地回归证据。Windows 宿主现嵌入任务栏图标。完整本地 `pnpm check` 通过。真实多目标并行/长时压力、安装版 GUI、签名和公证仍未完成。当前发行与证据范围以[交付与发布](./release.md)为准；当前界面以[工作区交互说明](./workspace-tabs-spec.md)为准。下文第 1 节是 2026-10-20 的历史快照，不代表本次实机证据；未单独记录的平台 GUI、拖放与升级组合仍不作已验收声明。
 
 本文档面向**接手验收的人**，目标是在一台干净机器上复现构建与测试，并完成本机（开发机）无法完成的真实环境验收。任务输入是工作区里的 `ssh_agent_development_brief.md`；**它不在仓库内**，也**不要提交它**（仓库的构建和门禁都不依赖它的存在）。
 
@@ -10,7 +10,7 @@
 
 ---
 
-## 1. 当前验收检查点（main，2026-10-20）
+## 1. 历史验收检查点（main，2026-10-20）
 
 | 项 | 值 |
 | --- | --- |
@@ -265,7 +265,7 @@ $env:YUKINAL_LIVE_API_KEY = "<key>"
 
 ### 6.3 明确未实现/不属任务书
 
-- **调查任务的证据/产物持久化**（`host.investigation.evidence.record`、`plan.step_result`、`artifact.record`）在 Python 运行时没有实现；旧 Node Agent 有。`crates/core/tests/sidecar_agent.rs` 已**不再**把它计为通过，只在 host fixture 里显式拒绝该调用。
+- **调查证据/产物记录**（`host.investigation.evidence.record`、`host.investigation.artifact.record`）在 Python 运行时仍未实现。计划步骤结算 `host.investigation.plan.step_result` 已接入 Python Agent：成功工具结果会调用宿主推进持久计划，宿主按 call ID 防止重放重复推进；Python Agent 与 C++ 宿主处理器都有确定性回归。安装版 UI 的实时闭环仍需单独验收。
 - **第四阶段控制平面**（FastAPI + PostgreSQL + 多租户）：任务书写“可选、按实际需要”，且警告不要过早引入微服务。当前是单机桌面产品，未实现。
 
 ---

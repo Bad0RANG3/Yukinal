@@ -250,6 +250,31 @@ verdict row can be joined. The verdict (`approved` / `rejected`) is written by
 rejected call would leave only `started`/`awaiting_approval` in the file and the
 decision would exist solely in the conversation transcript.
 
+## Host `server.exec` denylist
+
+The C++ desktop host can load an operator denylist from the JSON file named by
+`YUKINAL_SSH_SERVER_EXEC_DENYLIST_CONFIG`. The file can contain only the policy
+field; it does not need SSH target, credential, port, or token settings:
+
+```json
+{
+  "server_exec_denylist": [
+    "rm -rf /",
+    {"pattern": "^shutdown", "regex": true, "case_insensitive": true}
+  ]
+}
+```
+
+The host reloads the file for each `server.exec` request. A missing, unreadable,
+oversized, malformed, or invalid configured file fails closed. A denied command
+returns `denied_by_policy` before the host consumes the approval ticket or sends
+the request to SSH. The approval card can appear before the host checks the
+command; approval alone does not bypass this policy. The older
+`YUKINAL_SSH_SERVICE_CONFIG` path remains a fallback for deployments that keep
+the denylist in their full SSH service config. The dedicated host variable is
+not forwarded to the Agent sidecar, so it does not replace desktop SSH
+autoconfiguration or its ephemeral target credentials.
+
 ## Operating procedure and runbooks
 
 The agent owns the outcome. It works through one procedure, defined in

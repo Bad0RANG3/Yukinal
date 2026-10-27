@@ -30,7 +30,8 @@ export function agentScope(
   candidates: readonly MentionCandidate[],
   selectedServerId: string | null,
   implicitServerId: string | null = null,
+  explicitGlobalScope = false,
 ): string | null {
   const targets = candidates.filter((candidate) => resolveMentionedServer(prompt, [candidate]));
-  return targets.length > 1 ? null : targets[0]?.id ?? selectedServerId ?? implicitServerId;
+  return targets.length > 1 ? null : targets[0]?.id ?? selectedServerId ?? (explicitGlobalScope ? null : implicitServerId);
 }

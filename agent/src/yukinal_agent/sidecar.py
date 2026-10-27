@@ -191,6 +191,13 @@ class PythonSidecar:
             register_host_tools(self._registry, host, excluded_names=frozenset(direct_tool_names))
             self._host_tools_registered = True
 
+    async def _record_plan_step_result(self, params: dict[str, Any]) -> Any:
+        if self._host_rpc is None:
+            raise RuntimeError("the desktop host is unavailable")
+        return await self._host_rpc.request(
+            "host.investigation.plan.step_result", params, timeout_seconds=15.0
+        )
+
     def set_checkpointer(self, checkpointer: Any | None) -> None:
         if self._run_sessions or self._resetting_sessions or self._resetting_all:
             raise RuntimeError("cannot replace the Agent checkpointer while runs are active")
@@ -757,6 +764,9 @@ class PythonSidecar:
                 tool_names=_allowed_tools_for_run(self._registry, request.get("mode", "goal"), request),
                 event_sink=self._emit,
                 checkpointer=self._checkpointer,
+                plan_step_result=(
+                    self._record_plan_step_result if self._host_rpc is not None else None
+                ),
                 transcript_sink=lambda messages: self._conversations.update_messages(run_id, messages),
             )
         except Exception:

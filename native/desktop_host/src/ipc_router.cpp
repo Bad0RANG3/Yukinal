@@ -55,11 +55,13 @@ extern char** environ;
 /**
  * Operator `server.exec` command blacklist.
  *
- * The blacklist is configured ONLY in the C++ SSH service JSON file named by the
- * existing `YUKINAL_SSH_SERVICE_CONFIG` environment variable; there is no
- * settings UI and no database row. The file is re-read for every effectful
- * `server.exec` request, so an operator edit takes effect without restarting the
- * host.
+ * The blacklist is configured in the host policy JSON file named by
+ * `YUKINAL_SSH_SERVER_EXEC_DENYLIST_CONFIG`. The legacy
+ * `YUKINAL_SSH_SERVICE_CONFIG` path remains a fallback for compatibility. The
+ * dedicated path lets the desktop keep generating its ephemeral SSH target
+ * config while the host applies an operator denylist. There is no settings UI
+ * and no database row. The file is re-read for every effectful `server.exec`
+ * request, so an operator edit takes effect without restarting the host.
  *
  * `denylist_detail` is a named namespace (not the file's anonymous namespace)
  * for one reason only: `native/desktop_host/tests/test_ipc_router.cpp` links
@@ -74,6 +76,9 @@ namespace yukinal::desktop_host::denylist_detail {
 
 /** The largest SSH service config file the host reads before failing closed. */
 inline constexpr std::uintmax_t kMaxServerExecDenylistConfigBytes = 1024 * 1024;
+inline constexpr char kServerExecDenylistConfigEnvironment[] =
+    "YUKINAL_SSH_SERVER_EXEC_DENYLIST_CONFIG";
+inline constexpr char kSshServiceConfigEnvironment[] = "YUKINAL_SSH_SERVICE_CONFIG";
 
 #ifdef YUKINAL_DESKTOP_HOST_WITH_SSH_CORE
 using ConfiguredServerExecDenyList = yukinal::ssh_service::ServerExecDenyList;
@@ -168,8 +173,8 @@ inline bool load_server_exec_denylist_from_file(
 }
 
 /**
- * The host-facing loader. `YUKINAL_SSH_SERVICE_CONFIG` unset or empty means no
- * operator file is configured, so the empty list allows everything.
+ * If neither the dedicated host policy path nor the legacy SSH service config
+ * path is set, no operator policy file is configured and the list is empty.
  */
 inline ConfiguredServerExecDenyListResult load_configured_server_exec_denylist(
     const std::optional<std::string>& configured_path) {
@@ -191,6 +196,20 @@ inline ConfiguredServerExecDenyListResult load_configured_server_exec_denylist(
   return result;
 }
 
+/** Dedicated host policy config wins; retain the SSH service config fallback. */
+inline std::optional<std::string> configured_server_exec_denylist_path_from_environment() {
+  const char* dedicated = std::getenv(kServerExecDenylistConfigEnvironment);
+  if (dedicated != nullptr) {
+    const std::string value(dedicated);
+    const auto first = std::find_if_not(value.begin(), value.end(), [](unsigned char byte) {
+      return std::isspace(byte) != 0;
+    });
+    if (first != value.end()) return value;
+  }
+  const char* legacy = std::getenv(kSshServiceConfigEnvironment);
+  return legacy == nullptr ? std::nullopt : std::optional<std::string>(legacy);
+}
+
 /**
  * Exported ONLY for `native/desktop_host/tests/test_ipc_router.cpp`; the symbol
  * is otherwise internal to ipc_router.cpp. Returns
@@ -209,10 +228,8 @@ nlohmann::json load_server_exec_denylist_for_test(
 
 /** Exported for the test only: the loader reading `YUKINAL_SSH_SERVICE_CONFIG`. */
 nlohmann::json load_configured_server_exec_denylist_for_test() {
-  const char* raw = std::getenv("YUKINAL_SSH_SERVICE_CONFIG");
   const auto result = load_configured_server_exec_denylist(
-      raw == nullptr ? std::nullopt
-                     : std::optional<std::string>(std::string(raw)));
+      configured_server_exec_denylist_path_from_environment());
   return {{"loaded", result.loaded_ok},
           {"entries", configured_server_exec_denylist_to_json(result.list)}};
 }
@@ -1233,7 +1250,8 @@ nlohmann::json plan_definition(const nlohmann::json& plan) {
   if (value.contains("steps") && value.at("steps").is_array()) {
     for (auto& step : value["steps"]) {
       if (!step.is_object()) continue;
-      for (const char* key : {"attempts", "status", "startedAt", "endedAt", "lastDeviation"}) {
+      for (const char* key : {"attempts", "status", "startedAt", "endedAt", "lastDeviation",
+                              "lastResultCallId", "lastResultFingerprint"}) {
         step.erase(key);
       }
     }
@@ -1273,7 +1291,8 @@ void merge_plan_runtime(nlohmann::json& plan, const nlohmann::json& previous) {
       if (prior.value("id", std::string()) != id) continue;
       step["attempts"] = prior.value("attempts", 0);
       step["status"] = prior.value("status", std::string("pending"));
-      for (const char* key : {"startedAt", "endedAt", "lastDeviation"}) {
+      for (const char* key : {"startedAt", "endedAt", "lastDeviation",
+                              "lastResultCallId", "lastResultFingerprint"}) {
         if (prior.contains(key)) {
           step[key] = prior.at(key);
         } else {
@@ -1292,18 +1311,16 @@ void normalize_new_plan_runtime(nlohmann::json& plan, const std::string& now) {
   if (plan.contains("steps") && plan.at("steps").is_array() && !plan.at("steps").empty()) {
     plan["currentStepId"] = plan.at("steps")[0].value("id", std::string());
   }
-  int index = 0;
   for (auto& step : plan["steps"]) {
     step["attempts"] = 0;
-    step["status"] = index == 0 ? "running" : "pending";
-    if (index == 0) {
-      step["startedAt"] = now;
-    } else {
-      step.erase("startedAt");
-    }
+    // Recording a plan leaves it awaiting the user's choice. Merely saving a
+    // currentStepId must not make that step look like it has started running.
+    step["status"] = "pending";
+    step.erase("startedAt");
     step.erase("endedAt");
     step.erase("lastDeviation");
-    ++index;
+    step.erase("lastResultCallId");
+    step.erase("lastResultFingerprint");
   }
 }
 
@@ -2329,6 +2346,8 @@ nlohmann::json handle_plan_check(DesktopDatabase& database, const nlohmann::json
                                         false)}};
 }
 
+bool is_call_identity(const std::string& value);
+
 bool task_can_transition(const std::string& from, const std::string& to) {
   if (from == to) return true;
   if (from == "pending") {
@@ -2359,9 +2378,13 @@ nlohmann::json handle_plan_step_result(DesktopDatabase& database,
   const auto task_id = json_text_field(params, "taskId");
   const auto plan_id = json_text_field(params, "planId");
   const auto step_id = json_text_field(params, "stepId");
+  const auto call_id = json_text_field(params, "callId");
   const auto status = json_text_field(params, "status");
   if (task_id.empty() || plan_id.empty() || step_id.empty() || status.empty()) {
     return record_failure_json("invalid_input", "invalid plan step result request", false);
+  }
+  if (!call_id.empty() && !is_call_identity(call_id)) {
+    return record_failure_json("invalid_input", "invalid plan step result call identity", false);
   }
   if (status != "success" && status != "failed" && status != "cancelled") {
     return record_failure_json("invalid_input", "unknown plan step result status", false);
@@ -2378,10 +2401,6 @@ nlohmann::json handle_plan_step_result(DesktopDatabase& database,
   if (!task.has_value()) {
     return record_failure_json("not_found", "investigation task was not found", false);
   }
-  if (json_text_field(*plan, "currentStepId") != step_id) {
-    return record_failure_json("plan_deviation",
-                               "plan step result does not match the current active step", false);
-  }
   const auto now = iso8601_now();
   auto& steps = (*plan)["steps"];
   int step_index = -1;
@@ -2394,9 +2413,29 @@ nlohmann::json handle_plan_step_result(DesktopDatabase& database,
   if (step_index < 0) {
     return record_failure_json("not_found", "plan step was not found", false);
   }
-  const auto step_kind = json_text_field(steps[step_index], "kind");
   const auto retryable = json_bool_field(params, "retryable");
   const auto output_summary = json_text_field(params, "outputSummary");
+  const auto result_fingerprint = DesktopDatabase::content_hash(
+      nlohmann::json{{"status", status}, {"retryable", retryable},
+                     {"outputSummary", output_summary}});
+  auto& step = steps[step_index];
+  const auto mark_result_identity = [&]() {
+    if (call_id.empty()) return;
+    step["lastResultCallId"] = call_id;
+    step["lastResultFingerprint"] = result_fingerprint;
+  };
+  if (!call_id.empty() && json_text_field(step, "lastResultCallId") == call_id) {
+    if (json_text_field(step, "lastResultFingerprint") == result_fingerprint) {
+      return {{"recorded", true}, {"replayed", true}, {"plan", *plan}};
+    }
+    return record_failure_json("invalid_input",
+                               "plan step result call identity was reused with different data", false);
+  }
+  if (json_text_field(*plan, "currentStepId") != step_id) {
+    return record_failure_json("plan_deviation",
+                               "plan step result does not match the current active step", false);
+  }
+  const auto step_kind = json_text_field(steps[step_index], "kind");
   const bool requires_baseline = json_bool_field(steps[step_index], "requiresBaseline");
   if (status == "success" && requires_baseline) {
     auto artifacts = database.list_investigation_artifacts(task_id, 128);
@@ -2434,6 +2473,7 @@ nlohmann::json handle_plan_step_result(DesktopDatabase& database,
                                                           : output_summary;
       window["status"] = "failed";
       window["lastFailure"] = failure_message;
+      mark_result_identity();
       (*plan)["updatedAt"] = now;
       database.save_investigation_plan(*plan);
       nlohmann::json failure = {{"code", "command_failed"},
@@ -2518,6 +2558,7 @@ nlohmann::json handle_plan_step_result(DesktopDatabase& database,
       }
       if (json_text_field(window, "status") == "running" &&
           (sampled || next_sample_at.has_value())) {
+        mark_result_identity();
         (*plan)["updatedAt"] = now;
         database.save_investigation_plan(*plan);
         nlohmann::json response = {{"recorded", true},
@@ -2529,7 +2570,6 @@ nlohmann::json handle_plan_step_result(DesktopDatabase& database,
       }
     }
   }
-  auto& step = steps[step_index];
   const auto current_step_status = json_text_field(step, "status");
   if (current_step_status != "pending" && current_step_status != "running") {
     return record_failure_json("invalid_input", "plan step is no longer active", false);
@@ -2559,6 +2599,7 @@ nlohmann::json handle_plan_step_result(DesktopDatabase& database,
       step["status"] = "pending";
     }
   }
+  mark_result_identity();
   (*plan)["updatedAt"] = now;
   try {
     database.save_investigation_plan(*plan);
@@ -4412,7 +4453,7 @@ nlohmann::json handle_ssh_effectful_action_target(
   denylist_detail::ConfiguredServerExecDenyList command_denylist;
   if (tool_name == kToolServerExec) {
     auto loaded = denylist_detail::load_configured_server_exec_denylist(
-        read_environment("YUKINAL_SSH_SERVICE_CONFIG"));
+        denylist_detail::configured_server_exec_denylist_path_from_environment());
     if (!loaded.loaded_ok) {
       return host_tool_failed(
           "denied_by_policy",

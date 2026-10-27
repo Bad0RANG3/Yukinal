@@ -1,0 +1,3 @@
+#include "yukinal/desktop_host/windows_resources.h"
+
+YUKINAL_DESKTOP_ICON_RESOURCE ICON "@YUKINAL_DESKTOP_HOST_ICON@"

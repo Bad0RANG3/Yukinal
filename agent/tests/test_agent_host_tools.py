@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import copy
 import unittest
 from typing import Any
 
@@ -89,17 +90,46 @@ class FakeBackupMetadataHost:
 class FakePlanHost:
     def __init__(self) -> None:
         self.calls: list[tuple[str, dict[str, Any], float]] = []
+        self.plan: dict[str, Any] | None = None
 
     async def request(self, method: str, params: dict[str, Any], *, timeout_seconds: float) -> dict[str, Any]:
         self.calls.append((method, params, timeout_seconds))
         if method == "host.investigation.plan.record":
-            plan = dict(params["plan"])
+            plan = copy.deepcopy(params["plan"])
             plan["revision"] = 1
             plan["status"] = "active"
             plan["currentStepId"] = plan["steps"][0]["id"]
+            self.plan = plan
             return {"recorded": True, "plan": plan}
         if method == "host.tool.execute":
             return {"status": "success", "output": {"status": "active"}}
+        if method == "host.investigation.plan.step_result":
+            if self.plan is None:
+                raise AssertionError("a plan result arrived before a plan was recorded")
+            if params.get("taskId") != self.plan["taskId"] or params.get("planId") != self.plan["id"]:
+                raise AssertionError("plan step result lost its durable task binding")
+            if params.get("callId") in (None, ""):
+                raise AssertionError("plan step result lost its tool call identity")
+            step_id = params.get("stepId")
+            if self.plan.get("currentStepId") != step_id:
+                for completed in self.plan["steps"]:
+                    if completed.get("id") == step_id and completed.get("lastResultCallId") == params["callId"]:
+                        return {"recorded": True, "replayed": True, "plan": self.plan}
+                raise AssertionError("plan step result did not match the active step")
+            for index, step in enumerate(self.plan["steps"]):
+                if step.get("id") != step_id:
+                    continue
+                step["status"] = "succeeded"
+                step["attempts"] = step.get("attempts", 0) + 1
+                step["lastResultCallId"] = params["callId"]
+                if index + 1 < len(self.plan["steps"]):
+                    self.plan["steps"][index + 1]["status"] = "running"
+                    self.plan["currentStepId"] = self.plan["steps"][index + 1]["id"]
+                else:
+                    self.plan["currentStepId"] = None
+                    self.plan["status"] = "completed"
+                break
+            return {"recorded": True, "plan": self.plan}
         raise AssertionError(f"unexpected plan host method: {method}")
 
 
@@ -136,6 +166,15 @@ class HostActionToolTests(unittest.IsolatedAsyncioTestCase):
                     "allowedTools": ["server__info"],
                     "successCriteria": ["The host returns a structured status snapshot."],
                     "requiresApproval": False,
+                }, {
+                    "id": "verify-server",
+                    "ordinal": 1,
+                    "kind": "evidence",
+                    "title": "Verify server status",
+                    "purpose": "Confirm the saved status with a second read.",
+                    "allowedTools": ["server.info"],
+                    "successCriteria": ["The host returns a second structured status snapshot."],
+                    "requiresApproval": False,
                 }]},
                 "id": "plan-call-1",
                 "type": "tool_call",
@@ -143,10 +182,20 @@ class HostActionToolTests(unittest.IsolatedAsyncioTestCase):
             AIMessage(content="", tool_calls=[{
                 "name": "server.info", "args": {}, "id": "info-call-1", "type": "tool_call",
             }]),
+            AIMessage(content="", tool_calls=[{
+                "name": "server.info", "args": {}, "id": "info-call-2", "type": "tool_call",
+            }]),
             AIMessage(content="The current server status is active."),
         ])
 
-        result = await ModelDrivenAgent(registry, model).run(
+        async def record_plan_step_result(params: dict[str, Any]) -> dict[str, Any]:
+            return await host.request(
+                "host.investigation.plan.step_result", params, timeout_seconds=15.0
+            )
+
+        result = await ModelDrivenAgent(
+            registry, model, plan_step_result=record_plan_step_result
+        ).run(
             task_id="agent-task-1",
             tenant_id="local",
             user_id="agent-session-1",
@@ -160,9 +209,11 @@ class HostActionToolTests(unittest.IsolatedAsyncioTestCase):
         )
 
         self.assertEqual(result.status, "succeeded")
-        self.assertEqual(result.tool_calls, 2)
+        self.assertEqual(result.tool_calls, 3)
         self.assertEqual([method for method, _params, _timeout in host.calls], [
             "host.investigation.plan.record", "host.tool.execute",
+            "host.investigation.plan.step_result", "host.tool.execute",
+            "host.investigation.plan.step_result",
         ])
         plan_request = host.calls[0][1]["plan"]
         self.assertEqual(plan_request["taskId"], "task-durable-1")
@@ -175,6 +226,69 @@ class HostActionToolTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(tool_request["callId"], result.tool_results[1]["call_id"])
         self.assertTrue(tool_request["callId"])
         self.assertEqual(tool_request["traceId"], "trace-plan-1")
+        first_step_result = host.calls[2][1]
+        self.assertEqual(first_step_result["stepId"], "inspect-server")
+        self.assertEqual(first_step_result["callId"], result.tool_results[1]["call_id"])
+        self.assertEqual(first_step_result["status"], "success")
+        second_tool_request = host.calls[3][1]
+        self.assertEqual(second_tool_request["planId"], plan_request["id"])
+        self.assertEqual(second_tool_request["planStepId"], "verify-server")
+        second_step_result = host.calls[4][1]
+        self.assertEqual(second_step_result["stepId"], "verify-server")
+        self.assertEqual(second_step_result["callId"], result.tool_results[2]["call_id"])
+        self.assertEqual(host.plan["status"], "completed")
+
+    async def test_plan_settlement_failure_stops_without_replaying_the_successful_tool(self) -> None:
+        host = FakePlanHost()
+        registry = ToolRegistry(MemoryAuditSink())
+        register_host_tools(registry, host)  # type: ignore[arg-type]
+        model = ScriptedModel([
+            AIMessage(content="", tool_calls=[{
+                "name": "investigation.plan",
+                "args": {"steps": [{
+                    "id": "inspect-server",
+                    "ordinal": 0,
+                    "kind": "evidence",
+                    "title": "Inspect server health",
+                    "purpose": "Collect a durable read result.",
+                    "allowedTools": ["server.info"],
+                    "successCriteria": ["The host returns a structured status snapshot."],
+                    "requiresApproval": False,
+                }]},
+                "id": "plan-call-fail",
+                "type": "tool_call",
+            }]),
+            AIMessage(content="", tool_calls=[{
+                "name": "server.info", "args": {}, "id": "info-call-fail", "type": "tool_call",
+            }]),
+            AIMessage(content="This response must not be requested."),
+        ])
+
+        async def reject_plan_step_result(params: dict[str, Any]) -> dict[str, Any]:
+            await host.request("host.investigation.plan.step_result", params, timeout_seconds=15.0)
+            return {"recorded": False, "error": {"code": "plan_deviation"}}
+
+        result = await ModelDrivenAgent(
+            registry, model, plan_step_result=reject_plan_step_result
+        ).run(
+            task_id="agent-task-1",
+            tenant_id="local",
+            user_id="agent-session-1",
+            prompt="Check the selected server.",
+            allowed_tools={"investigation.plan", "server.info"},
+            allowed_target_ids={"srv_stage1"},
+            host_target={"host": "remote", "serverId": "srv_stage1", "environment": "staging"},
+            host_task_id="task-durable-1",
+            run_id="run-plan-settlement-failed",
+            trace_id="trace-plan-settlement-failed",
+        )
+
+        self.assertEqual(result.status, "failed")
+        self.assertEqual(result.error_code, "plan_step_settlement_failed")
+        self.assertEqual(result.tool_calls, 2)
+        self.assertEqual(
+            [method for method, _params, _timeout in host.calls].count("host.tool.execute"), 1
+        )
 
     async def test_plan_rejects_tools_not_registered_by_the_host(self) -> None:
         host = FakePlanHost()

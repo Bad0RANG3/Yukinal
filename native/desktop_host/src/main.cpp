@@ -19,12 +19,16 @@
 
 #ifdef _WIN32
 #include <shellapi.h>
+#include <shobjidl.h>
 #include <windows.h>
 #endif
 
 #include "yukinal/desktop_host/ipc_router.hpp"
 #include "yukinal/desktop_host/ipc_dispatcher.hpp"
 #include "yukinal/desktop_host/database.hpp"
+#ifdef _WIN32
+#include "yukinal/desktop_host/windows_resources.h"
+#endif
 #ifdef _WIN32
 #include "yukinal/desktop_host/windows_window_frame.hpp"
 #endif
@@ -166,6 +170,21 @@ std::vector<std::unique_ptr<BridgeContext>> retire_auxiliary_windows(
 }
 
 #ifdef _WIN32
+void set_yukinal_window_icon(webview_t view) {
+  const auto window = static_cast<HWND>(webview_get_window(view));
+  if (!window || !IsWindow(window)) return;
+
+  const auto module = GetModuleHandleW(nullptr);
+  static const auto small_icon = reinterpret_cast<HICON>(LoadImageW(
+      module, MAKEINTRESOURCEW(YUKINAL_DESKTOP_ICON_RESOURCE), IMAGE_ICON,
+      GetSystemMetrics(SM_CXSMICON), GetSystemMetrics(SM_CYSMICON), LR_DEFAULTCOLOR));
+  static const auto large_icon = reinterpret_cast<HICON>(LoadImageW(
+      module, MAKEINTRESOURCEW(YUKINAL_DESKTOP_ICON_RESOURCE), IMAGE_ICON,
+      GetSystemMetrics(SM_CXICON), GetSystemMetrics(SM_CYICON), LR_DEFAULTCOLOR));
+  if (small_icon) SendMessageW(window, WM_SETICON, ICON_SMALL, reinterpret_cast<LPARAM>(small_icon));
+  if (large_icon) SendMessageW(window, WM_SETICON, ICON_BIG, reinterpret_cast<LPARAM>(large_icon));
+}
+
 LRESULT CALLBACK workpage_window_proc(HWND window, UINT message, WPARAM wparam, LPARAM lparam) {
   auto* context = reinterpret_cast<BridgeContext*>(GetPropW(window, L"YukinalBridgeContext"));
   if (!context || !context->previous_proc) return DefWindowProcW(window, message, wparam, lparam);
@@ -500,6 +519,9 @@ int run(const std::vector<std::string>& arguments) {
     auto window_events = context.lifetime;
     context.view = webview_create(debug ? 1 : 0, nullptr);
     if (context.view == nullptr) return 3;
+#ifdef _WIN32
+    set_yukinal_window_icon(context.view);
+#endif
     context.initialize_replies();
     context.router.set_event_sink(
         [&context, &auxiliary_windows, window_events](const std::string& event, const nlohmann::json& payload) {
@@ -547,6 +569,7 @@ int run(const std::vector<std::string>& arguments) {
       child->auxiliary = true; child->workpage_key = key;
       child->view = webview_create(debug ? 1 : 0, nullptr);
       if (!child->view) return {false, {{"code", "WINDOW_ERROR"}, {"message", "Could not create a workpage window"}}};
+      set_yukinal_window_icon(child->view);
       child->initialize_replies();
       if (!context.active()) {
         destroy_bridge_window(*child);
@@ -639,6 +662,7 @@ std::string to_utf8(const wchar_t* value) {
 }  // namespace
 
 int WINAPI wWinMain(HINSTANCE, HINSTANCE, PWSTR, int) {
+  (void)SetCurrentProcessExplicitAppUserModelID(L"Yukinal.Desktop");
   int count = 0;
   auto** wide_arguments = CommandLineToArgvW(GetCommandLineW(), &count);
   if (wide_arguments == nullptr) return 2;

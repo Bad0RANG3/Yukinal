@@ -452,6 +452,14 @@ if(YUKINAL_BUILD_DESKTOP_HOST)
     target_link_libraries(yukinal_desktop_host_core PRIVATE advapi32 bcrypt shell32 comdlg32 ole32 ws2_32)
     target_sources(yukinal_desktop_host_core PRIVATE desktop_host/src/window_context.cpp)
     add_executable(yukinal-desktop-host WIN32 desktop_host/src/main.cpp desktop_host/src/windows_window_frame.cpp)
+    set(YUKINAL_DESKTOP_HOST_ICON "${CMAKE_CURRENT_SOURCE_DIR}/../apps/desktop/design/yukinal.ico")
+    file(TO_CMAKE_PATH "${YUKINAL_DESKTOP_HOST_ICON}" YUKINAL_DESKTOP_HOST_ICON)
+    configure_file(
+      desktop_host/windows/yukinal.rc.in
+      "${CMAKE_CURRENT_BINARY_DIR}/yukinal-desktop-host.rc"
+      @ONLY
+    )
+    target_sources(yukinal-desktop-host PRIVATE "${CMAKE_CURRENT_BINARY_DIR}/yukinal-desktop-host.rc")
     if(MINGW)
       target_link_options(yukinal-desktop-host PRIVATE -municode)
     endif()

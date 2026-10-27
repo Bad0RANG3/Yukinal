@@ -318,12 +318,31 @@ function collectUnknownKeys(schema: z.ZodType, value: unknown, found: Set<string
     case "prefault":
       collectUnknownKeys(def["innerType"] as z.ZodType, value, found);
       return;
-    case "union":
-      // The tolerant tree validates every option, so the option that owns the payload is
-      // not recoverable from a successful parse. Every object branch is walked and the
-      // names are deduplicated, which is the honest answer: any of them could be the one.
-      for (const option of def["options"] as z.ZodType[]) collectUnknownKeys(option, value, found);
+    case "union": {
+      const options = def["options"] as z.ZodType[];
+      const discriminator = def["discriminator"];
+      if (typeof discriminator === "string" && value !== null && typeof value === "object" &&
+          Object.hasOwn(value, discriminator)) {
+        const discriminatorValue = (value as Record<string, unknown>)[discriminator];
+        const matching = options.filter((option) => {
+          const propValues = (option as unknown as {
+            _zod?: { propValues?: Record<string, Set<unknown>> };
+          })._zod?.propValues?.[discriminator];
+          return propValues?.has(discriminatorValue) === true;
+        });
+        if (matching.length === 1) {
+          // A tagged union identifies the owning branch even when the selected branch
+          // contains an unknown field. Walking its siblings would incorrectly report
+          // valid fields such as a text part's `text` as response drift.
+          collectUnknownKeys(matching[0]!, value, found);
+          return;
+        }
+      }
+      // Plain unions still do not identify one owning branch, so report the union of
+      // unknown keys across its alternatives.
+      for (const option of options) collectUnknownKeys(option, value, found);
       return;
+    }
     case "lazy":
       collectUnknownKeys((def["getter"] as () => z.ZodType)(), value, found);
       return;

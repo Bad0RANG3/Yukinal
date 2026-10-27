@@ -1,9 +1,8 @@
 # 变更记录
 
-## 未发行 — 实机验收修复（2026-10-27）
+## 2.0.3 — 2026-10-28
 
-在真实 Debian 12 服务器上的 Agent 实机验收发现并修复了以下问题；完整证据与未修复项见
-[Agent 实机验收记录](./agent-live-acceptance-20261027.md)。**Agent 能力验收因此重开。**
+本版合入 Agent 实机验收修复、host 侧策略与持久计划改动、Windows 任务栏图标修复。真实多目标长时间压力与安装版 GUI 仍待覆盖；详细范围见[交付与发布](./release.md)和[Agent 实机验收记录](./agent-live-acceptance-20261027.md)。
 
 - 阶段呈现：`server.exec` 的只读命令不再被报告为「变更」。新增 `command_effect.py`
   分类器，只影响阶段派生，授权与审批完全不变；未识别的一律按声明风险处理。
@@ -25,6 +24,8 @@
 - 自动批准下的变更链：`permissionMode=auto` 时一次真实变更之后的下一轮是只读确认轮，
   第二次变更在派发前被拒绝（上限 2 次，超出以 `confirmation_turn_required` 收束），
   因为这条路没有人看见第一次变更的结果。
+- Windows 原生宿主将 Yukinal ICO 资源嵌入可执行文件，为主窗口和独立工作页窗口设置任务栏/窗口图标，并设置稳定 AppUserModelID；安装快捷方式与宿主使用同一图标源。
+- 任务绑定与计划结算补齐 live 验收发现的全局范围回退、旧任务 ID 复用和持久步骤恢复问题；host 侧 `server.exec` denylist 使用独立配置路径并在 SSH 派发前 fail closed。
 
 ## 2.0.1 — 2026-10-27
 
