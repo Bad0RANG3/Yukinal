@@ -16,6 +16,7 @@ from langgraph.graph import END, START, StateGraph
 
 from .host_tools import HOST_APPROVAL_TOOLS
 from .agent_stage import STAGE_SET, derive_report_stage, derive_stage, stage_for_start
+from .command_effect import is_read_only_command
 from .tools import ExecutionContext, ToolCallError, ToolRegistry
 from .visual_output import VISUAL_OUTPUT_GUIDE, VISUAL_SELECTION_GUIDE
 from .response_policy import RESPONSE_STYLE
@@ -173,6 +174,13 @@ class _AgentState(TypedDict, total=False):
     goal_last_tool_count: int
     goal_stalls: int
     stage: str
+    #: Set once an auto-approved, state-changing call has succeeded. The next model
+    #: turn is a confirmation turn: it may only read, so an auto-approved batch can
+    #: never chain a second effect without a person seeing the first one land.
+    confirm_after_change: bool
+    #: How many times the model tried to change the target during that turn. Bounded
+    #: so a stubborn model cannot spend the whole budget being refused.
+    confirm_refusals: int
 
 
 class ModelDrivenAgent:
@@ -189,6 +197,7 @@ class ModelDrivenAgent:
         tool_names: frozenset[str] | None = None,
         inference_profile: dict[str, Any] | None = None,
         goal_loop: bool = False,
+        auto_approval: bool = False,
     ) -> None:
         self._registry = registry
         self._budget = budget or AgentBudget()
@@ -196,6 +205,9 @@ class ModelDrivenAgent:
         self._transcript_sink = transcript_sink
         self._inference_profile = dict(inference_profile or {})
         self._goal_loop = bool(goal_loop)
+        # Only an auto-approved call runs without a person seeing it, so only in that
+        # mode does the next turn need to confirm what the target actually became.
+        self._auto_approval = bool(auto_approval)
         self._review_model = model.bind(max_tokens=min(1536, self._budget.max_model_output_tokens)) if goal_loop else None
         self._request_timing: dict[str, Any] = {}
         self._approval_checkpoints: set[str] = set()
@@ -246,6 +258,22 @@ class ModelDrivenAgent:
             checkpointer=checkpointer if checkpointer is not None else InMemorySaver()
         )
 
+    def _proposed_call_is_effectful(self, call: dict[str, Any]) -> bool:
+        """Whether a not-yet-executed model call would change the target.
+
+        Uses the same observation the stage does: a `server.exec` whose command is a
+        chain of pure readers is a read, everything else keeps its declared risk.
+        """
+        spec = self._registry.get(self._provider_to_internal.get(call["name"], call["name"]))
+        if spec is None:
+            return True
+        declared = spec.risk_level
+        if declared == "read":
+            return False
+        if spec.name == "server.exec" and is_read_only_command(call.get("args", {}).get("command")):
+            return False
+        return True
+
     def _system_prompt(self, prompt: str, persona: dict[str, str] | None) -> str:
         # One assembly for both the real model input and the context budget; a
         # second copy is how a budget starts lying about what was sent.
@@ -285,6 +313,7 @@ class ModelDrivenAgent:
         trace_id: str = "",
         checkpoint_binding: str = "",
         require_checkpoint: bool = False,
+        checkpoint_key: str = "",
         persona: dict[str, str] | None = None,
         conversation_messages: list[Any] | None = None,
     ) -> ModelAgentResult:
@@ -365,8 +394,20 @@ class ModelDrivenAgent:
             "goal_last_tool_count": -1,
             "goal_stalls": 0,
             "stage": "intake",
+            "confirm_after_change": False,
+            "confirm_refusals": 0,
         }
-        if run_id:
+        resume_key = checkpoint_key if isinstance(checkpoint_key, str) and checkpoint_key else ""
+        if resume_key:
+            # A stable locator: the same conversation turn in the same window maps to
+            # the same thread across a process restart, so a pending approval is handed
+            # back instead of disappearing. A different window has a different session,
+            # hence a different key, hence a fresh start — the requested rule exactly.
+            # `checkpoint_binding` stays the *verifier*: a key that resolves to a thread
+            # bound to other scope or authorization is refused.
+            locator = "\x1f".join(("turn", context.tenant_id, context.user_id, resume_key))
+            checkpoint_id = f"agent-{hashlib.sha256(locator.encode('utf-8')).hexdigest()}"
+        elif run_id:
             thread_material = "\x1f".join((context.tenant_id, context.user_id, context.task_id, run_id))
             checkpoint_id = f"agent-{hashlib.sha256(thread_material.encode('utf-8')).hexdigest()}"
         else:
@@ -377,9 +418,26 @@ class ModelDrivenAgent:
                 snapshot = await self._graph.aget_state(config)
                 saved_state = snapshot.values
                 if saved_state:
-                    if not _checkpoint_matches(saved_state, initial):
+                    if not _checkpoint_matches(saved_state, initial, resume_key=resume_key):
                         return _failed_result(task_id, "checkpoint_context_mismatch")
-                    if saved_state.get("status") in {"awaiting_approval", "succeeded", "failed", "cancelled", "timed_out"}:
+                    if saved_state.get("status") in {"succeeded", "failed", "cancelled", "timed_out"}:
+                        # A finished turn is not a resumable one: its answer already
+                        # reached the user. Sending the same request again is a new
+                        # request, so the old thread is discarded, not replayed.
+                        discard = getattr(self._graph, "adelete_thread", None)
+                        if resume_key and discard is not None:
+                            try:
+                                await discard(checkpoint_id)
+                            except Exception:
+                                # Discarding a finished thread is housekeeping. It must
+                                # never turn a repeat request into a failed run.
+                                pass
+                        checkpoint_id = f"agent-{uuid.uuid4().hex}"
+                        config = self._graph_config(checkpoint_id)
+                        state = await self._graph.ainvoke(initial, config=config)
+                    elif saved_state.get("status") == "awaiting_approval":
+                        # The paused graph is precisely what the operator is being
+                        # asked about; hand it back untouched so that call can resume.
                         state = saved_state
                     else:
                         state = await self._graph.ainvoke(None, config=config)
@@ -405,6 +463,10 @@ class ModelDrivenAgent:
         return self._record_model_update(state, update)
 
     def _record_model_update(self, state: _AgentState, update: dict[str, Any], response: AIMessage | None = None) -> dict[str, Any]:
+        if state.get("confirm_after_change") and update.get("status") != "running":
+            # The confirmation turn has produced its conclusion; a refused proposal
+            # keeps the flag so the loop can ask once more (bounded above).
+            update["confirm_after_change"] = False
         messages = update.get("messages", [])
         if self._request_timing:
             if response is None:
@@ -541,6 +603,7 @@ class ModelDrivenAgent:
         """
         stage = stage_for_start(state.get("stage"))
         seen = {(item.get("call_id"), item.get("status")) for item in state.get("tool_results", ())}
+        calls = state.get("calls", ())
         for item in update.get("tool_results", ()):
             if (item.get("call_id"), item.get("status")) in seen:
                 continue
@@ -548,7 +611,7 @@ class ModelDrivenAgent:
             stage = derive_stage(
                 stage,
                 tool=str(item.get("tool", "")),
-                risk=getattr(spec, "risk_level", "read"),
+                risk=_effective_risk(spec, calls, item.get("call_id")),
                 succeeded=item.get("status") == "succeeded",
                 phase=item.get("phase"),
                 error_code=item.get("error_code"),
@@ -792,6 +855,54 @@ class ModelDrivenAgent:
             calls = []
         if self._budget.max_tool_calls is not None and state["tool_call_count"] + len(calls) > self._budget.max_tool_calls:
             return {"messages": [*state["messages"], response], "status": "failed", "error_code": "tool_call_limit_exceeded"}
+        confirmation_refusals = 0
+        if state.get("confirm_after_change"):
+            # This is the turn after a state-changing call ran. It may only read, so
+            # an auto-approved batch cannot chain a second effect before a person has
+            # seen the first one land. A text-only answer is exactly what this turn is
+            # for; an effectful proposal is refused and the loop asks again once.
+            effectful = [call for call in calls if self._proposed_call_is_effectful(call)]
+            if effectful:
+                kept = [call for call in calls if call not in effectful]
+                notice = (
+                    "The previous state-changing call has already run. Confirm what actually happened "
+                    "by reading the target; do not propose another change in this turn. A person must "
+                    "see the first result before anything else is modified."
+                )
+                refusals = state.get("confirm_refusals", 0) + 1
+                if refusals > 2:
+                    return {
+                        "messages": [*state["messages"], SystemMessage(content=notice)],
+                        "model_rounds": next_round,
+                        "streamed_bytes": streamed_bytes,
+                        "calls": [],
+                        "call_index": 0,
+                        "status": "failed",
+                        "error_code": "confirmation_turn_required",
+                    }
+                if not kept:
+                    # Keep the flag so `_route_model` asks the model again (the same
+                    # shape the recovery guard uses), and bound how often it may.
+                    return {
+                        "messages": [*state["messages"], SystemMessage(content=notice)],
+                        "model_rounds": next_round,
+                        "streamed_bytes": streamed_bytes,
+                        "calls": [],
+                        "call_index": 0,
+                        "answer": "",
+                        "status": "running",
+                        "error_code": None,
+                        "confirm_after_change": True,
+                        "confirm_refusals": refusals,
+                    }
+                calls = kept
+                confirmation_refusals = refusals
+                messages_with_notice = [*state["messages"], SystemMessage(content=notice)]
+            else:
+                messages_with_notice = list(state["messages"])
+        else:
+            confirmation_refusals = 0
+            messages_with_notice = list(state["messages"])
         if not calls:
             if state.get("recovery_diagnosis_required"):
                 # Do not let an assistant's premature final response end recovery. Its
@@ -872,13 +983,14 @@ class ModelDrivenAgent:
             })
         response = response.model_copy(update={"tool_calls": prepared_provider_calls})
         return {
-            "messages": [*state["messages"], response],
+            "messages": [*messages_with_notice, response],
             "calls": clean_calls,
             "streamed_bytes": streamed_bytes,
             "call_index": 0,
             "model_rounds": next_round,
             "status": "running",
             "error_code": None,
+            **({"confirm_refusals": confirmation_refusals} if confirmation_refusals else {}),
         }
 
     async def _stream_model(self, state: _AgentState, *, model: Any | None = None, public: bool = True) -> tuple[AIMessage, int]:
@@ -984,17 +1096,28 @@ class ModelDrivenAgent:
         if not request.get("event_emitted"):
             self._emit_tool_call(event_base)
         if call_id in state.get("rejected_call_ids", []):
+            # The verdict is a real outcome of a real call, and the model is the one
+            # that owns the answer, so the run continues with one model round that
+            # has to report what did not happen. Ending here instead (as this used
+            # to) made "it did not retry" a property of the loop rather than of the
+            # model, and left the transcript with a tool call that had no result.
             rejection_code = state.get("rejection_codes", {}).get(call_id, "approval_rejected")
-            answer = (
-                "审批已过期，当前操作未执行。此前已完成的操作未撤销。"
-                if rejection_code == "approval_timeout"
-                else "已拒绝当前操作，后续执行已停止。此前已完成的操作未撤销。"
+            expired = rejection_code == "approval_timeout"
+            notice = (
+                "The approval window expired before a decision. This call did not run, and nothing "
+                "on the target changed. Do not retry it, do not reword the arguments, and do not "
+                "reach the same change another way. Report what was not done and what would be "
+                "needed to proceed."
+                if expired else
+                "The user did not approve this exact call. It did not run, and nothing on the target "
+                "changed. Do not retry it, do not reword the arguments, and do not reach the same "
+                "change another way. Report what was not done and what would be needed to proceed."
             )
             self._emit_tool_result(
                 event_base,
                 started_at=started_at,
                 status="failed",
-                output_summary="Approval expired" if rejection_code == "approval_timeout" else "Approval rejected",
+                output_summary="Approval expired" if expired else "Approval rejected",
                 error="Approval was not granted; the tool was not executed",
                 error_code=rejection_code,
             )
@@ -1007,9 +1130,16 @@ class ModelDrivenAgent:
                 "tool": request["name"],
                 "status": "failed",
                 "error_code": rejection_code,
+                "phase": "approval_denied",
+                "request_digest": _request_digest(request),
             })
-            answer_size = len(answer.encode("utf-8"))
-            if state["output_bytes"] + answer_size > self._budget.max_output_bytes:
+            content = json.dumps({
+                "state": "not_executed",
+                "errorCode": rejection_code,
+                "notice": notice,
+            }, ensure_ascii=False, separators=(",", ":"))
+            output_size = len(content.encode("utf-8"))
+            if state["output_bytes"] + output_size > self._budget.max_output_bytes:
                 return {
                     "tool_results": results,
                     "counted_call_ids": next_counted_call_ids,
@@ -1018,12 +1148,26 @@ class ModelDrivenAgent:
                     "error_code": "output_budget_exceeded",
                 }
             return {
+                "messages": [
+                    *state["messages"],
+                    ToolMessage(
+                        content=content,
+                        tool_call_id=request["id"],
+                        name=request.get("provider_name", request["name"]),
+                    ),
+                ],
                 "tool_results": results,
                 "counted_call_ids": next_counted_call_ids,
                 "tool_call_count": next_tool_call_count,
-                "answer": answer,
-                "output_bytes": state["output_bytes"] + answer_size,
-                "status": "succeeded",
+                "output_bytes": state["output_bytes"] + output_size,
+                "call_index": state["call_index"] + 1,
+                # A denial is a decision, not a failed observation: it must not be
+                # diagnosed with more reads, and it must not leave the run "running"
+                # with a recovery flag that needs a successful read to clear.
+                "recovery_read_required": False,
+                "recovery_diagnosis_required": False,
+                "answer": "",
+                "status": "running",
                 "error_code": None,
             }
         tool_timeout = min(
@@ -1172,9 +1316,23 @@ class ModelDrivenAgent:
                 # One model repair opportunity, with explicit non-execution.
                 # Never reuse an old result as a newly executed operation.
                 if prior_guards == 0 or (state.get("goal_loop_enabled") and len(state["calls"]) == 1):
+                    denied_before = any(
+                        item.get("phase") == "approval_denied"
+                        and item.get("request_digest") == failed_item["request_digest"]
+                        for item in state["tool_results"]
+                    )
                     encoded = json.dumps({
                         "state": "not_executed", "errorCode": error.code,
-                        "notice": "This repeats an operation with unchanged results or an unresolved timeout outcome. This call did not execute. Reuse the existing evidence and inspect actual state with a different narrow read, or report the concrete blocker. Do not repeat this call or merely reword its purpose.",
+                        "notice": (
+                            "The user did not approve this exact action and this is the same action again. "
+                            "This call did not execute. Do not propose it again or reword it; report that the "
+                            "change was not made and what would be needed to proceed."
+                            if denied_before else
+                            "This repeats an operation with unchanged results or an unresolved timeout "
+                            "outcome. This call did not execute. Reuse the existing evidence and inspect actual "
+                            "state with a different narrow read, or report the concrete blocker. Do not repeat "
+                            "this call or merely reword its purpose."
+                        ),
                     }, separators=(",", ":"))
                     output_size = len(encoded.encode("utf-8"))
                     if output_size <= remaining:
@@ -1397,6 +1555,7 @@ class ModelDrivenAgent:
             status="success",
             output_summary=_tool_output_summary(result.value),
             duration_ms=result.duration_ms,
+            approval_wait_ms=_approval_wait_ms(started_at, result.duration_ms),
         )
         output_size = result.output_bytes
         item = {
@@ -1430,6 +1589,12 @@ class ModelDrivenAgent:
             "status": "running",
             "error_code": None,
         }
+        if (self._auto_approval
+                and _effective_risk(spec, state.get("calls", ()), call_id) != "read"
+                and not state.get("confirm_after_change")):
+            # A change just ran (under an approval the model could not see being
+            # granted). The next turn is limited to confirmation reads.
+            update["confirm_after_change"] = True
         if state.get("recovery_read_required") and spec is not None and spec.risk_level == "read":
             update["recovery_read_required"] = False
         if state.get("recovery_diagnosis_required") and spec is not None and spec.risk_level == "read":
@@ -1465,6 +1630,7 @@ class ModelDrivenAgent:
         error: str | None = None,
         error_code: str | None = None,
         duration_ms: int | None = None,
+        approval_wait_ms: int | None = None,
     ) -> None:
         if self._event_sink is None:
             return
@@ -1481,6 +1647,10 @@ class ModelDrivenAgent:
             "durationMs": duration_ms if duration_ms is not None else _elapsed_ms(started_at, ended_at),
             "at": ended_at,
         }
+        if approval_wait_ms:
+            # Reported separately: `durationMs` is the tool's own execution time,
+            # and a paused approval is a person thinking, not a slow tool.
+            result["approvalWaitMs"] = approval_wait_ms
         if error is not None:
             result["error"] = _truncate_utf16(_redact_sensitive_text(error), 4000)
         if error_code is not None:
@@ -1492,6 +1662,8 @@ class ModelDrivenAgent:
         if state.get("status") == "running" and state.get("goal_review_pending"):
             return "review"
         if state.get("status") == "running" and state.get("recovery_diagnosis_required") and not state.get("calls"):
+            return "continue"
+        if state.get("status") == "running" and state.get("confirm_after_change") and not state.get("calls"):
             return "continue"
         if state.get("status") != "running" or not state.get("calls"):
             return "finish"
@@ -1508,23 +1680,63 @@ class ModelDrivenAgent:
         return "model"
 
 
-def _checkpoint_matches(saved: _AgentState, initial: _AgentState) -> bool:
+def _effective_risk(spec: Any, calls: Any, call_id: Any) -> str:
+    """The risk the *stage* should use for one executed call.
+
+    The registry's declared risk stays authoritative for authorization: a
+    `server.exec` call always needed its approval and always ran through the
+    host's ticket. This only decides whether the run may claim it left
+    `evidence`, so a chain of recognised pure readers is reported as a read
+    instead of telling the operator the server changed.
+
+    Any call this cannot positively classify keeps its declared risk.
+    """
+    declared = getattr(spec, "risk_level", "destructive")
+    if declared == "read" or getattr(spec, "name", None) != "server.exec":
+        return declared
+    for call in calls if isinstance(calls, (list, tuple)) else ():
+        if not isinstance(call, dict) or call.get("call_id") != call_id:
+            continue
+        arguments = call.get("arguments")
+        if isinstance(arguments, dict) and is_read_only_command(arguments.get("command")):
+            return "read"
+        break
+    return declared
+
+
+def _checkpoint_matches(saved: _AgentState, initial: _AgentState, *, resume_key: str = "") -> bool:
+    # These decide what the paused graph is allowed to do next, so a mismatch must
+    # fail closed. `run_id` and `trace_id` are deliberately absent: they identify an
+    # attempt, not an authorization, and a resumed attempt necessarily has new ones.
     binding_fields = (
-        "task_id", "tenant_id", "user_id", "allowed_tools", "allowed_target_ids",
-        "host_target", "host_task_id", "run_id", "trace_id", "checkpoint_binding",
+        "tenant_id", "user_id", "allowed_tools", "allowed_target_ids",
+        "host_target", "host_task_id", "checkpoint_binding",
         "budget_binding",
         "goal_loop_enabled",
     )
+    if not resume_key:
+        # Without a turn key the thread is located by the attempt, so `task_id` (also
+        # derived from that attempt) is part of what must match. With a turn key the
+        # thread is located by the turn and the durable task identity is already
+        # covered by `checkpoint_binding`.
+        binding_fields = ("task_id", *binding_fields)
     if any(saved.get(field) != initial.get(field) for field in binding_fields):
         return False
     saved_messages = saved.get("messages", [])
     initial_messages = initial.get("messages", [])
     if len(saved_messages) < 2 or len(initial_messages) < 2:
         return False
+    # A *restore* after a restart prepends the archived conversation projection
+    # (system, history…, human). The resumed turn then begins with those exact
+    # messages, so a length-aware prefix check accepts it without weakening the
+    # binding: transcript content cannot become authorization, and every
+    # authorizing field is already compared above.
+    if len(saved_messages) > len(initial_messages):
+        saved_messages = saved_messages[:len(initial_messages)]
     return all(
         type(saved_message) is type(initial_message)
         and saved_message.content == initial_message.content
-        for saved_message, initial_message in zip(saved_messages[:2], initial_messages[:2])
+        for saved_message, initial_message in zip(saved_messages, initial_messages)
     )
 
 
@@ -1671,6 +1883,12 @@ def _result_digest(value: Any) -> str:
 
 def _repeated_unchanged_call(request: dict[str, Any], results: list[dict[str, Any]]) -> bool:
     digest = _request_digest(request)
+    # A denied call must not be re-proposed, not even with a new call id: the
+    # decision was about this exact action, and asking again is how a rejection
+    # turns into a prompt to reword it. Without this the model can loop on
+    # approvals forever, one fresh approval card per attempt.
+    if any(item.get("phase") == "approval_denied" and item.get("request_digest") == digest for item in results):
+        return True
     if any(item.get("phase") == "outcome_unknown" and item.get("request_digest") == digest for item in results):
         return True
     if any(item.get("phase") == "failure_diagnosis" and item.get("request_digest") == digest for item in results):
@@ -1830,6 +2048,18 @@ def _elapsed_ms(started_at: str, ended_at: str) -> int:
         return max(0, round((ended - started).total_seconds() * 1000))
     except (TypeError, ValueError):
         return 0
+
+
+def _duration_ms_since(started_at: str) -> int:
+    try:
+        return max(0, round((datetime.now(UTC) - datetime.fromisoformat(started_at)).total_seconds() * 1000))
+    except (TypeError, ValueError):
+        return 0
+
+
+def _approval_wait_ms(started_at: str, execution_ms: int) -> int:
+    """Time between the call event and execution start, excluding execution."""
+    return max(0, _duration_ms_since(started_at) - max(0, execution_ms))
 
 
 def _approval_from_state(item: dict[str, Any]) -> ApprovalRequest:

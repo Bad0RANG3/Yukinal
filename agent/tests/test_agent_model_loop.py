@@ -5,7 +5,7 @@ import unittest
 import json
 from typing import Any
 
-from langchain_core.messages import AIMessage
+from langchain_core.messages import AIMessage, ToolMessage
 
 from yukinal_agent import (
     AgentBudget,
@@ -636,14 +636,23 @@ class ModelLoopTests(unittest.IsolatedAsyncioTestCase):
         )
 
         self.assertEqual(rejected.status, "succeeded")
-        self.assertEqual(
-            rejected.answer,
-            "已拒绝当前操作，后续执行已停止。此前已完成的操作未撤销。",
-        )
+        # The model now writes the answer: a rejection is an outcome it must report,
+        # not a sentence the runtime invents on its behalf.
+        self.assertEqual(rejected.answer, "I stopped without changing it.")
         self.assertEqual(executions, [])
         self.assertEqual(rejected.tool_results[-1]["status"], "failed")
         self.assertEqual(rejected.tool_results[-1]["error_code"], "approval_rejected")
-        self.assertEqual(len(model.responses), 1, "the model must not be called again after rejection")
+        self.assertEqual(len(model.responses), 0, "the model gets exactly one round after a rejection")
+        # The model must have received the denial as a tool result with the same id
+        # the assistant used, or the transcript keeps an orphan tool call.
+        following = model.seen_messages[-1]
+        denial = [item for item in following if isinstance(item, ToolMessage)]
+        self.assertEqual(len(denial), 1)
+        self.assertEqual(denial[0].tool_call_id, "write-reject-1")
+        payload = json.loads(str(denial[0].content))
+        self.assertEqual(payload["state"], "not_executed")
+        self.assertEqual(payload["errorCode"], "approval_rejected")
+        self.assertIn("Do not retry", payload["notice"])
 
     async def test_expired_approval_ends_the_graph_without_retry(self) -> None:
         async def handler(_arguments: dict[str, Any], _context: ExecutionContext) -> str:
@@ -674,12 +683,11 @@ class ModelLoopTests(unittest.IsolatedAsyncioTestCase):
         )
 
         self.assertEqual(expired.status, "succeeded")
-        self.assertEqual(
-            expired.answer,
-            "审批已过期，当前操作未执行。此前已完成的操作未撤销。",
-        )
+        self.assertEqual(expired.answer, "The operation is done.")
         self.assertEqual(expired.tool_results[-1]["error_code"], "approval_timeout")
-        self.assertEqual(len(model.responses), 1, "the model must not be called again after expiration")
+        self.assertEqual(len(model.responses), 0, "the model gets exactly one round after expiration")
+        denial = [item for item in model.seen_messages[-1] if isinstance(item, ToolMessage)]
+        self.assertEqual(json.loads(str(denial[0].content))["errorCode"], "approval_timeout")
 
     async def test_model_round_limit_and_untrusted_result_boundary(self) -> None:
         async def handler(_arguments: dict[str, Any], _context: ExecutionContext) -> str:

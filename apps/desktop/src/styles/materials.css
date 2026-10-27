@@ -21,6 +21,14 @@
   --warning: #d6d6d6;
   --danger: #e3e3e3;
   --success: #bdbdbd;
+  /* Content hues. Surfaces and chrome stay graphite; only content the operator
+     opened on purpose (a target's own log or command output) carries colour, and
+     it reuses the muted hues the conversation visuals already define so the tone
+     set has one source of truth. */
+  --content-error: #d18b8b;
+  --content-warning: #d3b076;
+  --content-success: #92b3a0;
+  --content-accent: #8aaecb;
   --info: #b0b0b0;
   --connection-connected: #9dbda9;
   --connection-connecting: #d7ba83;

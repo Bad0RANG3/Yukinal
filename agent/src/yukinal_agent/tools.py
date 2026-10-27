@@ -313,6 +313,9 @@ class ToolRegistry:
         event_id = str(uuid.uuid4())
         safe_arguments = arguments if isinstance(arguments, dict) else {}
         target_id = _safe_target_id(safe_arguments, spec, context)
+        # The agent owns the call identity; a direct/manual call has none. Keeping
+        # it on both rows is what makes a rejected or expired approval traceable.
+        audit_call_id = call_id or ""
         await self._audit.record(
             _make_event(
                 context,
@@ -322,6 +325,7 @@ class ToolRegistry:
                 target_id=target_id,
                 started_at=started,
                 arguments=safe_arguments,
+                call_id=audit_call_id,
             )
         )
 
@@ -352,12 +356,14 @@ class ToolRegistry:
             await self._record_finished(
                 context, event_id, "failed", spec.name if spec is not None else "<unregistered>", target_id, started, safe_arguments,
                 started_clock, error_code="execution_timeout", approval_status=approval_status,
+                call_id=audit_call_id,
             )
             raise ToolCallError("execution_timeout", "Tool execution exceeded its time limit") from None
         except asyncio.CancelledError:
             await self._record_finished(
                 context, event_id, "cancelled", name, target_id, started, safe_arguments,
                 started_clock, error_code="execution_cancelled", approval_status=approval_status,
+                call_id=audit_call_id,
             )
             raise
         except ToolCallError as error:
@@ -389,12 +395,14 @@ class ToolRegistry:
                 ),
                 error_code=error.code,
                 approval_status=approval_status,
+                call_id=audit_call_id,
             )
             raise
         except Exception:
             await self._record_finished(
                 context, event_id, "failed", spec.name if spec is not None else "<unregistered>", target_id, started, safe_arguments,
                 started_clock, error_code="tool_failed", approval_status=approval_status,
+                call_id=audit_call_id,
             )
             raise ToolCallError("tool_failed", "Tool execution failed") from None
 
@@ -403,8 +411,48 @@ class ToolRegistry:
         await self._record_finished(
             context, event_id, "succeeded", spec.name if spec is not None else "<unregistered>", target_id, started, safe_arguments,
             started_clock, result_summary=result_summary, approval_status=approval_status,
+            call_id=audit_call_id,
         )
         return ToolCallResult(name, json_value, duration_ms, len(encoded), handler_context.call_id)
+
+    async def audit_decision(
+        self,
+        *,
+        run_id: str,
+        call_id: str,
+        tool_name: str,
+        target_id: str | None,
+        status: str,
+        tenant_id: str = "",
+        user_id: str = "",
+    ) -> None:
+        """Record the operator's approval verdict for one already-audited call.
+
+        `ToolRegistry.execute` writes the attempt rows; it cannot write the verdict,
+        because the verdict is decided later, by a person, on the other side of a
+        paused graph. A rejected or expired call never executes at all, so without
+        this row the audit trail stops at `awaiting_approval` and the decision is
+        only recoverable from the conversation transcript.
+        """
+        if status not in {"approved", "rejected"}:
+            raise ValueError("audit_decision status must be approved or rejected")
+        now = datetime.now(UTC).isoformat()
+        safe_tool = tool_name if isinstance(tool_name, str) and _TOOL_NAME.fullmatch(tool_name) else "<unregistered>"
+        await self._audit.record(AuditEvent(
+            event_id=str(uuid.uuid4()),
+            status=status,
+            task_id=run_id,
+            tenant_id=tenant_id,
+            user_id=user_id,
+            tool_name=safe_tool,
+            target_id=target_id if isinstance(target_id, str) and _IDENTIFIER.fullmatch(target_id) else None,
+            started_at=now,
+            finished_at=now,
+            argument_keys=(),
+            argument_types=(),
+            approval_status=status,
+            call_id=call_id,
+        ))
 
     @staticmethod
     def _copy_spec(spec: ToolSpec) -> ToolSpec:
@@ -437,6 +485,7 @@ class ToolRegistry:
         result_summary: dict[str, object] | None = None,
         error_code: str | None = None,
         approval_status: str = "not_required",
+        call_id: str = "",
     ) -> None:
         await self._audit.record(
             _make_event(
@@ -452,6 +501,7 @@ class ToolRegistry:
                 result_summary=result_summary,
                 error_code=error_code,
                 approval_status=approval_status,
+                call_id=call_id,
             )
         )
 
@@ -510,6 +560,7 @@ def _make_event(
     result_summary: dict[str, object] | None = None,
     error_code: str | None = None,
     approval_status: str = "not_required",
+    call_id: str = "",
 ) -> AuditEvent:
     safe_pairs = sorted(
         (key[:128], type(value).__name__[:48])
@@ -536,6 +587,7 @@ def _make_event(
         result_summary=summary or None,
         error_code=error_code,
         approval_status=approval_status,
+        call_id=call_id,
     )
 
 

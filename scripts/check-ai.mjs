@@ -17,7 +17,7 @@ const modules = [
   "test_agent_stage", "test_operations_policy", "test_agent_auto_approval",
   "test_agent_run_finalization", "test_provider_store", "test_agent_sidecar",
   "test_reasoning_effort", "test_agent_reasoning_loop",
-  "test_agent_long_workflow",
+  "test_agent_long_workflow", "test_agent_capability_gates", "test_agent_live_acceptance_fixes",
   "test_system_snapshot", "test_network_snapshot", "test_server_toolkit",
 ];
 for (const module of modules) {

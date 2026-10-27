@@ -16,20 +16,23 @@ controlled AI Agent with a hardened, structured SSH service.
 [![Platform](https://img.shields.io/badge/platform-Windows%20%7C%20macOS%20%7C%20Linux-6f42c1.svg)](#build-and-run)
 [![Python](https://img.shields.io/badge/python-3.11%2B-3776ab.svg)](./agent/README.md)
 [![Node](https://img.shields.io/badge/node-%3E%3D24-339933.svg)](package.json)
-[![Acceptance](https://img.shields.io/badge/Agent-accepted-success.svg)](./docs/release.md)
+[![Acceptance](https://img.shields.io/badge/Agent-reopened%20for%20acceptance-informational.svg)](./docs/agent-live-acceptance-20261027.md)
 
 </div>
 
 ---
 
-> **Release: `2.0.1`.** The project owner confirmed Agent capability acceptance
-> on 2026-10-27 and approved a stable release. This revision includes the Provider
-> cold-start fix, Agent improvements, and a simpler workspace: Files, Terminal,
-> Logs, and Services switch the main view directly; the Agent conversation stays
-> available in a floating panel. See [release notes](./docs/releases/2.0.1.md)
-> and [delivery status](./docs/release.md) for build evidence and package availability.
-> Windows NSIS, macOS DMG, and Debian Linux packages are built by CI. Packages
-> remain unsigned; the macOS application is not notarized.
+> **Release: `2.0.1`.** **The Agent capability acceptance is reopened.** A live
+> acceptance run on a real Debian 12 host on 2026-10-27 found and fixed real
+> defects in stage reporting, audit completeness and approval defaults, and found
+> one capability that does not work end to end: a pending approval cannot be
+> recovered after a restart on the desktop path. `2.0.1` remains published; its
+> Agent capability claim is superseded by
+> [the live acceptance record](./docs/agent-live-acceptance-20261027.md). See
+> [release notes](./docs/releases/2.0.1.md) and [delivery status](./docs/release.md)
+> for build evidence and package availability. Windows NSIS, macOS DMG, and
+> Debian Linux packages are built by CI. Packages remain unsigned; the macOS
+> application is not notarized.
 
 ## Contents
 
@@ -130,12 +133,12 @@ desktop path.
 | Proxy routes (HTTP/HTTPS CONNECT, SOCKS5/SOCKS5H) and bypass rules | ✅ Implemented |
 | Bounded SFTP list/stat/read/write/backup, guarded atomic replace | ✅ Implemented |
 | C++ desktop host: window, IPC router, SQLite, credentials, approvals | ✅ Implemented |
-| Python Agent: LangGraph loop, Tool Registry, policy, redacted audit | ✅ Owner acceptance confirmed, 2026-10-27 |
+| Python Agent: LangGraph loop, Tool Registry, policy, redacted audit | ✅ Implemented · 🚧 acceptance reopened — see [live record](./docs/agent-live-acceptance-20261027.md) |
 | MCP clients (stdio + Streamable HTTP) with approval-required defaults | ✅ Implemented |
 | Model factory: OpenAI-compatible, Anthropic, Gemini | ✅ Implemented |
-| Durable approvals with per-call fingerprint binding and expiry | ✅ Implemented |
+| Durable approvals with per-call fingerprint binding and expiry | ✅ Implemented · a pending approval survives a restart and is handed back when the same request is repeated in the same window |
 | Control plane: tenants, nodes, tasks, approvals, policy, audit | ✅ Implemented (SQLite-verified) |
-| Durable task/plan recovery | 🚧 Partial |
+| Durable task/plan recovery | 🚧 Partial (conversation-turn resume is implemented; durable task/plan lifecycle is not) |
 | Windows NSIS, macOS DMG, Debian Linux installers | Stable tag triggers three-platform build, smoke, and publication |
 | Code signing and macOS notarization | Not configured |
 | Platform-specific GUI, drag/drop, upgrade evidence | See release status; Agent acceptance is recorded separately |

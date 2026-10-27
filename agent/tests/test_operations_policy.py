@@ -95,6 +95,9 @@ class SystemPromptTests(unittest.TestCase):
         self.assertIn("5. VERIFY", prompt)
         self.assertIn("[disk-full]", prompt)
         self.assertIn("untrusted data", prompt)
+        # The live run asserted "/tmp other files unchanged" without reading the
+        # directory. An unsupported claim is now named as a claim, not a courtesy.
+        self.assertIn("Every sentence of your answer must be traceable", prompt)
         self.assertIn("yukinal-ui", prompt)
         # Wish-style persistence: work around a missing capability instead of
         # handing the goal back, and only ask when it is genuinely the user's call.

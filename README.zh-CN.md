@@ -16,16 +16,18 @@
 [![Platform](https://img.shields.io/badge/platform-Windows%20%7C%20macOS%20%7C%20Linux-6f42c1.svg)](#构建与运行)
 [![Python](https://img.shields.io/badge/python-3.11%2B-3776ab.svg)](./agent/README.md)
 [![Node](https://img.shields.io/badge/node-%3E%3D24-339933.svg)](package.json)
-[![Acceptance](https://img.shields.io/badge/Agent-accepted-success.svg)](./docs/release.md)
+[![Acceptance](https://img.shields.io/badge/Agent-验收已重开-informational.svg)](./docs/agent-live-acceptance-20261027.md)
 
 </div>
 
 ---
 
-> **发行版本：`2.0.1`。** 项目负责人于 2026-10-27 确认 Agent 能力验收合格，
-> 同意正式发布。本版包含 Provider 冷启动修复、Agent 改进与简化后的工作区：
-> 文件、终端、日志、服务四个按钮直接切换主界面，Agent 对话保留在浮栏中。
-> 具体变化见[发行说明](./docs/releases/2.0.1.md)，构建证据和安装包状态见
+> **发行版本：`2.0.1`。Agent 能力验收已重开。** 2026-10-27 在一台真实
+> Debian 12 服务器上的实机验收发现并修复了阶段呈现、审计完整性与批准默认值
+> 三类缺陷，同时确认有一项能力在端到端链路上不成立：桌面端重启后无法恢复
+> 挂起的审批。`2.0.1` 仍然已发布，但其 Agent 能力结论以
+> [实机验收记录](./docs/agent-live-acceptance-20261027.md) 为准。具体变化见
+> [发行说明](./docs/releases/2.0.1.md)，构建证据和安装包状态见
 > [交付与发布](./docs/release.md)。Windows NSIS、macOS DMG 与 Debian Linux 安装包
 > 由 CI 构建；安装包仍未签名，macOS 应用未公证。
 
@@ -123,12 +125,12 @@ Token 用量在按钮旁展开，不挤动状态行；模型与设置菜单受�
 | 代理路由（HTTP/HTTPS CONNECT、SOCKS5/SOCKS5H）与 bypass 规则 | ✅ 已实现 |
 | 有界 SFTP 列举/元数据/读取/写入/备份、守卫式原子替换 | ✅ 已实现 |
 | C++ 桌面宿主：窗口、IPC 路由、SQLite、凭据、审批 | ✅ 已实现 |
-| Python Agent：LangGraph 循环、Tool Registry、策略、脱敏审计 | ✅ 负责人于 2026-10-27 确认验收合格 |
+| Python Agent：LangGraph 循环、Tool Registry、策略、脱敏审计 | ✅ 已实现 · 🚧 验收已重开，见[实机记录](./docs/agent-live-acceptance-20261027.md) |
 | MCP 客户端（stdio + Streamable HTTP），默认需要审批 | ✅ 已实现 |
 | 模型工厂：OpenAI 兼容、Anthropic、Gemini | ✅ 已实现 |
 | 持久审批：逐次调用指纹绑定与有效期 | ✅ 已实现 |
 | 控制平面：租户、节点、任务、审批、策略、审计 | ✅ 已实现（SQLite 验证） |
-| 任务/计划持久恢复 | 🚧 部分完成 |
+| 任务/计划持久恢复 | ✅ 同窗口重发恢复挂起审批；不同窗口重新开始。持久计划仍部分完成 |
 | Windows NSIS、macOS DMG、Debian Linux 安装包 | 稳定标签触发三平台构建、冒烟与发布 |
 | 代码签名与 macOS 公证 | 未配置 |
 | 平台 GUI、拖放及升级证据 | 见交付状态；Agent 验收独立记录 |

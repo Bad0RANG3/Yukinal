@@ -372,7 +372,10 @@ class ConversationTests(unittest.IsolatedAsyncioTestCase):
                 self.assertEqual(deleted["result"], {"deleted": True})
                 self.assertEqual(store._connection.execute("SELECT count(*) FROM conversation_turns").fetchone()[0], 0)
                 self.assertEqual(len(store.list_memories()), 1)
-            store.close()
+                # `TemporaryDirectory` cannot delete an open SQLite file on Windows,
+                # and the new discard-on-repeat path issues an extra checkpoint write,
+                # so the handle must be closed before the directory is removed.
+                store.close()
 
     async def test_queued_turn_reads_preceding_final_answer_and_resets_refuse_active_runs(self) -> None:
         started = asyncio.Event()

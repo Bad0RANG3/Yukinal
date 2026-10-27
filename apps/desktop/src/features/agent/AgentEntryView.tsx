@@ -26,6 +26,8 @@ import { conversationReplyCopyText } from "../../lib/conversation-reply-copy.js"
 import { approvalSourceLabel, decisionLabel, resultLabel, riskLabel } from "../../lib/labels.js";
 import { imageAttachmentUrl } from "./image-attachments.js";
 import { ApprovalCard } from "./ApprovalCard.js";
+import { TerminalOutput } from "./TerminalOutput.js";
+import { hasTerminalEscapes, parseTerminalRuns } from "./terminal-colour.js";
 import { agentFailureLabel, toolExecutionNotice, type Entry } from "./transcript.js";
 
 export const AgentEntryView = memo(function AgentEntryView({
@@ -207,10 +209,23 @@ function ToolResultBody({ toolName, summary, failed }: { toolName: string; summa
     } catch { /* Partial summaries and unknown formats retain the original text. */ }
   }
   if (!output) return failed ? null : <code className="tool-result-copy"><KeywordText text={summary} /></code>;
+  // `systemctl status`, `ls --color` and `journalctl` all emit SGR. Rendering the
+  // bytes raw would show `[32m` literally; rendering them as markup would let
+  // server output become structure. Parse to styled runs instead: text stays text,
+  // and only colour intent survives — every other control escape is dropped.
+  const stdoutColoured = output.stdout ? hasTerminalEscapes(output.stdout) : false;
+  const stderrColoured = output.stderr && hasTerminalEscapes(output.stderr);
   return <div className="tool-command-output">
     {typeof output.exitCode === "number" ? <p className="tool-output-label">退出状态 {output.exitCode}</p> : null}
-    {output.stdout ? <pre className="tool-result-copy">{output.stdout}</pre> : null}
-    {typeof output.stderr === "string" && output.stderr ? <><p className="tool-output-label">错误输出</p><pre className="tool-result-copy">{output.stderr}</pre></> : null}
+    {output.stdout ? (stdoutColoured
+      ? <TerminalOutput runs={parseTerminalRuns(output.stdout)} label="命令输出" />
+      : <pre className="tool-result-copy">{output.stdout}</pre>) : null}
+    {typeof output.stderr === "string" && output.stderr ? <>
+      <p className="tool-output-label">错误输出</p>
+      {stderrColoured
+        ? <TerminalOutput runs={parseTerminalRuns(output.stderr)} label="错误输出" />
+        : <pre className="tool-result-copy">{output.stderr}</pre>}
+    </> : null}
     {output.stdoutTruncated === true || output.stderrTruncated === true ? <p className="tool-output-label">输出已截断</p> : null}
     <details className="tool-raw-output"><summary>原始摘要</summary><code className="tool-result-copy">{summary}</code></details>
   </div>;

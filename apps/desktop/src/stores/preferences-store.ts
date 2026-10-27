@@ -100,14 +100,13 @@ export const usePreferencesStore = create<PreferencesState>()(
     }),
     {
       name: isPreviewFixture() ? `${UI_PREFERENCES_STORAGE_KEY}.preview` : UI_PREFERENCES_STORAGE_KEY,
-      // v2 changes the default approval mode to auto. A stored v1 preference was
-      // captured under the old default, so it must be migrated rather than left
-      // to silently keep "ask" for every existing installation.
-      version: 2,
-      migrate: (persisted) => ({
-        ...sanitizePreferences(persisted),
-        agentPermissionMode: DEFAULT_UI_PREFERENCES.agentPermissionMode,
-      }),
+      // Bump this only for a breaking shape change. It must never be used to
+      // re-apply a default: v2 used it to force `agentPermissionMode` back to
+      // "auto", so any operator who had deliberately chosen "每次询问" got a
+      // weaker approval policy without being told. A migration may repair a
+      // missing or unreadable field; it may not overwrite a valid choice.
+      version: 3,
+      migrate: (persisted) => sanitizePreferences(persisted),
       partialize: (state) => ({
         terminalFont: state.terminalFont,
         terminalFontSize: state.terminalFontSize,

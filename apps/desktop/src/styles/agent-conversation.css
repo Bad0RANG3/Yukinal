@@ -300,6 +300,17 @@
 .agent-tool-activity-body { padding: 2px 0 2px 12px; border-left: 1px solid var(--edge-normal); }
 .agent-tool-activity > summary:focus-visible { outline: 2px solid var(--focus-line); outline-offset: 2px; border-radius: 4px; }
 .tool-command-output pre { margin: 0; overflow-wrap: anywhere; }
+
+/* SGR-derived tones for tool output the operator expanded. Colour here carries
+   the target's own meaning (a red FAILED line), so it uses the same semantic
+   tokens as the log viewer rather than a private palette. */
+.terminal-output { white-space: pre-wrap; tab-size: 4; }
+.terminal-run-error { color: var(--content-error); }
+.terminal-run-warning { color: var(--content-warning); }
+.terminal-run-success { color: var(--content-success); }
+.terminal-run-accent { color: var(--content-accent); }
+.terminal-run-muted { color: var(--faint); }
+.terminal-run-bold { font-weight: 650; color: var(--text); }
 .tool-raw-output { margin-top: 8px; color: var(--faint); font-size: var(--text-caption); }
 .tool-raw-output > summary { cursor: pointer; }
 .agent-widget-fallback { min-width: 0; margin-block: 8px; padding: 8px 10px; border: 1px solid var(--line); border-radius: var(--radius-card); color: var(--muted); font-size: var(--text-small); }

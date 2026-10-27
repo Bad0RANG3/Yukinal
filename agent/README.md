@@ -11,6 +11,26 @@ The Python runtime can create a host-validated durable plan and carries the
 host's active step binding into subsequent calls. Full task/plan recovery and
 broader write-capable desktop tools remain future work.
 
+**Restoring a pending approval works across a restart, within one window.**
+The checkpoint thread is located by a per-turn `checkpoint_key` the sidecar stores
+on the conversation turn (`runid:<hash>`, or `turn:<digest>` when the same request
+is repeated), not by the attempt's `runId`. A repeat in the same window therefore
+hands the paused graph back; a different window has a different session id, so its
+digest differs and it starts fresh. `checkpoint_binding` remains the verifier:
+scope, target, allowed tools, budget or goal mode changing still fails closed. A
+finished turn is never replayed — repeating it starts a new request.
+
+Only in `permissionMode=auto` does the turn after a real change become a
+**read-only confirmation turn**, because nobody saw the first result; a second
+change is refused before dispatch. See
+[the live acceptance record](../docs/agent-live-acceptance-20261027.md).
+
+A rejection is an outcome the model owns. The denied call is delivered back as a
+failed `ToolMessage` with the assistant's own `tool_call_id`, the loop continues for
+one more round, and the answer is the model's. Re-proposing the same action after a
+denial is refused as `tool_repetition_detected`, so re-asking cannot turn a refusal
+into an invitation to reword it.
+
 ## Install
 
 ```powershell
@@ -223,6 +243,13 @@ timing, result shape, approval status and a stable error code. Raw arguments,
 tool results and exception text are not written to the audit file. The JSONL
 file is created with owner-only permissions where the platform supports them.
 
+Each event also carries `call_id`, the agent-level call identity, so the
+pre-approval attempt row, the post-approval execution row and the operator's
+verdict row can be joined. The verdict (`approved` / `rejected`) is written by
+`ToolRegistry.audit_decision` when the approval RPC arrives; without it a
+rejected call would leave only `started`/`awaiting_approval` in the file and the
+decision would exist solely in the conversation transcript.
+
 ## Operating procedure and runbooks
 
 The agent owns the outcome. It works through one procedure, defined in
@@ -277,7 +304,35 @@ target did not change. The event carries `runId` and, for a durable task,
 chat header consume it; an older sidecar that does not emit it simply keeps the
 generic run-state label.
 
-### Diagnostic read tools
+#### Fixed read-only commands
+
+A health check used to cost a `server.exec` approval per question. `read_commands.py`
+registers five tools whose **command is a constant in that file** — the model
+supplies no shell text, there is nothing to inject into, and the command cannot be
+widened by an argument:
+
+| Tool | Fixed command |
+| --- | --- |
+| `system.swap` | `grep -E '^(SwapTotal\|SwapFree\|SwapCached):' /proc/meminfo` |
+| `filesystem.inodes` | `df -i -x tmpfs -x devtmpfs -x squashfs` |
+| `filesystem.mounts` | `df -hT -x tmpfs -x devtmpfs -x squashfs` |
+| `system.time` | `date -Is` |
+| `filesystem.exists` | one `test -e` built from an allowlisted, metacharacter-free path |
+
+They are registered as reads with no approval because the command is a constant
+here, not because the model says so; they reuse the same `server.exec` route, so
+the output caps, timeouts and redaction are unchanged. The catalog is deliberately
+tiny: everything else still goes through `server.exec` and a person. Adding
+commands one at a time would create a second, less-reviewed shell.
+
+`command_effect.py` classifies a `server.exec` command string as an observation or
+an effect. It affects **stage reporting only** — never authorization, approval or
+execution — and it fails closed: anything not positively recognised as a chain of
+pure readers keeps its declared `destructive` risk. Known limitation: a quoted
+alternation such as `grep -E '^(A|B):'` is treated as effectful because it contains
+`|`.
+
+## Diagnostic read tools
 
 Three fixed, read-only operations exist because diagnosing a host without them
 means a high-risk `server.exec`:

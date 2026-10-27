@@ -1,5 +1,31 @@
 # 变更记录
 
+## 未发行 — 实机验收修复（2026-10-27）
+
+在真实 Debian 12 服务器上的 Agent 实机验收发现并修复了以下问题；完整证据与未修复项见
+[Agent 实机验收记录](./agent-live-acceptance-20261027.md)。**Agent 能力验收因此重开。**
+
+- 阶段呈现：`server.exec` 的只读命令不再被报告为「变更」。新增 `command_effect.py`
+  分类器，只影响阶段派生，授权与审批完全不变；未识别的一律按声明风险处理。
+- 只读命令目录：新增 `system.swap`、`filesystem.inodes`、`filesystem.mounts`、
+  `system.time`、`filesystem.exists`。命令是常量，模型不提供任何 shell 文本，因此以
+  只读注册、不触发审批。健康检查不再需要数次 destructive 审批。
+- 审计完整性：事件增加 `call_id`；被拒绝或过期的审批现在会在审计文件里留下
+  `rejected` 终态行，不再只存在于会话记录中。
+- 工具耗时：`agent.tool_result` 新增 `approvalWaitMs`，人工审批等待不再计入工具执行时间。
+- 审批默认值：偏好迁移不再无条件把 `agentPermissionMode` 重置为默认，用户选择的
+  「每次询问」不会再被静默改回「自动批准」。
+- 工具输出着色：命令输出按 SGR 解析为结构化文本片段，只保留颜色语义，其余终端控制
+  序列一律丢弃。文本仍是文本，不经过 HTML 注入路径。
+- 清理死代码 `PermissionPicker.tsx`（未被任何模块引用）。
+- 端到端恢复：按「同窗口继续、不同窗口重新开始」实现。恢复定位改用按会话轮次稳定的
+  `checkpoint_key`（持久化在会话轮次上），`checkpoint_binding` 继续做作用域与授权校验；
+  已结束的轮次重复发送时作为新请求执行，不重放旧答案。`agent.context.reset` 同时清理
+  两种线程，避免重置后仍留下可恢复的挂起审批。
+- 自动批准下的变更链：`permissionMode=auto` 时一次真实变更之后的下一轮是只读确认轮，
+  第二次变更在派发前被拒绝（上限 2 次，超出以 `confirmation_turn_required` 收束），
+  因为这条路没有人看见第一次变更的结果。
+
 ## 2.0.1 — 2026-10-27
 
 - 项目负责人确认 Agent 能力验收合格，同意正式发布。该确认与自动化测试、模拟 UI 审计分别记录，见[发行说明](./releases/2.0.1.md)。

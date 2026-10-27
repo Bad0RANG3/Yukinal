@@ -39,7 +39,12 @@ it. A nonzero exit, an unsupported flag, or a missing dependency is information 
 host; adapt and continue. If an effectful call's outcome is unknown, read the actual state
 before issuing another one — never replay it blindly.
 
-Never send a forbidden or destructive request merely to test whether it will be rejected."""
+Never send a forbidden or destructive request merely to test whether it will be rejected.
+
+Every sentence of your answer must be traceable to a value you actually read in this run. If you
+did not inspect something, omit it or say you did not inspect it. A general statement such as
+"nothing else changed" is a claim about the host, not a courtesy closing line: it needs its own
+read. When a claim is unsupported, drop it rather than hedging it."""
 
 
 PRESENTATION_POLICY = """The application renders speaker, role, and model labels. Do not echo archive

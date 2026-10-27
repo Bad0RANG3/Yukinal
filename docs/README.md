@@ -1,6 +1,6 @@
 # Yukinal 文档
 
-当前版本 `2.0.1`。负责人于 2026-10-27 确认 Agent 能力验收合格，授权正式发行。界面采用四按钮切换主工具、Agent 浮栏继续对话。
+当前版本 `2.0.1`（已发行）。**Agent 能力验收已重开**：同日实机验收发现并修复 4 项缺陷，同时确认挂起审批在桌面端重启后无法恢复，见[Agent 实机验收记录](./agent-live-acceptance-20261027.md)。界面采用四按钮切换主工具、Agent 浮栏继续对话。
 
 ## 从哪里开始
 
@@ -12,9 +12,11 @@
 | 布局与控件 | [桌面窗口与工作区](./desktop-window-direction.md)、[界面表达与皮肤约定](./ui-design-system.md) |
 | 用户路径与功能范围 | [产品定义](./product.md) |
 | Agent 权限与方法 | [安全与数据边界](./security.md)、[运维 Agent 处理流程](./ops-agent-procedure.md) |
+| Agent 实机验收与缺陷 | [实机验收记录 2026-10-27](./agent-live-acceptance-20261027.md) |
 | 长任务、推理和上下文 | [AI 运行与对话体验](./ai-runtime-performance.md) |
 | 图形与检测扩展 | [AI 绘图协议](./ai-visual-protocol.md)、[服务器检测工具包](./server-toolkit.md) |
 | 审计与版本 | [第五轮审计](./audit-round5.md)、[变更记录](./changelog.md) |
+| 终端输出着色 | [界面表达与皮肤约定](./ui-design-system.md) 的 content hue 一节 |
 
 ## 实现与历史交接
 

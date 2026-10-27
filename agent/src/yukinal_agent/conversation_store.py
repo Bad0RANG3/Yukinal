@@ -299,6 +299,42 @@ class ConversationStore:
                     (session_id, epoch, participant_id, participant["label"], kind, parent_id, depth),
                 )
 
+    def latest_resume_key(self, session_id: str, run_id: str) -> str:
+        """The stored resume key for one turn, or '' when it has none.
+
+        The key is `runid:<runId>` for an admitted turn and `turn:<digest>` for one
+        whose request was repeated inside the same window. It is derived from request
+        fields a transcript does not carry, so a key can only come from this table —
+        archived text cannot mint one.
+        """
+        row = self._connection.execute(
+            "SELECT metadata_json FROM conversation_turns WHERE session_id = ? AND run_id = ?",
+            (session_id, run_id),
+        ).fetchone()
+        if row is None:
+            return ""
+        key = json.loads(row["metadata_json"]).get("resumeKey")
+        return key if isinstance(key, str) and re.fullmatch(r"(?:runid|turn):[0-9a-f]{1,128}", key) else ""
+
+    def record_resume_key(self, session_id: str, run_id: str, key: str) -> None:
+        if not isinstance(key, str) or not re.fullmatch(r"(?:runid|turn):[0-9a-f]{1,128}", key):
+            raise ValueError("resumeKey is invalid")
+        row = self._connection.execute(
+            "SELECT metadata_json FROM conversation_turns WHERE session_id = ? AND run_id = ?",
+            (session_id, run_id),
+        ).fetchone()
+        if row is None:
+            return
+        metadata = json.loads(row["metadata_json"])
+        if metadata.get("resumeKey") == key:
+            return
+        metadata["resumeKey"] = key
+        with self._connection:
+            self._connection.execute(
+                "UPDATE conversation_turns SET metadata_json = ? WHERE session_id = ? AND run_id = ?",
+                (_json(metadata), session_id, run_id),
+            )
+
     def checkpoint_bindings(self, session_id: str | None = None) -> list[dict[str, str]]:
         rows = self._connection.execute(
             "SELECT run_id, session_id, metadata_json FROM conversation_turns" +

@@ -110,6 +110,14 @@ class _PendingApproval:
     checkpoint_id: str
     fingerprint: str
     future: asyncio.Future[str]
+    #: Audit facts captured when the approval was announced, so the decision row
+    #: carries the same call identity, tool, target and start time as the two
+    #: rows the tool registry already wrote for this call.
+    call_id: str = ""
+    tool_name: str = ""
+    target_id: str | None = None
+    tenant_id: str = ""
+    user_id: str = ""
 
 
 class PythonSidecar:
@@ -145,6 +153,8 @@ class PythonSidecar:
         self._backup_metadata_tools_registered = False
         self._mcp_loaded = False
         self._pending_approvals: dict[str, _PendingApproval] = {}
+        self._audit_registry = registry
+        self._audit_tasks: set[asyncio.Task[None]] = set()
         self._managed_ssh_service_binary = managed_ssh_service_binary
         self._managed_ssh_tools_registered = False
         self._provider_store = provider_store
@@ -743,6 +753,7 @@ class PythonSidecar:
                 inference_profile={"effort": inference.effort, "source": inference.source,
                                    "model": getattr(model, "model_name", None)},
                 goal_loop=_sustained_goal(request),
+                auto_approval=request.get("permissionMode", "ask") == "auto",
                 tool_names=_allowed_tools_for_run(self._registry, request.get("mode", "goal"), request),
                 event_sink=self._emit,
                 checkpointer=self._checkpointer,
@@ -938,8 +949,51 @@ class PythonSidecar:
         # durable trace, not a precondition: losing it must not leave the run
         # waiting forever on a future nobody will ever settle.
         self._record_run_event(run_id, {"type": "approval.decision", **parsed})
+        # The audit trail must be able to answer "what was decided about this
+        # call?" on its own. A rejected or expired call never executes, so
+        # without this row the audit holds only `started`/`awaiting_approval`
+        # and the decision lives exclusively in the conversation transcript.
+        # This row is best effort for the same reason the transcript write is:
+        # the decision is the RPC's result and must not be lost to a bad sink.
+        self._schedule_approval_audit(run_id, approval_id, decision)
         pending.future.set_result(decision)
         return {"accepted": True}
+
+    def _schedule_approval_audit(self, run_id: str, approval_id: str, decision: str) -> None:
+        """Write the verdict row without letting a slow sink delay the decision.
+
+        `_approval_respond` is synchronous because `handle()` is, so the audit write
+        is scheduled rather than awaited; the task set keeps a reference so the
+        write is not garbage collected before it runs.
+        """
+        try:
+            loop = asyncio.get_running_loop()
+        except RuntimeError:
+            return
+        task = loop.create_task(self._audit_approval_decision(run_id, approval_id, decision))
+        self._audit_tasks.add(task)
+        task.add_done_callback(self._audit_tasks.discard)
+
+    async def _audit_approval_decision(self, run_id: str, approval_id: str, decision: str) -> None:
+        pending = self._pending_approvals.get(approval_id)
+        if pending is None or not pending.call_id:
+            return
+        status = "approved" if decision == "approve_once" else "rejected"
+        try:
+            await self._audit_registry.audit_decision(
+                run_id=run_id,
+                call_id=pending.call_id,
+                tool_name=pending.tool_name,
+                target_id=pending.target_id,
+                status=status,
+                tenant_id=pending.tenant_id,
+                user_id=pending.user_id,
+            )
+        except Exception:
+            print(
+                f"Approval decision for {pending.tool_name or 'a tool call'} could not be audited",
+                file=sys.stderr, flush=True,
+            )
 
     async def _delete_context_checkpoints(self, session_id: str | None = None) -> None:
         if self._checkpointer is None:
@@ -948,9 +1002,13 @@ class PythonSidecar:
         if delete is None:
             raise _RpcFault(RPC_INTERNAL_ERROR, "The checkpoint store cannot reset model context")
         for binding in self._conversations.checkpoint_bindings(session_id):
-            material = "\x1f".join(("local", _safe_context_id("session", binding["sessionId"]),
-                                      _safe_context_id("task", binding["taskId"]), binding["runId"]))
-            await delete("agent-" + hashlib.sha256(material.encode("utf-8")).hexdigest())
+            await delete(_checkpoint_thread_id(binding["sessionId"], binding["taskId"], binding["runId"]))
+            # The turn-key locator is a second thread id per turn. A reset must clear
+            # both, or the context keeps a resumable pending approval after the
+            # operator explicitly asked for a reset.
+            resume_key = self._conversations.latest_resume_key(binding["sessionId"], binding["runId"])
+            if resume_key:
+                await delete(_checkpoint_thread_id(binding["sessionId"], binding["taskId"], resume_key))
 
     async def _context_reset(self, params: object, *, delete: bool = False) -> dict[str, bool]:
         parsed = _strict_object(params, {"sessionId", "focusServerId"})
@@ -1108,6 +1166,32 @@ class PythonSidecar:
             admission["completed"] = True
             self._prune_admissions()
 
+    def _prepare_resume_key(self, request: dict[str, Any], run_id: str) -> None:
+        """Give this turn a stable checkpoint key, reusing the one a repeat resolves to.
+
+        The rule is: the *same* request repeated inside the same window continues (the
+        pending approval is handed back), while a different window starts fresh
+        because a session id is per window and is part of the digest. A repeat is
+        detected from `(session, target, prompt, routing scope)` — not from the
+        conversation history, because archived text must never mint a key.
+        """
+        session_id = request["sessionId"]
+        if self._conversations.latest_resume_key(session_id, run_id):
+            return
+        digest = _turn_digest(request)
+        turn_key = f"turn:{digest}"
+        for row in self._conversations.checkpoint_bindings(session_id):
+            existing = self._conversations.latest_resume_key(session_id, row["runId"])
+            if existing == turn_key:
+                # An earlier attempt at exactly this request in this window: continue it.
+                self._conversations.record_resume_key(
+                    session_id, run_id, existing
+                )
+                return
+        self._conversations.record_resume_key(
+            session_id, run_id, f"runid:{hashlib.sha256(run_id.encode('utf-8')).hexdigest()[:32]}"
+        )
+
     async def _execute_session_run(
         self, request: dict[str, Any], run_id: str, agent: ModelDrivenAgent,
     ) -> dict[str, Any]:
@@ -1149,6 +1233,7 @@ class PythonSidecar:
                 **({"taskId": task_id} if task_id else {}),
                 "at": now(),
             })
+            self._prepare_resume_key(request, run_id)
             target_id = request.get("targetId")
             mode = request.get("mode", "goal")
             allowed_tools = set(_allowed_tools_for_run(self._registry, mode, request))
@@ -1167,6 +1252,10 @@ class PythonSidecar:
                 run_id=run_id,
                 trace_id=_safe_context_id("trace", run_id),
                 checkpoint_binding=_run_checkpoint_binding(request),
+                checkpoint_key=(
+                    self._conversations.latest_resume_key(request["sessionId"], run_id)
+                    or f"runid:{hashlib.sha256(run_id.encode('utf-8')).hexdigest()[:32]}"
+                ),
                 require_checkpoint=request["requireCheckpoint"],
                 persona=persona,
                 conversation_messages=[*memories, *context.messages, *task_snapshot],
@@ -1345,7 +1434,15 @@ class PythonSidecar:
         ).hexdigest()[:32]
         loop = asyncio.get_running_loop()
         future: asyncio.Future[str] = loop.create_future()
-        self._pending_approvals[approval_id] = _PendingApproval(run_id, result.checkpoint_id, fingerprint, future)
+        self._pending_approvals[approval_id] = _PendingApproval(
+            run_id, result.checkpoint_id, fingerprint, future,
+            call_id=call_id, tool_name=approval.tool_name, target_id=approval.target_id,
+            tenant_id="local",
+            user_id=(
+                _safe_context_id("session", request["sessionId"])
+                if isinstance(request.get("sessionId"), str) else ""
+            ),
+        )
         target = request.get("hostTarget")
         if not isinstance(target, dict):
             target = {"host": "local", "environment": "unknown"}
@@ -2221,6 +2318,40 @@ def _run_fingerprint(request: dict[str, Any]) -> str:
         separators=(",", ":"),
         sort_keys=True,
     )
+    return hashlib.sha256(canonical.encode("utf-8")).hexdigest()
+
+
+#: Request fields that make a repeated message the *same* request. Deliberately
+#: excludes the prompt's presentation fields, the provider and any credential, so a
+#: user who switched model between attempts still continues the same turn.
+_TURN_IDENTITY_FIELDS = (
+    "sessionId", "targetId", "mode", "permissionMode", "policyId", "toolAccess",
+    "planBinding", "promptText", "taskId",
+)
+
+
+def _checkpoint_thread_id(session_id: str, task_id: str, resume_key: str) -> str:
+    """The single place a checkpoint thread id is computed.
+
+    `ModelDrivenAgent` derives it from `(tenant, user, checkpoint_key)`; the reset path
+    must derive the identical id to delete it, and a second copy of the formula is how
+    a reset starts leaking threads. `task_id` is accepted only to keep the call sites
+    readable — it is deliberately **not** part of the material, because a turn key is
+    the locator and a durable task id would make the same turn resolve differently.
+    """
+    del task_id
+    material = "".join(("turn", "local", _safe_context_id("session", session_id), resume_key))
+    return "agent-" + hashlib.sha256(material.encode("utf-8")).hexdigest()
+
+
+def _turn_digest(request: dict[str, Any]) -> str:
+    """Stable digest of one conversation turn, scoped to its window.
+
+    `sessionId` is per window, so the same words typed in a different window produce
+    a different digest and therefore a different checkpoint thread.
+    """
+    identity = {field: request.get(field) for field in _TURN_IDENTITY_FIELDS}
+    canonical = json.dumps(identity, ensure_ascii=False, separators=(",", ":"), sort_keys=True, default=str)
     return hashlib.sha256(canonical.encode("utf-8")).hexdigest()
 
 
