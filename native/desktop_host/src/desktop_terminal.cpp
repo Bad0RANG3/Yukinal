@@ -1,6 +1,7 @@
 #include "yukinal/desktop_host/desktop_terminal.hpp"
 
 #include "terminal_exit.hpp"
+#include "scoped_secret_cleanup.hpp"
 
 #include "yukinal/desktop_host/credential_store.hpp"
 #include "yukinal/desktop_host/database.hpp"
@@ -32,7 +33,6 @@
 #include <sys/types.h>
 #include <sys/wait.h>
 #include <unistd.h>
-extern char** environ;
 #endif
 
 namespace yukinal::desktop_host {
@@ -297,7 +297,14 @@ struct TerminalManager::Impl {
   }
 
   bool write_frame(const std::shared_ptr<Session>& session, const nlohmann::json& frame) {
-    const auto payload = frame.dump() + "\n";
+    auto serialized = frame.dump();
+    ScopedSecretCleanup serialized_cleanup(serialized);
+    std::string payload;
+    ScopedSecretCleanup payload_cleanup(payload);
+    payload.reserve(serialized.size() + 1);
+    payload.assign(serialized);
+    serialized_cleanup.clear();
+    payload.push_back('\n');
     std::lock_guard lock(session->mutex);
     if (session->closed.load()) return false;
 #ifdef _WIN32
@@ -648,7 +655,8 @@ struct TerminalManager::Impl {
     if (binary.empty() || !std::filesystem::is_regular_file(binary)) {
       throw std::runtime_error("the packaged C++ SSH service executable is unavailable");
     }
-    const auto payload = resolve_ssh_service_target(*database, *credentials, server_id);
+    auto payload = resolve_ssh_service_target(*database, *credentials, server_id);
+    ScopedSecretCleanup credentials_cleanup(payload.at("credentials"));
     const auto session_id = new_session_id();
     const auto config_path =
         std::filesystem::temp_directory_path() / ("yukinal-ssh-terminal-" + session_id + ".json");
@@ -673,6 +681,7 @@ struct TerminalManager::Impl {
     session->config_path = config_path;
     try {
       spawn(session, binary, config_path, payload.at("credentials"));
+      credentials_cleanup.clear();
     } catch (...) {
       std::error_code error;
       std::filesystem::remove(config_path, error);
@@ -702,7 +711,7 @@ struct TerminalManager::Impl {
   }
 
   void spawn(const std::shared_ptr<Session>& session, const std::filesystem::path& binary,
-             const std::filesystem::path& config_path, const nlohmann::json& credentials) {
+             const std::filesystem::path& config_path, nlohmann::json& credentials) {
 #ifdef _WIN32
     SECURITY_ATTRIBUTES attributes{sizeof(SECURITY_ATTRIBUTES), nullptr, TRUE};
     HANDLE child_stdin = nullptr, child_stdout = nullptr, parent_stdin = nullptr, parent_stdout = nullptr;
@@ -729,6 +738,8 @@ struct TerminalManager::Impl {
     command_line.push_back(L' ');
     command_line += quote_argument(std::to_wstring(session->rows));
     std::vector<std::wstring> environment;
+    environment.reserve(5 + credentials.size());
+    ScopedSecretCleanup environment_cleanup(environment);
     for (const auto* name : {"SystemRoot", "WINDIR", "PATH", "TEMP", "TMP"}) {
       const auto needed = GetEnvironmentVariableW(to_wide(name).c_str(), nullptr, 0);
       if (needed == 0) continue;
@@ -739,10 +750,20 @@ struct TerminalManager::Impl {
       environment.push_back(std::wstring(to_wide(name)) + L"=" + value);
     }
     for (auto item = credentials.begin(); item != credentials.end(); ++item) {
-      environment.push_back(to_wide(item.key()) + L"=" + to_wide(item.value().get<std::string>()));
+      auto secret = to_wide(item.value().get_ref<const nlohmann::json::string_t&>());
+      ScopedSecretCleanup secret_cleanup(secret);
+      auto& entry = environment.emplace_back();
+      const auto key = to_wide(item.key());
+      entry.reserve(key.size() + 1 + secret.size());
+      entry.append(key).push_back(L'=');
+      entry.append(secret);
     }
     std::sort(environment.begin(), environment.end());
     std::wstring environment_block;
+    ScopedSecretCleanup block_cleanup(environment_block);
+    std::size_t block_size = 1;
+    for (const auto& entry : environment) block_size += entry.size() + 1;
+    environment_block.reserve(block_size);
     for (const auto& entry : environment) {
       environment_block += entry;
       environment_block.push_back(L'\0');
@@ -773,6 +794,31 @@ struct TerminalManager::Impl {
     session->stdin_write = parent_stdin;
     session->stdout_read = parent_stdout;
 #else
+    // Prepare child-only environment buffers before fork. No process-global
+    // setenv window and no temporary credential copies survive the spawn.
+    std::vector<std::string> child_environment;
+    child_environment.reserve(6 + credentials.size());
+    ScopedSecretCleanup environment_cleanup(child_environment);
+    for (const auto* name : {"PATH", "HOME", "LANG", "LC_ALL", "TMPDIR", "SHELL"}) {
+      if (const auto* value = std::getenv(name)) child_environment.emplace_back(std::string(name) + "=" + value);
+    }
+    for (auto item = credentials.begin(); item != credentials.end(); ++item) {
+      const auto& secret = item.value().get_ref<const nlohmann::json::string_t&>();
+      auto& entry = child_environment.emplace_back();
+      entry.reserve(item.key().size() + 1 + secret.size());
+      entry.append(item.key()).push_back('=');
+      entry.append(secret);
+    }
+    std::vector<char*> child_envp;
+    child_envp.reserve(child_environment.size() + 1);
+    for (auto& entry : child_environment) child_envp.push_back(entry.data());
+    child_envp.push_back(nullptr);
+    std::vector<std::string> arguments = {binary.string(), "--config", config_path.string(),
+                                         "--terminal", "--cols", std::to_string(session->cols),
+                                         "--rows", std::to_string(session->rows)};
+    std::vector<char*> argv;
+    for (auto& argument : arguments) argv.push_back(argument.data());
+    argv.push_back(nullptr);
     int child_stdin[2] = {-1, -1}, child_stdout[2] = {-1, -1};
     if (pipe(child_stdin) != 0 || pipe(child_stdout) != 0) {
       throw std::runtime_error("the desktop host could not create the terminal pipes");
@@ -787,21 +833,11 @@ struct TerminalManager::Impl {
       ::close(child_stdin[1]);
       ::close(child_stdout[0]);
       ::close(child_stdout[1]);
-      for (auto item = credentials.begin(); item != credentials.end(); ++item) {
-        setenv(item.key().c_str(), item.value().get<std::string>().c_str(), 1);
-      }
-      std::vector<std::string> arguments = {binary.string(),
-                                            "--config",
-                                            config_path.string(),
-                                            "--terminal",
-                                            "--cols",
-                                            std::to_string(session->cols),
-                                            "--rows",
-                                            std::to_string(session->rows)};
-      std::vector<char*> argv;
-      for (auto& argument : arguments) argv.push_back(argument.data());
-      argv.push_back(nullptr);
-      execve(binary.c_str(), argv.data(), environ);
+      execve(binary.c_str(), argv.data(), child_envp.data());
+      // exec failed: wipe in place without releasing allocations in the forked
+      // child; successful exec has already replaced this address space.
+      for (auto& entry : child_environment) wipe_secret(entry);
+      for (auto& secret : credentials) wipe_secret(secret.get_ref<nlohmann::json::string_t&>());
       _exit(127);
     }
     ::close(child_stdin[0]);
@@ -838,7 +874,9 @@ bool TerminalManager::write(const std::string& session_id, const std::string& da
     if (found == impl_->sessions.end()) return false;
     session = found->second;
   }
-  return impl_->write_frame(session, {{"type", "write"}, {"data", data}});
+  // Only the trusted desktop keyboard/paste IPC reaches this API. Agent calls
+  // have no terminal-write route and the worker rejects every other source.
+  return impl_->write_frame(session, {{"type", "write"}, {"source", "user_pty"}, {"data", data}});
 }
 
 bool TerminalManager::resize(const std::string& session_id, int cols, int rows) {
@@ -897,7 +935,10 @@ bool TerminalManager::respond_auth(const std::string& auth_id,
     }
     session = found->second;
   }
-  if (!impl_->write_frame(session, {{"type", "auth_response"}, {"responses", responses}})) {
+  nlohmann::json frame = {{"type", "auth_response"}};
+  ScopedSecretCleanup frame_cleanup(frame);
+  frame["responses"] = responses;
+  if (!impl_->write_frame(session, frame)) {
     error = "the authentication answer could not be delivered to the terminal";
     return false;
   }

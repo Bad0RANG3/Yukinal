@@ -637,6 +637,13 @@ select option { color: var(--text); background: var(--surface-2); }
 
 .terminal-shell .xterm {
   height: 100%;
+  font-feature-settings: "liga" 0, "calt" 0;
+  font-variant-ligatures: none;
+}
+
+.terminal-shell .xterm * {
+  font-feature-settings: "liga" 0, "calt" 0;
+  font-variant-ligatures: none;
 }
 
 .terminal-shell .xterm-viewport {

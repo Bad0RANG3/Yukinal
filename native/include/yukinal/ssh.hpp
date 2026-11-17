@@ -40,6 +40,7 @@ struct ExecResult {
   int exit_code = -1;
   std::string stdout_text;
   std::string stderr_text;
+  std::string resolved_path;
   std::int64_t duration_ms = 0;
   bool output_truncated = false;
   bool stdout_truncated = false;

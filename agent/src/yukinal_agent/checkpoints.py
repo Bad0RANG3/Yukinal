@@ -7,6 +7,39 @@ from pathlib import Path
 from typing import AsyncIterator
 
 
+def checkpoint_binding_key(data_dir: str | Path) -> bytes:
+    """Private persistent HMAC key; a checkpoint never stores password digests."""
+    if not str(data_dir).strip():
+        raise ValueError("checkpoint connection binding requires a private data directory")
+    root = Path(data_dir).expanduser().resolve() / "agent-state"
+    root.mkdir(parents=True, exist_ok=True, mode=0o700)
+    if not stat.S_ISDIR(root.lstat().st_mode):
+        raise ValueError("checkpoint binding directory must not be a symlink")
+    path = root / "connection-binding.key"
+    flags = os.O_CREAT | os.O_EXCL | os.O_WRONLY | getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_BINARY", 0)
+    try:
+        fd = os.open(path, flags, 0o600)
+    except FileExistsError:
+        pass
+    else:
+        try:
+            os.write(fd, os.urandom(32))
+        finally:
+            os.close(fd)
+    if not stat.S_ISREG(path.lstat().st_mode):
+        raise ValueError("checkpoint binding key must be a regular file")
+    if os.name != "nt":
+        path.chmod(0o600)
+    fd = os.open(path, os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_BINARY", 0))
+    try:
+        value = os.read(fd, 33)
+    finally:
+        os.close(fd)
+    if len(value) != 32:
+        raise ValueError("checkpoint binding key is invalid")
+    return value
+
+
 @asynccontextmanager
 async def open_checkpoint_store(data_dir: str | Path) -> AsyncIterator[object]:
     """Open the per-user SQLite checkpoint store with strict deserialization."""

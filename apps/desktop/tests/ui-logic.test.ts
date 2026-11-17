@@ -204,6 +204,14 @@ test("server form normalizes values and validates port and first-time credential
   assert.throws(() => buildServerInput({ ...formValues, password: "" }), /SSH 密码/);
 });
 
+test("server form preserves truecolor opt-out and explicit SFTP roots", () => {
+  const input = buildServerInput({ ...formValues, truecolor: false, sftpAllowedRoots: ".\n/srv/app\n" });
+  assert.equal(input.truecolor, false);
+  assert.deepEqual(input.sftpAllowedRoots, [".", "/srv/app"]);
+  assert.throws(() => buildServerInput({ ...formValues, sftpAllowedRoots: "/srv/../etc" }));
+  assert.throws(() => buildServerInput({ ...formValues, host: "-oProxyCommand=evil" }));
+});
+
 test("server form validation uses the UTF-8 Chinese messages shown in the desktop form", () => {
   assert.throws(() => buildServerInput({ ...formValues, port: "0" }), {
     message: "端口必须是 1 到 65535 之间的整数。",

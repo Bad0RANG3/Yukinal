@@ -23,6 +23,13 @@ import {
 const render = (text: string): string =>
   renderToStaticMarkup(<MarkdownText text={text} className="agent-entry-body agent-markdown" />);
 
+test("AI Markdown never renders ANSI or OSC/DCS payloads", () => {
+  const markup = render("**safe**\x1b[2J\x1b[31mred\x1b[0m\x1b]52;c;hidden\x07\x1bPprivate\x1b\\");
+  assert.match(markup, /safe/);
+  assert.match(markup, /red/);
+  assert.doesNotMatch(markup, /hidden|private|\x1b|\[2J/);
+});
+
 test("structure reaches the DOM: headings, lists, code blocks and tables", () => {
   const markup = render("# 结论\n\n- 甲\n- 乙\n\n```sh\ndocker ps\n```\n\n| a | b |\n| --- | --- |\n| 1 | 2 |");
   for (const fragment of ["<h1", "<ul", "<li", "<pre", "<code", "<table", "<th", "<td"]) {

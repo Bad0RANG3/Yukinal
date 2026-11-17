@@ -949,6 +949,13 @@ std::vector<SqlField> server_fields(const nlohmann::json& server,
   add_required_field(fields, "host", connection.at("host").get<std::string>());
   add_required_field(fields, "port", static_cast<std::int64_t>(connection.at("port").get<int>()));
   add_required_field(fields, "username", connection.at("username").get<std::string>());
+  if (columns.contains("truecolor")) {
+    add_required_field(fields, "truecolor", std::int64_t{connection.value("truecolor", true) ? 1 : 0});
+  }
+  if (columns.contains("sftp_allowed_roots")) {
+    add_required_field(fields, "sftp_allowed_roots",
+                       connection.value("sftpAllowedRoots", nlohmann::json::array({"."})).dump());
+  }
   add_required_field(fields, "identity_id",
                      optional_string(connection, "identityId").has_value()
                          ? SqlValue(*optional_string(connection, "identityId"))
@@ -1474,7 +1481,8 @@ std::optional<nlohmann::json> DesktopDatabase::get_server_connection(
       select_optional("host_principals") + ", " +
       select_optional("host_krl_path") + ", " +
       select_optional("host_krl_url") + ", " +
-      select_optional("host_krl_signers") +
+      select_optional("host_krl_signers") + ", " +
+      select_optional("truecolor") + ", " + select_optional("sftp_allowed_roots") +
       " FROM servers WHERE id = ?1";
   Statement statement(connection_, sql.c_str());
   bind_text(connection_, statement.get(), 1, server_id);
@@ -1490,6 +1498,9 @@ std::optional<nlohmann::json> DesktopDatabase::get_server_connection(
   add_optional_text(record, "hostRevocationListPath", statement.get(), 6);
   add_optional_text(record, "hostRevocationListUrl", statement.get(), 7);
   add_optional_text(record, "hostRevocationListSigners", statement.get(), 8);
+  record["truecolor"] = sqlite3_column_type(statement.get(), 9) == SQLITE_NULL || sqlite3_column_int(statement.get(), 9) != 0;
+  record["sftpAllowedRoots"] = parse_optional_json_column(statement.get(), 10, "SFTP roots")
+                                  .value_or(nlohmann::json::array({"."}));
   return record;
 }
 
@@ -1562,7 +1573,8 @@ nlohmann::json DesktopDatabase::list_servers() const {
                    select_optional("host_krl_path") + ", " +
                    select_optional("host_krl_url") + ", " +
                    select_optional("host_krl_signers") + R"SQL(,
-           created_at, updated_at
+           created_at, updated_at,
+  )SQL" + select_optional("truecolor") + ", " + select_optional("sftp_allowed_roots") + R"SQL(
       FROM servers
      ORDER BY name COLLATE NOCASE, id
   )SQL";
@@ -1580,6 +1592,9 @@ nlohmann::json DesktopDatabase::list_servers() const {
         {"host", column_text(rows.get(), 2)},
         {"port", sqlite3_column_int(rows.get(), 3)},
         {"username", column_text(rows.get(), 4)},
+        {"truecolor", sqlite3_column_type(rows.get(), 22) == SQLITE_NULL || sqlite3_column_int(rows.get(), 22) != 0},
+        {"sftpAllowedRoots", parse_optional_json_column(rows.get(), 23, "SFTP roots")
+                                 .value_or(nlohmann::json::array({"."}))},
     };
     if (sqlite3_column_type(rows.get(), 5) != SQLITE_NULL) {
       connection["identityId"] = column_text(rows.get(), 5);

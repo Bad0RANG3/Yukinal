@@ -21,37 +21,14 @@ import { usePreferencesStore, type TerminalFont } from "../../stores/preferences
 import { useWorkspaceStore } from "../../stores/workspace-store.js";
 import { terminalClosedNotice } from "./terminal-exit.js";
 import { pasteFromClipboard, TerminalPasteError } from "./terminal-paste.js";
+import { TerminalOutputFilter } from "../../lib/terminal-safety.js";
+import { readTerminalTheme } from "./terminal-theme.js";
 
 interface PasteSession {
   terminal: Terminal;
   serverId: string;
   sessionId: string;
 }
-
-const TERMINAL_THEME = {
-  background: "#080808",
-  foreground: "#d9d9d9",
-  cursor: "#d0d0d0",
-  cursorAccent: "#080808",
-  selectionBackground: "#454545",
-  selectionForeground: "#f3f3f3",
-  black: "#161616",
-  brightBlack: "#686868",
-  red: "#bdbdbd",
-  brightRed: "#eeeeee",
-  green: "#c4c4c4",
-  brightGreen: "#f0f0f0",
-  yellow: "#b5b5b5",
-  brightYellow: "#e2e2e2",
-  blue: "#a7a7a7",
-  brightBlue: "#d3d3d3",
-  magenta: "#b0b0b0",
-  brightMagenta: "#e0e0e0",
-  cyan: "#aaaaaa",
-  brightCyan: "#d5d5d5",
-  white: "#c5c5c5",
-  brightWhite: "#f1f1f1",
-};
 
 export function TerminalPane({ active, serverId }: { active: boolean; serverId?: string | null }) {
   const workspaceServerId = useWorkspaceStore((state) => state.selectedServerId);
@@ -121,7 +98,7 @@ export function TerminalPane({ active, serverId }: { active: boolean; serverId?:
       lineHeight: initialPreferences.terminalLineHeight,
       scrollback: 10_000,
       convertEol: false,
-      theme: TERMINAL_THEME,
+      theme: readTerminalTheme(container),
     });
     const fit = new FitAddon();
     terminalRef.current = term;
@@ -142,14 +119,30 @@ export function TerminalPane({ active, serverId }: { active: boolean; serverId?:
       setPasteReading(false);
     };
     const pendingData: Array<{ terminalSessionId: string; data: string }> = [];
+    const outputFilter = new TerminalOutputFilter();
     let pendingDataChars = 0;
     const MAX_PENDING_DATA_CHARS = 256_000;
-    const resizeObserver = new ResizeObserver(() => {
-      requestAnimationFrame(() => {
-        if (!disposed && activeRef.current) fit.fit();
+    let layoutFrame: number | null = null;
+    const refreshLayout = () => {
+      if (layoutFrame !== null || disposed) return;
+      layoutFrame = requestAnimationFrame(() => {
+        layoutFrame = null;
+        if (disposed) return;
+        term.options.theme = readTerminalTheme(container);
+        if (activeRef.current) fit.fit();
       });
-    });
+    };
+    const resizeObserver = new ResizeObserver(refreshLayout);
     resizeObserver.observe(container);
+    window.addEventListener("resize", refreshLayout);
+    const colorScheme = window.matchMedia("(prefers-color-scheme: dark)");
+    colorScheme.addEventListener("change", refreshLayout);
+    const themeObserver = new MutationObserver(refreshLayout);
+    for (let ancestor: HTMLElement | null = container; ancestor; ancestor = ancestor.parentElement) {
+      themeObserver.observe(ancestor, { attributes: true, attributeFilter: ["style", "class", "data-theme"] });
+    }
+    void document.fonts.ready.then(refreshLayout);
+    document.fonts.addEventListener("loadingdone", refreshLayout);
 
     // Remote bytes → xterm. The event carries the session id so one pane can't
     // write foreign output if a second terminal is open. The short pre-response
@@ -179,7 +172,7 @@ export function TerminalPane({ active, serverId }: { active: boolean; serverId?:
           return;
         }
         if (payload.terminalSessionId !== sessionId) return;
-        term.write(payload.data);
+        term.write(outputFilter.write(payload.data));
       }).stop,
     );
 
@@ -216,7 +209,7 @@ export function TerminalPane({ active, serverId }: { active: boolean; serverId?:
         }
         sessionId = terminalSessionId;
         for (const event of pendingData) {
-          if (event.terminalSessionId === sessionId) term.write(event.data);
+          if (event.terminalSessionId === sessionId) term.write(outputFilter.write(event.data));
         }
         pendingData.length = 0;
         pendingDataChars = 0;
@@ -259,6 +252,11 @@ export function TerminalPane({ active, serverId }: { active: boolean; serverId?:
         pasteReadingRef.current = false;
       }
       resizeObserver.disconnect();
+      themeObserver.disconnect();
+      window.removeEventListener("resize", refreshLayout);
+      colorScheme.removeEventListener("change", refreshLayout);
+      document.fonts.removeEventListener("loadingdone", refreshLayout);
+      if (layoutFrame !== null) cancelAnimationFrame(layoutFrame);
       unlisteners.splice(0).forEach((unlisten) => unlisten());
       if (sessionId !== null) {
         void callDesktop(IPC_COMMANDS.terminalClose, { terminalSessionId: sessionId }).catch(() => {});

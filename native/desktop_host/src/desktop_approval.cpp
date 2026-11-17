@@ -11,6 +11,7 @@
 #include <mutex>
 #include <sstream>
 #include <unordered_map>
+#include <unordered_set>
 
 namespace yukinal::desktop_host {
 namespace {
@@ -212,10 +213,21 @@ struct HostApprovalLedger::Impl {
   std::condition_variable changed;
   std::unordered_map<std::string, Entry> entries;
   std::unordered_map<std::string, Observation> observed;
+  std::unordered_set<std::string> retired;
+  std::unordered_map<std::string, bool> manual_runs;
+  bool auto_capacity_exhausted = false;
 };
 
 HostApprovalLedger::HostApprovalLedger() : impl_(std::make_unique<Impl>()) {}
 HostApprovalLedger::~HostApprovalLedger() = default;
+
+void HostApprovalLedger::observe_untrusted_result(const std::string& run_id) {
+  if (run_id.empty()) return;
+  std::lock_guard lock(impl_->mutex);
+  // Never evict a tainted run into a newly auto-authorized state.
+  if (impl_->manual_runs.size() >= kMaxTickets) impl_->auto_capacity_exhausted = true;
+  else impl_->manual_runs[run_id] = true;
+}
 
 HostApprovalLedger::UnknownApprovalError::UnknownApprovalError(
     const std::string& approval_id)
@@ -345,10 +357,14 @@ bool HostApprovalLedger::record_waiting_event(const nlohmann::json& params,
   std::lock_guard lock(impl_->mutex);
   for (auto entry = impl_->entries.begin(); entry != impl_->entries.end();) {
     if (entry->second.binding.expires_at <= now) {
+      impl_->retired.insert(entry->first);
       entry = impl_->entries.erase(entry);
     } else {
       ++entry;
     }
+  }
+  if (impl_->retired.count(binding.approval_id) || impl_->retired.size() >= 65536) {
+    throw std::runtime_error("approval ticket has been retired; a fresh approval is required");
   }
   if (const auto existing = impl_->entries.find(binding.approval_id);
       existing != impl_->entries.end()) {
@@ -358,9 +374,8 @@ bool HostApprovalLedger::record_waiting_event(const nlohmann::json& params,
     if (existing->second.phase != Impl::Phase::Pending) {
       throw std::runtime_error("approval request is already being answered");
     }
-    // A restored sidecar re-emits the same pending approval ID with a fresh
-    // deadline. Keep the host ticket aligned with that event.
-    existing->second.binding.expires_at = binding.expires_at;
+    // Recovery cannot turn the original approval into a longer-lived grant.
+    existing->second.binding.expires_at = std::min(existing->second.binding.expires_at, binding.expires_at);
     return true;
   }
   if (impl_->entries.size() >= kMaxTickets) {
@@ -385,13 +400,15 @@ bool HostApprovalLedger::record_auto_approved_event(const nlohmann::json& params
   std::lock_guard lock(impl_->mutex);
   const auto found = impl_->entries.find(approval_id);
   if (found == impl_->entries.end()) return false;
-  // Idempotent: the same event can arrive over both the notification stream and
-  // the explicit request, in either order.
-  if (found->second.phase == Impl::Phase::Approved) return true;
+  if (impl_->auto_capacity_exhausted || impl_->manual_runs.count(found->second.binding.run_id)) return false;
   if (found->second.phase != Impl::Phase::Pending) {
     throw std::runtime_error("auto-approved action is already being answered");
   }
   found->second.phase = Impl::Phase::Approved;
+  // An automatic change may only be followed by confirmation reads. A later
+  // change needs a fresh human decision, even before output events arrive.
+  if (impl_->manual_runs.size() >= kMaxTickets) impl_->auto_capacity_exhausted = true;
+  else impl_->manual_runs[found->second.binding.run_id] = true;
   impl_->changed.notify_all();
   return true;
 }
@@ -407,17 +424,23 @@ bool HostApprovalLedger::record_sidecar_approval(const nlohmann::json& params,
   std::lock_guard lock(impl_->mutex);
   for (auto entry = impl_->observed.begin(); entry != impl_->observed.end();) {
     if (entry->second.expires_at <= now) {
+      impl_->retired.insert(entry->first);
       entry = impl_->observed.erase(entry);
     } else {
       ++entry;
     }
   }
+  if (impl_->retired.count(parsed->approval_id) || impl_->retired.size() >= 65536) {
+    throw std::runtime_error("approval observation has expired; a fresh approval is required");
+  }
   if (const auto existing = impl_->observed.find(parsed->approval_id);
       existing != impl_->observed.end()) {
-    // The sidecar re-emits a pending approval with a fresh deadline; keep the
-    // observation aligned with it, and never let it shorten.
+    if (existing->second.run_id != parsed->run_id) {
+      throw std::runtime_error("approval observation is bound to another run");
+    }
+    // A repeated observation cannot extend an approval's original lifetime.
     existing->second.run_id = parsed->run_id;
-    existing->second.expires_at = std::max(existing->second.expires_at, parsed->expires_at);
+    existing->second.expires_at = std::min(existing->second.expires_at, parsed->expires_at);
     return true;
   }
   if (impl_->observed.size() >= kMaxObservedApprovals) {
@@ -428,6 +451,7 @@ bool HostApprovalLedger::record_sidecar_approval(const nlohmann::json& params,
     for (auto entry = impl_->observed.begin(); entry != impl_->observed.end(); ++entry) {
       if (entry->second.expires_at < oldest->second.expires_at) oldest = entry;
     }
+    impl_->retired.insert(oldest->first);
     impl_->observed.erase(oldest);
   }
   impl_->observed.emplace(parsed->approval_id,
@@ -443,16 +467,23 @@ std::optional<HostApprovalLedger::ResponseToken> HostApprovalLedger::begin_respo
   if (found == impl_->entries.end()) {
     const auto observed = impl_->observed.find(approval_id);
     if (observed != impl_->observed.end() && observed->second.expires_at > now) {
+      if (observed->second.run_id != run_id) {
+        throw std::runtime_error("approval observation run id does not match");
+      }
       // The sidecar owns this approval; it holds the only admission future. The
       // host acknowledges nothing it did not mint, so the response keeps
       // forwarding and the sidecar's own answer is the user-visible result.
       return std::nullopt;
     }
-    if (observed != impl_->observed.end()) impl_->observed.erase(observed);
+    if (observed != impl_->observed.end()) {
+      impl_->retired.insert(observed->first);
+      impl_->observed.erase(observed);
+    }
     throw UnknownApprovalError(approval_id);
   }
   auto& entry = found->second;
   if (entry.binding.expires_at <= now) {
+    impl_->retired.insert(found->first);
     impl_->entries.erase(found);
     throw std::runtime_error("host action approval has expired");
   }
@@ -491,6 +522,7 @@ void HostApprovalLedger::finish_response(const ResponseToken& token, bool accept
   if (approved) {
     entry.phase = Impl::Phase::Approved;
   } else {
+    impl_->retired.insert(found->first);
     impl_->entries.erase(found);
   }
   impl_->changed.notify_all();
@@ -498,7 +530,7 @@ void HostApprovalLedger::finish_response(const ResponseToken& token, bool accept
 
 std::optional<HostApprovalLedger::TicketError> HostApprovalLedger::consume(
     const ExecutionBinding& request, const std::function<std::int64_t()>& now,
-    std::chrono::milliseconds wait) {
+    std::chrono::milliseconds wait, std::int64_t* expires_at) {
   std::unique_lock lock(impl_->mutex);
   // The wait is bounded by wall-clock arithmetic against `wait` (the host TTL by
   // default), not by the number of wake-ups: a ticket parked in Responding can
@@ -510,6 +542,7 @@ std::optional<HostApprovalLedger::TicketError> HostApprovalLedger::consume(
     if (found == impl_->entries.end()) return TicketError::Missing;
     auto& entry = found->second;
     if (entry.binding.expires_at <= now()) {
+      impl_->retired.insert(found->first);
       impl_->entries.erase(found);
       return TicketError::Expired;
     }
@@ -522,6 +555,7 @@ std::optional<HostApprovalLedger::TicketError> HostApprovalLedger::consume(
           // Nobody answered in time. Burn the ticket instead of leaving an
           // unanswerable request behind, and report expiry so the caller fails
           // closed with the same user-visible error as a ticket that timed out.
+          impl_->retired.insert(found->first);
           impl_->entries.erase(found);
           impl_->changed.notify_all();
           return TicketError::Expired;
@@ -536,6 +570,8 @@ std::optional<HostApprovalLedger::TicketError> HostApprovalLedger::consume(
       }
       case Impl::Phase::Approved: {
         const bool matched = entry.binding.matches(request);
+        if (matched && expires_at != nullptr) *expires_at = entry.binding.expires_at;
+        impl_->retired.insert(found->first);
         impl_->entries.erase(found);
         return matched ? std::nullopt
                        : std::optional<TicketError>(TicketError::Mismatch);

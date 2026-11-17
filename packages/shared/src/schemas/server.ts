@@ -14,6 +14,14 @@ export const EnvironmentSchema = z.enum(ENVIRONMENTS);
 export const RiskLevelSchema = z.enum(RISK_LEVELS);
 export const ServerStatusSchema = z.enum(SERVER_STATUSES);
 
+const SshHostSchema = z.string().trim().min(1).max(256)
+  .refine((value) => !value.startsWith("-") && !/[\u0000-\u0020\u007f]/.test(value), "invalid SSH host");
+export const SftpAllowedRootsSchema = z.array(z.string().trim().min(1).max(4096).refine(
+  (value) => (value === "." || value.startsWith("/"))
+    && !value.split("/").includes("..") && !/[\u0000-\u001f\u007f]/.test(value),
+  "SFTP roots must be absolute or . and cannot contain traversal or control characters",
+)).min(1).max(32);
+
 export const ServerCapabilitiesSchema = z.strictObject({
   linux: z.boolean().optional(),
   docker: z.boolean().optional(),
@@ -57,10 +65,12 @@ export const HostCertificateAuthoritySchema = z.strictObject({
 });
 
 export const ServerConnectionSchema = z.strictObject({
-  host: z.string().trim().min(1).max(256),
+  host: SshHostSchema,
   /** 0 is not a port. Empty port defaults are a classic config bug. */
   port: z.number().int().min(1).max(65535),
   username: z.string().trim().min(1).max(256),
+  truecolor: z.boolean().optional(),
+  sftpAllowedRoots: SftpAllowedRootsSchema.optional(),
   identityId: z.string().trim().min(1).max(256).optional(),
   hostCertificateAuthority: HostCertificateAuthoritySchema.optional(),
 });
@@ -132,9 +142,11 @@ export const WorkspaceListResponseSchema = z.strictObject({
 /** Payload of the "Add Server" form. Secrets are dropped into the keychain here. */
 export const AddServerInputSchema = z.strictObject({
   name: z.string().trim().min(1).max(256),
-  host: z.string().trim().min(1).max(256),
+  host: SshHostSchema,
   port: z.number().int().min(1).max(65535).optional(),
   username: z.string().trim().min(1).max(256),
+  truecolor: z.boolean().optional(),
+  sftpAllowedRoots: SftpAllowedRootsSchema.optional(),
   environment: EnvironmentSchema,
   groupId: z.string().trim().max(256).optional(),
   hostCertificateAuthority: HostCertificateAuthoritySchema.optional(),
@@ -170,9 +182,11 @@ export const UpdateServerInputSchema = z
   .strictObject({
     serverId: SERVER_ID_SCHEMA,
     name: z.string().trim().min(1).max(256),
-    host: z.string().trim().min(1).max(256),
+    host: SshHostSchema,
     port: z.number().int().min(1).max(65535).optional(),
     username: z.string().trim().min(1).max(256),
+    truecolor: z.boolean().optional(),
+    sftpAllowedRoots: SftpAllowedRootsSchema.optional(),
     environment: EnvironmentSchema,
     groupId: z.string().trim().max(256).optional(),
     hostCertificateAuthority: HostCertificateAuthoritySchema.optional(),

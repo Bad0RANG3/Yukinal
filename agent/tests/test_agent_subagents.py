@@ -152,8 +152,9 @@ class SubagentRuntimeTests(unittest.IsolatedAsyncioTestCase):
             alpha = next(job for job in jobs if job["serverId"] == "srv_alpha")
             beta = next(job for job in jobs if job["serverId"] == "srv_beta")
             self.assertNotIn("goal", alpha, "The private brief never leaves the runtime")
+            cancelled_worker = sidecar._subagents.active[beta["id"]]
             self.assertTrue((await sidecar.rpc("agent.run.stop", {"runId": beta["runId"]}))["stopped"])
-            await asyncio.sleep(0.05)
+            await asyncio.wait_for(asyncio.gather(cancelled_worker, return_exceptions=True), 3)
             self.assertEqual(sidecar._subagents.jobs[beta["id"]]["state"], "cancelled")
             self.assertEqual(sidecar._subagents.jobs[alpha["id"]]["state"], "running")
             model.release["alpha private brief"].set()

@@ -1,4 +1,5 @@
 #include "yukinal/policy.hpp"
+#include "yukinal/ssh_security.hpp"
 
 #include <algorithm>
 #include <cstdint>
@@ -153,7 +154,7 @@ bool valid_package_version(const std::string& value) {
 }
 
 bool valid_sftp_path(const std::string& value) {
-  return !value.empty() && value.size() <= 4096 && value.find('\0') == std::string::npos;
+  return safe_sftp_path(value);
 }
 
 bool valid_snapshot_nonce(const std::string& value) {
@@ -163,7 +164,7 @@ bool valid_snapshot_nonce(const std::string& value) {
 }
 
 bool parse_exec_request(const nlohmann::json& value, ExecRequest* request, ApiError* error) {
-  if (!value.is_object() || !has_only_keys(value, {"target_id", "operation", "parameters", "timeout_seconds"})) {
+  if (!value.is_object() || !has_only_keys(value, {"target_id", "operation", "parameters", "timeout_seconds", "execution"})) {
     set_error(error, 400, "invalid_request", "Request must contain only the documented fields");
     return false;
   }

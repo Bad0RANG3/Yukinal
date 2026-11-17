@@ -19,6 +19,18 @@ test("accepts a contract-shaped server", () => {
   assert.equal(ServerSchema.safeParse(validServer).success, true);
 });
 
+test("SSH hosts reject option injection and SFTP configuration cannot contain traversal", () => {
+  for (const host of ["-oProxyCommand=touch /tmp/pwned", "-w", "host\nother", "host\0other"]) {
+    assert.equal(ServerSchema.safeParse({ ...validServer, connection: { ...validServer.connection, host } }).success, false);
+  }
+  for (const sftpAllowedRoots of [[], ["../"], ["/srv/../etc"], ["relative"], ["/srv\nsecret"]]) {
+    assert.equal(ServerSchema.safeParse({ ...validServer, connection: { ...validServer.connection, sftpAllowedRoots } }).success, false);
+  }
+  assert.equal(ServerSchema.safeParse({ ...validServer, connection: {
+    ...validServer.connection, truecolor: false, sftpAllowedRoots: [".", "/srv/app"],
+  } }).success, true);
+});
+
 test("rejects host-derived ids and non-ports", () => {
   assert.equal(
     ServerSchema.safeParse({ ...validServer, id: "api.example.com:22" }).success,

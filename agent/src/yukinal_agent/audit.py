@@ -3,10 +3,33 @@ from __future__ import annotations
 import asyncio
 import json
 import os
+import re
 import threading
-from dataclasses import asdict, dataclass
+from dataclasses import asdict, dataclass, replace
 from pathlib import Path
 from typing import Protocol
+
+_SECRET_FIELD = re.compile(r"password|passwd|passphrase|credential|private.?key|token|secret|authorization|cookie", re.I)
+_SECRET_TEXT = re.compile(
+    r"-----BEGIN(?: [A-Z0-9]+)? PRIVATE KEY-----[\s\S]*?(?:-----END(?: [A-Z0-9]+)? PRIVATE KEY-----|$)"
+    r"|\b(?:Bearer|Basic)\s+[^\s]+"
+    r"|\b(?:password|passwd|passphrase|token|secret|api[_-]?key)\s*[:=]\s*(?:\"[^\"]*\"|'[^']*'|[^\s,;]+)"
+    r"|\b[a-z][a-z0-9+.-]*://[^\s/@]+:[^\s/@]+@", re.I,
+)
+
+
+def redact_audit(value: object, depth: int = 0) -> object:
+    """Redact at the sink, including exception summaries from future callers."""
+    if depth > 16:
+        return "[truncated]"
+    if isinstance(value, dict):
+        return {str(key): "[redacted]" if _SECRET_FIELD.search(str(key)) else redact_audit(item, depth + 1)
+                for key, item in value.items()}
+    if isinstance(value, (tuple, list)):
+        return [redact_audit(item, depth + 1) for item in value]
+    if isinstance(value, str):
+        return _SECRET_TEXT.sub("[redacted]", value)
+    return value
 
 
 @dataclass(frozen=True)
@@ -49,23 +72,23 @@ class MemoryAuditSink:
 
     async def record(self, event: AuditEvent) -> None:
         async with self._lock:
-            self.events.append(event)
+            self.events.append(replace(event, result_summary=redact_audit(event.result_summary)))
 
 
 class JsonlAuditSink:
-    """Append-only JSONL audit sink; callers provide already-redacted summaries."""
+    """Append-only JSONL audit sink with mandatory structured redaction."""
 
     def __init__(self, path: str | os.PathLike[str]) -> None:
         self._path = Path(path)
         self._lock = threading.Lock()
 
     async def record(self, event: AuditEvent) -> None:
-        line = json.dumps(asdict(event), ensure_ascii=False, separators=(",", ":")) + "\n"
+        line = json.dumps(redact_audit(asdict(event)), ensure_ascii=False, separators=(",", ":")) + "\n"
         await asyncio.to_thread(self._append, line.encode("utf-8"))
 
     def _append(self, payload: bytes) -> None:
         self._path.parent.mkdir(parents=True, exist_ok=True)
-        flags = os.O_APPEND | os.O_CREAT | os.O_WRONLY
+        flags = os.O_APPEND | os.O_CREAT | os.O_WRONLY | getattr(os, "O_NOFOLLOW", 0)
         descriptor = os.open(self._path, flags, 0o600)
         try:
             with self._lock:

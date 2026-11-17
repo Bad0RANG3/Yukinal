@@ -9,7 +9,7 @@ import sys
 import uuid
 from collections import OrderedDict
 from dataclasses import asdict, dataclass, replace
-from datetime import UTC, datetime, timedelta
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any, BinaryIO, Callable
 from urllib.error import HTTPError, URLError
@@ -22,6 +22,7 @@ from yukinal_ssh import SshServiceClient
 
 from .audit import JsonlAuditSink
 from .conversation_store import ConversationStore, message_bytes
+from .checkpoints import checkpoint_binding_key
 from .subagents import SubagentRuntime, SUBAGENT_TOOLS, parse_subagents
 from .work_routing import delegation_allowed, tools_prohibited, user_request_text
 from .goal_loop import long_goal_requested
@@ -37,6 +38,7 @@ from .inference_policy import select_inference
 from .models import ModelConfig, ModelFactory, ModelFactoryError
 from .provider_store import ProviderStore, ProviderStoreError, validate_provider_save
 from .ssh_tools import (
+    desktop_connection_binding,
     _parse_docker_logs,
     _parse_docker_inspect,
     _parse_docker_ps,
@@ -145,6 +147,8 @@ class PythonSidecar:
         self._approval_ttl_seconds = approval_ttl_seconds
         self._checkpointer = checkpointer
         self._initialized = False
+        self._connection_binding_key = os.urandom(32)
+        self._connection_epoch = os.urandom(32)
         self._active_runs: dict[str, asyncio.Task[dict[str, Any]]] = {}
         self._completed_runs: OrderedDict[str, str] = OrderedDict()
         self._admissions: OrderedDict[str, dict[str, Any]] = OrderedDict()
@@ -761,6 +765,7 @@ class PythonSidecar:
                                    "model": getattr(model, "model_name", None)},
                 goal_loop=_sustained_goal(request),
                 auto_approval=request.get("permissionMode", "ask") == "auto",
+                approval_ttl_seconds=self._approval_ttl_seconds,
                 tool_names=_allowed_tools_for_run(self._registry, request.get("mode", "goal"), request),
                 event_sink=self._emit,
                 checkpointer=self._checkpointer,
@@ -850,7 +855,10 @@ class PythonSidecar:
         payload: dict[str, Any] = {
             "runId": job["runId"], "sessionId": job["workerSessionId"], "prompt": job["goal"],
             "delivery": "sync", "mode": parent.get("mode", "goal") if job["access"] == "write" else "readonly",
-            "permissionMode": parent.get("permissionMode", "ask"),
+            # An AI-generated task brief is not fresh user authorization. In
+            # particular, delegation must not clear remote-evidence taint by
+            # moving an auto-mode write into a worker with empty history.
+            "permissionMode": "ask" if job["access"] == "write" else parent.get("permissionMode", "ask"),
             "persona": {"id": parent_persona.get("id", "operations-agent"),
                 "label": "运维 Agent · 子任务", "systemPrompt": parent_persona.get("systemPrompt", "")[:12000] +
                 "\n\n你正在作为主运维 Agent 的 subagent 执行一项独立任务。只完成这项任务，返回结果、证据、失败和待确认事项；不要尝试启动其他 subagent。没有执行证据不能声称完成。"},
@@ -1227,7 +1235,8 @@ class PythonSidecar:
                     persona = {"id": "operations-agent", "label": "运维 Agent", "systemPrompt": agent_context}
                 else:
                     persona = {**persona, "systemPrompt": persona.get("systemPrompt", "")[:12000] + "\n\n" + agent_context}
-                task_snapshot = [HumanMessage(content="当前后台 subagent 状态快照，仅供参考；用户请求以最后一条消息为准。\n" + self._subagents.turn_context(request))]
+                if self._subagents.list(request["sessionId"]):
+                    task_snapshot = [HumanMessage(content="当前后台 subagent 状态快照，仅供参考；用户请求以最后一条消息为准。\n" + self._subagents.turn_context(request))]
             available_bytes = max(0, agent.conversation_budget_bytes(request["promptText"], persona) - message_bytes(task_snapshot))
             memory_budget = min(16 * 1024, available_bytes // 8)
             context = self._conversations.context(request["sessionId"], request.get("targetId"), exclude_run=run_id,
@@ -1247,6 +1256,14 @@ class PythonSidecar:
             target_id = request.get("targetId")
             mode = request.get("mode", "goal")
             allowed_tools = set(_allowed_tools_for_run(self._registry, mode, request))
+            if target_id and self._host_rpc is not None and allowed_tools:
+                request["sshConnectionBinding"] = await desktop_connection_binding(
+                    self._host_rpc, target_id, self._connection_binding_key, self._connection_epoch
+                )
+            elif target_id and allowed_tools:
+                # A standalone HTTP service does not expose an attested credential
+                # identity. A fresh run works, but its checkpoint cannot be reused.
+                request["sshConnectionBinding"] = "unverifiable:" + os.urandom(32).hex()
             result = await agent.run(
                 task_id=_safe_context_id("task", task_id or run_id),
                 tenant_id="local",
@@ -1456,11 +1473,17 @@ class PythonSidecar:
         target = request.get("hostTarget")
         if not isinstance(target, dict):
             target = {"host": "local", "environment": "unknown"}
-        expires_at = (datetime.now(UTC) + timedelta(seconds=self._approval_ttl_seconds)).isoformat()
+        expires_ms = approval.expires_at_ms
+        if expires_ms is None:
+            # Legacy paused checkpoints must not acquire a fresh TTL on restore.
+            expires_ms = 0 if request.get("requireCheckpoint") else int(datetime.now(UTC).timestamp() * 1000) + self._approval_ttl_seconds * 1000
+        expiry = datetime.fromtimestamp(expires_ms / 1000, UTC)
+        expires_at = expiry.isoformat()
+        remaining_seconds = max(0, (expiry - datetime.now(UTC)).total_seconds())
         # Auto-approval: the user chose "let it run" for this run. The call is still
         # announced so the host can mint its exact one-shot ticket (and re-check the
         # target, input, command blacklist and plan step), but nobody waits.
-        auto_approved = request.get("permissionMode", "ask") == "auto"
+        auto_approved = remaining_seconds > 0 and request.get("permissionMode", "ask") == "auto" and not approval.remote_evidence
         self._emit({
             "type": "agent.waiting_approval",
             "runId": run_id,
@@ -1493,11 +1516,13 @@ class PythonSidecar:
         })
         if auto_approved:
             self._pending_approvals.pop(approval_id, None)
+            await self._verify_approval_connection(request)
             return await agent.resume_after_approval(
-                result.checkpoint_id, fingerprint, approval_id, approved=True
+                result.checkpoint_id, fingerprint, approval_id, approved=True,
+                approval_expires_at_ms=int(datetime.fromisoformat(expires_at).timestamp() * 1000),
             )
         try:
-            decision = await asyncio.wait_for(future, timeout=self._approval_ttl_seconds)
+            decision = await asyncio.wait_for(future, timeout=remaining_seconds)
         except TimeoutError:
             self._emit({"type": "agent.approval_expired", "runId": run_id, "approvalId": approval_id, "at": _timestamp()})
             decision = "reject"
@@ -1512,12 +1537,22 @@ class PythonSidecar:
             approval_id if decision == "approve_once" else None,
         )
         if decision == "approve_once":
-            return await agent.resume_after_approval(*resume_args, approved=True)
+            await self._verify_approval_connection(request)
+            return await agent.resume_after_approval(*resume_args, approved=True,
+                approval_expires_at_ms=int(datetime.fromisoformat(expires_at).timestamp() * 1000))
         return await agent.resume_after_approval(
             *resume_args,
             approved=False,
             rejection_code=rejection_code,
         )
+
+    async def _verify_approval_connection(self, request: dict[str, Any]) -> None:
+        expected = request.get("sshConnectionBinding")
+        if expected is not None:
+            if self._host_rpc is None or expected != await desktop_connection_binding(
+                self._host_rpc, request["targetId"], self._connection_binding_key, self._connection_epoch
+            ):
+                raise ToolCallError("checkpoint_context_mismatch", "SSH connection changed while approval was pending")
 
     async def shutdown(self) -> None:
         await self._subagents.shutdown()
@@ -1541,6 +1576,8 @@ class PythonSidecar:
         ):
             raise _RpcFault(RPC_INVALID_PARAMS, "invalid params")
         self._initialized = True
+        if parsed["dataDir"]:
+            self._connection_binding_key = checkpoint_binding_key(parsed["dataDir"])
         return {
             "protocolVersion": RPC_VERSION,
             "agentVersion": self._agent_version,
@@ -2373,6 +2410,7 @@ def _run_checkpoint_binding(request: dict[str, Any]) -> str:
         "focusServerId", "target", "policyId", "permissionMode", "mode",
         "planBinding",
         "persona", "participant", "reasoningEffort", "toolAccess", "subagents",
+        "hostTarget", "targetId", "sshConnectionBinding",
     )
     binding = {field: request[field] for field in fields if field in request}
     budget = request.get("agentBudget")

@@ -4,17 +4,12 @@
 #include <string>
 #include <nlohmann/json.hpp>
 #include "yukinal/snapshot_toolkit_data.hpp"
+#include "yukinal/ssh_security.hpp"
 
 namespace yukinal::ssh_service {
 inline const nlohmann::json& snapshot_toolkit_catalog() {
   static const auto catalog = nlohmann::json::parse(kSnapshotToolkitCatalog);
   return catalog;
-}
-
-inline std::string snapshot_shell_quote(const std::string& text) {
-  std::string quoted = "'";
-  for (char c : text) quoted += c == '\'' ? "'\"'\"'" : std::string(1, c);
-  return quoted + "'";
 }
 
 inline std::string build_system_snapshot_command(const std::string& nonce) {
@@ -30,7 +25,7 @@ inline std::string build_system_snapshot_command(const std::string& nonce) {
     // Skip potentially blocking probes on hosts without a deadline utility.
     if (timeout > 0) {
       shell = "if command -v timeout >/dev/null 2>&1; then timeout -k 1 " +
-              std::to_string(timeout) + " sh -c " + snapshot_shell_quote(shell) +
+              std::to_string(timeout) + " sh -c " + shell_quote(shell) +
               "; else (exit 127); fi";
     } else {
       shell = "( " + shell + " )";
@@ -45,8 +40,8 @@ inline std::string build_system_snapshot_command(const std::string& nonce) {
                "yk_snapshot_output=''; yk_snapshot_status=125; else "
                "yk_snapshot_remaining=$((yk_snapshot_remaining - yk_snapshot_length)); fi; ";
     if (id == "docker_info") command += "yk_docker_status=$yk_snapshot_status; export yk_docker_status; ";
-    command += "printf '" + prefix + "_BEGIN__\\n%s\\n" + prefix +
-               "_END_%s__\\n' \"$yk_snapshot_output\" \"$yk_snapshot_status\"; ";
+    command += "printf " + shell_quote(prefix + "_BEGIN__\\n%s\\n" + prefix +
+               "_END_%s__\\n") + " \"$yk_snapshot_output\" \"$yk_snapshot_status\"; ";
   }
   return command;
 }

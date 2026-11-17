@@ -82,6 +82,7 @@ class NativeInventoryCommandTests(unittest.TestCase):
         fixture.write_text(
             "#include <cstdint>\n#include <iostream>\n#include <optional>\n"
             "#include <string>\n#include <utility>\n"
+            '#include "yukinal/ssh_security.hpp"\nusing yukinal::ssh_service::shell_quote;\n'
             "struct TargetConfig {};\nstruct ExecResult { std::string command; };\n"
             "void fail(ExecResult*, const char*, const char*) {}\n"
             "bool valid_service_name(const std::string&) { return true; }\n"
@@ -99,7 +100,7 @@ class NativeInventoryCommandTests(unittest.TestCase):
         cls.executable = cls.directory / ("inventory_commands.exe" if os.name == "nt" else "inventory_commands")
         flags = ["-static-libgcc", "-static-libstdc++"] if os.name == "nt" else []
         built = subprocess.run(
-            [compiler, "-std=c++20", *flags, str(fixture), "-o", str(cls.executable)],
+            [compiler, "-std=c++20", *flags, "-I", str(native.parent.parent / "include"), str(fixture), "-o", str(cls.executable)],
             capture_output=True, timeout=60,
         )
         if built.returncode:

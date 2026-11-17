@@ -13,6 +13,7 @@
 #include "yukinal/desktop_host/transfer_types.hpp"
 #include "terminal_exit.hpp"
 #include "schema_migrations.hpp"
+#include "scoped_secret_cleanup.hpp"
 
 #include <httplib.h>
 
@@ -393,6 +394,17 @@ int run_terminal_mock(int argc, char** argv) {
     const auto frame = nlohmann::json::parse(line, nullptr, false);
     if (frame.is_discarded() || !frame.is_object()) continue;
     if (frame.value("type", std::string()) == "close") return 0;
+    if (frame.value("type", std::string()) == "write") {
+      const bool valid = frame.value("source", std::string()) == "user_pty" &&
+                         frame.value("data", std::string()) == "typed by user";
+      std::cout << nlohmann::json{{"type", "output"}, {"data", valid ? "b2s=" : "YmFk"}}.dump()
+                << '\n' << std::flush;
+    }
+    if (frame.value("type", std::string()) == "resize") {
+      const bool valid = frame.value("columns", 0) == 121 && frame.value("rows", 0) == 41;
+      std::cout << nlohmann::json{{"type", "output"}, {"data", valid ? "cmVzaXpl" : "YmFk"}}.dump()
+                << '\n' << std::flush;
+    }
   }
   return 0;
 }
@@ -401,6 +413,23 @@ int run_terminal_mock(int argc, char** argv) {
 
 int main(int argc, char** argv) {
   using yukinal::desktop_host::DesktopDatabase;
+  {
+    std::string credential = "short-secret";
+    char* original_bytes = credential.data();
+    const auto original_size = credential.size();
+    try {
+      yukinal::desktop_host::ScopedSecretCleanup cleanup(credential);
+      throw std::runtime_error("simulated spawn failure");
+    } catch (const std::runtime_error&) {}
+    check(credential.empty(), "credential cleanup must run on an exception");
+    check(std::all_of(original_bytes, original_bytes + original_size, [](char byte) { return byte == 0; }),
+          "credential cleanup must overwrite the actual string storage, including SSO");
+    nlohmann::json credentials = {{"password", "private"}, {"nested", {{"privateKey", "key"}}}};
+    {
+      yukinal::desktop_host::ScopedSecretCleanup cleanup(credentials);
+    }
+    check(credentials.empty(), "JSON credential cleanup must clear nested credentials");
+  }
   const bool terminal_mock = std::any_of(argv, argv + argc, [](const char* argument) {
     return std::string(argument) == "--terminal";
   });
@@ -419,7 +448,8 @@ int main(int argc, char** argv) {
     const nlohmann::json expected_servers = {{"servers", nlohmann::json::array({
       {{"id", "srv_01abc"}, {"name", "Staging"},
        {"connection", {{"host", "ssh.example.test"}, {"port", 2222},
-                        {"username", "operator"}}},
+                        {"username", "operator"}, {"truecolor", true},
+                        {"sftpAllowedRoots", nlohmann::json::array({"."})}}},
        {"groupId", "group_a"}, {"capabilities", {{"linux", true}, {"docker", false}}},
        {"status", "disconnected"},
        {"metadata", {{"environment", "staging"}, {"hostname", "stage-01"},
@@ -974,6 +1004,24 @@ int main(int argc, char** argv) {
           "the confirmed pin should be the trust source");
     check(target_payload.at("target").dump().find("s3cret-pass") == std::string::npos,
           "the target JSON must never carry the secret value");
+    check(target_payload.at("target").at("truecolor") == true &&
+              target_payload.at("target").at("sftp_allowed_roots") == nlohmann::json::array({"."}),
+          "migrated connections must advertise truecolor and confine SFTP to the home directory");
+    check(target_payload.at("target").at("stream_audit_file") ==
+              std::filesystem::absolute(database.data_directory() / "audit" / "ssh-stream.jsonl").string(),
+          "SSH stream audit paths must be fixed by the host data directory, independent of child cwd");
+    {
+      sqlite3* writer = nullptr;
+      check(sqlite3_open((temporary.path / "yukinal.db").string().c_str(), &writer) == SQLITE_OK,
+            "could not open the SSH policy fixture");
+      execute(writer, R"SQL(UPDATE servers SET truecolor=0, sftp_allowed_roots='["/srv/app"]' WHERE id='srv_target';)SQL");
+      const auto configured = yukinal::desktop_host::resolve_ssh_service_target(database, target_credentials, "srv_target");
+      check(configured.at("target").at("truecolor") == false &&
+                configured.at("target").at("sftp_allowed_roots") == nlohmann::json::array({"/srv/app"}),
+            "stored truecolor opt-out and SFTP roots must reach the SSH worker configuration");
+      execute(writer, R"SQL(UPDATE servers SET truecolor=1, sftp_allowed_roots='["."]' WHERE id='srv_target';)SQL");
+      sqlite3_close(writer);
+    }
 
     bool unknown_target_rejected = false;
     try {
@@ -1153,7 +1201,16 @@ int main(int argc, char** argv) {
       std::mutex events_mutex;
       std::condition_variable events_cv;
       std::map<std::string, nlohmann::json> closed_events;
+      std::map<std::string, std::string> output_events;
       terminals.set_event_sink([&](const std::string& event, const nlohmann::json& payload) {
+        if (event == "terminal.data") {
+          {
+            std::lock_guard lock(events_mutex);
+            output_events[payload.at("terminalSessionId").get<std::string>()] += payload.at("data").get<std::string>();
+          }
+          events_cv.notify_all();
+          return;
+        }
         if (event != "terminal.closed") return;
         {
           std::lock_guard lock(events_mutex);
@@ -1179,6 +1236,17 @@ int main(int argc, char** argv) {
       check(wait_closed(unknown_exit).at("exitCode").is_null(),
             "terminal.closed must report null when the worker sent no closed frame");
       check(terminals.close(unknown_exit), "the unknown-exit terminal should close");
+
+      const auto interactive = terminals.open("srv_target", 120, 24);
+      check(terminals.write(interactive, "typed by user"), "desktop keyboard input must reach the worker");
+      check(terminals.resize(interactive, 121, 41), "updated terminal dimensions must reach the worker");
+      {
+        std::unique_lock lock(events_mutex);
+        check(events_cv.wait_for(lock, std::chrono::seconds(10), [&] {
+          return output_events[interactive] == "okresize";
+        }), "terminal writes must carry user_pty provenance and resize must preserve columns/rows");
+      }
+      check(terminals.close(interactive), "the interactive protocol fixture should close");
 
       // Eight long-lived sessions are allowed; the ninth is refused. The count
       // includes sessions still being reaped, so opening again only succeeds
@@ -4684,9 +4752,10 @@ int main(int argc, char** argv) {
               "an auto-approved ticket should be consumed by its exact request");
         check(automatic.consume(execution_binding(), now_fn) == TicketError::Missing,
               "an auto-approved ticket is still single-use");
-        // The same event arriving twice must not fail or duplicate the ticket.
-        check(automatic.record_auto_approved_event(event, kApprovalNow),
-              "a repeated auto-approval event is idempotent");
+        bool replay_refused = false;
+        try { automatic.record_auto_approved_event(event, kApprovalNow); }
+        catch (const std::runtime_error&) { replay_refused = true; }
+        check(replay_refused, "a consumed approval cannot be minted again by replaying its event");
         // Without the marker the event stays a pending, unanswered request.
         ApprovalLedger unmarked;
         check(unmarked.record_waiting_event(waiting_event(), kApprovalNow),
@@ -4746,7 +4815,7 @@ int main(int argc, char** argv) {
       }
 
       // A restored sidecar re-emits the same pending approval with a fresh
-      // deadline; the ticket follows that event rather than being duplicated.
+      // deadline; recovery preserves the original ticket expiry.
       {
         ApprovalLedger restored;
         check(restored.record_waiting_event(waiting_event(), kApprovalNow),
@@ -4754,7 +4823,7 @@ int main(int argc, char** argv) {
         auto replayed = waiting_event();
         replayed["approval"]["expiresAt"] = "2027-01-15T08:03:00Z";
         check(restored.record_waiting_event(replayed, kApprovalNow),
-              "the exact replayed approval should refresh the existing ticket");
+              "the exact replayed approval should retain the existing ticket");
         bool conflicting = false;
         try {
           auto other = waiting_event();
@@ -4765,12 +4834,24 @@ int main(int argc, char** argv) {
         }
         check(conflicting,
               "a replay of one approval id with a different binding must be refused");
-        const auto token = restored.begin_response("apr_1", "run_1", "approve_once",
-                                                   kApprovalNow + 150);
-        restored.finish_response(*token, true, kApprovalNow + 150);
-        check(!restored.consume(execution_binding(), [] { return kApprovalNow + 150; })
-                   .has_value(),
-              "the refreshed ticket should still be consumable inside its new deadline");
+        check(restored.consume(execution_binding(), [] { return kApprovalNow + 150; }) == TicketError::Expired,
+              "checkpoint replay must not extend the original approval deadline");
+      }
+
+      {
+        ApprovalLedger tainted;
+        tainted.observe_untrusted_result("run_1");
+        auto event = waiting_event();
+        event["approval"]["autoApproved"] = true;
+        check(!tainted.record_auto_approved_event(event, kApprovalNow),
+              "remote output must not authorize automatic changes in the host");
+        check(tainted.consume(execution_binding(), now_fn) == TicketError::NotApproved,
+              "remote-output-dependent changes remain pending until the person approves");
+        approve_once(tainted);
+        std::int64_t deadline = 0;
+        check(!tainted.consume(execution_binding(), now_fn, ApprovalLedger::kConsumeWaitBudget, &deadline).has_value(),
+              "a fresh human decision can authorize its exact change");
+        check(deadline == kApprovalNow + 120, "SSH execution inherits the original ticket deadline");
       }
 
       // Tickets fail closed for forged, unapproved and replayed requests.
@@ -4920,6 +5001,18 @@ int main(int argc, char** argv) {
         check(!foreign.begin_response("apr_foreign", "run_1", "approve_once", kApprovalNow)
                    .has_value(),
               "an observed sidecar-owned approval must keep forwarding to the sidecar");
+        auto extended_observation = foreign_event();
+        extended_observation["approval"]["expiresAt"] = "2027-01-15T08:03:00Z";
+        check(foreign.record_sidecar_approval(extended_observation, kApprovalNow),
+              "an identical foreign approval can be observed again");
+        bool other_run_refused = false;
+        try {
+          auto another_run = foreign_event();
+          another_run["runId"] = "run_other";
+          another_run["approval"]["runId"] = "run_other";
+          foreign.record_sidecar_approval(another_run, kApprovalNow);
+        } catch (const std::runtime_error&) { other_run_refused = true; }
+        check(other_run_refused, "an observation cannot be rebound to another run");
         check(!foreign.record_sidecar_approval(waiting_event(), kApprovalNow),
               "a host action approval must not be recorded as a foreign observation");
         check(!foreign.record_sidecar_approval(nlohmann::json::object(), kApprovalNow),
@@ -4938,7 +5031,7 @@ int main(int argc, char** argv) {
         } catch (const ApprovalLedger::UnknownApprovalError&) {
           expired_refused = true;
         }
-        check(expired_refused, "an expired observation must stop forwarding");
+        check(expired_refused, "a replay cannot extend the original observation expiry");
       }
 
       // A ticket nobody answers must not pin a host worker forever: the wait is
@@ -5685,6 +5778,65 @@ int main(int argc, char** argv) {
         check(payload.value("status", std::string()) == "success" && runner_calls == 1,
               "a replayed host tool call must not run the tool twice");
       }
+      // The expiry watcher and external revocation share the token delivered to
+      // the runner. A late return or exception cannot become a success after
+      // that token is revoked, including when the caller supplied no token.
+      for (const bool throws_after_cancel : {false, true}) {
+        const std::string suffix = throws_after_cancel ? "throw" : "return";
+        const std::string task_id = "itask_cancel_" + suffix;
+        const std::string plan_id = "iplan_cancel_" + suffix;
+        const std::string step_id = "step_cancel_" + suffix;
+        (void)database.create_investigation_task(
+            durable_task(task_id, "srv_target", read_target, nlohmann::json::array()));
+        database.save_investigation_plan(plan_for(
+            plan_id, task_id, step_id, "evidence", nlohmann::json::array({"server.logs"}),
+            nlohmann::json::object()));
+        auto params = tool_call("server.logs", nlohmann::json::object(), read_target);
+        params["traceId"] = "trace_cancel_" + suffix;
+        params["callId"] = "call_cancel_" + suffix;
+        params["taskId"] = task_id;
+        params["planId"] = plan_id;
+        params["planStepId"] = step_id;
+        params["evidenceIds"] = nlohmann::json::array();
+        int cancelled_runner_calls = 0;
+        tool_router.set_host_tool_runner(
+            [&](const std::string&, const std::string&, const nlohmann::json&,
+                const std::shared_ptr<std::atomic<bool>>& token) -> nlohmann::json {
+              ++cancelled_runner_calls;
+              check(token != nullptr, "host execution must always have a cancellation token");
+              token->store(true);
+              if (throws_after_cancel) throw std::runtime_error("transport stopped after cancellation");
+              return {{"available", true}};
+            });
+        const auto result = run_tool(params);
+        check(code_of(result) == "cancelled" && !result.contains("output") &&
+                  cancelled_runner_calls == 1,
+              "a runner that returns or throws after revocation must be reported cancelled");
+        check(database.host_tool_call_status("trace_cancel_" + suffix, "call_cancel_" + suffix)
+                      .value_or("") == "uncertain",
+              "a revoked runner result must retain an uncertain ledger outcome");
+        const auto replay = run_tool(params);
+        check(code_of(replay) == "plan_deviation" && detail_code(replay) == "duplicate_call" &&
+                  replay.at("error").at("detail").value("status", std::string()) == "uncertain" &&
+                  cancelled_runner_calls == 1,
+              "a cancelled result replay must require reconciliation and not execute the runner again");
+      }
+      {
+        auto params = tool_call("server.logs", nlohmann::json::object(), read_target);
+        params["traceId"] = "trace_pre_cancelled";
+        params["callId"] = "call_pre_cancelled";
+        int forbidden_runner_calls = 0;
+        tool_router.set_host_tool_runner(
+            [&](const std::string&, const std::string&, const nlohmann::json&,
+                const std::shared_ptr<std::atomic<bool>>&) -> nlohmann::json {
+              ++forbidden_runner_calls;
+              return {{"available", true}};
+            });
+        const auto cancelled = std::make_shared<std::atomic<bool>>(true);
+        check(code_of(tool_router.handle_host_request("host.tool.execute", params, cancelled)) == "cancelled" &&
+                  forbidden_runner_calls == 0,
+              "an already revoked request must not enter its runner");
+      }
       // ── MCP gate alignment ───────────────────────────────────────────────
       // An `mcp.*` call runs the same durable-plan and task-binding gates as a
       // remote tool. The host resolves the tool's risk from the running,
@@ -5845,10 +5997,10 @@ int main(int argc, char** argv) {
   const auto file = (temporary.path / "yukinal.db").string();
   check(sqlite3_open_v2(file.c_str(), &readback, SQLITE_OPEN_READONLY, nullptr) == SQLITE_OK,
         "could not reopen the temporary database read-only");
-  check(query_integer(readback, "PRAGMA user_version") == 37,
+  check(query_integer(readback, "PRAGMA user_version") == static_cast<int>(yukinal::desktop_host::detail::kSchemaMigrations.size()),
         "opening a legacy database must migrate it to the supported schema version");
-  check(query_integer(readback, "SELECT count(*) FROM pragma_table_info('servers')") == 22,
-        "the legacy servers table should gain exactly the migrated host-trust columns");
+  check(query_integer(readback, "SELECT count(*) FROM pragma_table_info('servers')") == 24,
+        "the legacy servers table should gain the host-trust and SSH policy columns");
   sqlite3_close(readback);
 
   TemporaryDatabaseDirectory absent;
@@ -5865,7 +6017,7 @@ int main(int argc, char** argv) {
   check(sqlite3_open_v2((absent.path / "yukinal.db").string().c_str(), &fresh,
                         SQLITE_OPEN_READONLY, nullptr) == SQLITE_OK,
         "a new database should be initialized on disk");
-  check(query_integer(fresh, "PRAGMA user_version") == 37,
+  check(query_integer(fresh, "PRAGMA user_version") == static_cast<int>(yukinal::desktop_host::detail::kSchemaMigrations.size()),
         "a new database should be migrated to the supported schema version");
   sqlite3_close(fresh);
   return 0;

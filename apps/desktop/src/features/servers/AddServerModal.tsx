@@ -20,6 +20,8 @@ export function AddServerModal({ onClose, server }: { onClose: () => void; serve
   const [host, setHost] = useState(server?.connection.host ?? "");
   const [port, setPort] = useState(String(server?.connection.port ?? 22));
   const [username, setUsername] = useState(server?.connection.username ?? "");
+  const [truecolor, setTruecolor] = useState(server?.connection.truecolor ?? true);
+  const [sftpAllowedRoots, setSftpAllowedRoots] = useState(server?.connection.sftpAllowedRoots?.join("\n") ?? ".");
   // Defaults to "unknown", never "staging": staging is the one non-obvious class
   // that lets the Agent auto-approve ordinary writes, so preselecting it means a
   // user who misses this field gets a mislabelled host *and* auto-approved writes
@@ -47,6 +49,8 @@ export function AddServerModal({ onClose, server }: { onClose: () => void; serve
     setHost(server.connection.host);
     setPort(String(server.connection.port));
     setUsername(server.connection.username);
+    setTruecolor(server.connection.truecolor ?? true);
+    setSftpAllowedRoots(server.connection.sftpAllowedRoots?.join("\n") ?? ".");
     setEnvironment(server.metadata.environment);
     setHostCertificateEnabled(Boolean(server.connection.hostCertificateAuthority));
     setHostCertificateConfigured(Boolean(server.connection.hostCertificateAuthority));
@@ -77,6 +81,8 @@ export function AddServerModal({ onClose, server }: { onClose: () => void; serve
         host,
         port,
         username,
+        truecolor,
+        sftpAllowedRoots,
         environment,
         authMethod,
         password,
@@ -146,6 +152,13 @@ export function AddServerModal({ onClose, server }: { onClose: () => void; serve
                 {ENVIRONMENTS.map((env) => <option key={env} value={env}>{ENVIRONMENT_LABEL_SHORT[env]}</option>)}
               </select>
             </div>
+          </div>
+
+          <div className="form-field">
+            <label className="form-check-option"><input type="checkbox" checked={truecolor} onChange={(event) => setTruecolor(event.target.checked)} />向服务器声明终端真彩色支持</label>
+            <label className="field-label" htmlFor="server-sftp-roots">允许访问的远程文件根目录（每行一个）</label>
+            <textarea id="server-sftp-roots" className="form-input form-textarea form-textarea-compact" value={sftpAllowedRoots} onChange={(event) => setSftpAllowedRoots(event.target.value)} required spellCheck={false} />
+            <p className="form-hint">默认「.」仅允许用户主目录。需要管理其他目录时填写绝对路径；符号链接也必须留在这些根目录内。</p>
           </div>
 
           <fieldset className="form-fieldset" disabled={save.isPending}>

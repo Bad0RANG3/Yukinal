@@ -3,6 +3,8 @@
 #include <cstddef>
 #include <map>
 #include <memory>
+#include <optional>
+#include <cstdint>
 #include <regex>
 #include <string>
 #include <vector>
@@ -58,6 +60,12 @@ struct TargetConfig {
   std::vector<std::string> proxy_no_proxy;
   bool agent_auth = false;
   bool probe_only = false;
+  bool truecolor = true;
+  bool confirmation_read_only = false;
+  std::optional<std::int64_t> execution_expires_at_ms;
+  // Empty is never unrestricted. The default resolves to the login directory.
+  std::vector<std::string> sftp_allowed_roots{"."};
+  std::string stream_audit_file = "var/audit/ssh-stream.jsonl";
   // Defaults to false. The desktop sets this only on a one-shot target config
   // after host policy authorizes the exact server.exec call.
   bool allow_server_exec = false;

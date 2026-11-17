@@ -5,6 +5,8 @@ export interface ServerFormValues {
   host: string;
   port: string;
   username: string;
+  truecolor?: boolean;
+  sftpAllowedRoots?: string;
   environment: Environment;
   /** `agent` 不需要任何输入：它是对「用本机 ssh-agent 里的身份认证」的一次选择。 */
   authMethod: "password" | "privateKey" | "certificate" | "agent";
@@ -98,6 +100,10 @@ export function buildServerInput(values: ServerFormValues, serverId?: string): A
     host: values.host.trim(),
     port,
     username: values.username.trim(),
+    ...(values.truecolor === undefined ? {} : { truecolor: values.truecolor }),
+    ...(values.sftpAllowedRoots === undefined ? {} : {
+      sftpAllowedRoots: values.sftpAllowedRoots.split("\n").map((root) => root.trim()).filter(Boolean),
+    }),
     environment: values.environment,
     ...hostCertificateFields,
   };

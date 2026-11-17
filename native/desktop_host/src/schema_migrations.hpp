@@ -10,7 +10,7 @@
 
 namespace yukinal::desktop_host::detail {
 
-inline constexpr std::array<std::string_view, 37> kSchemaMigrations = {
+inline constexpr std::array<std::string_view, 38> kSchemaMigrations = {
     R"YKM001(
     CREATE TABLE servers (
         id          TEXT PRIMARY KEY,
@@ -583,6 +583,10 @@ inline constexpr std::array<std::string_view, 37> kSchemaMigrations = {
     ALTER TABLE chat_messages ADD COLUMN model TEXT;
     CREATE INDEX idx_chat_sessions_server_updated ON chat_sessions (server_id, updated_at DESC);
     )YKM037",
+    R"YKM038(
+    ALTER TABLE servers ADD COLUMN truecolor INTEGER NOT NULL DEFAULT 1 CHECK (truecolor IN (0, 1));
+    ALTER TABLE servers ADD COLUMN sftp_allowed_roots TEXT NOT NULL DEFAULT '["."]';
+    )YKM038",
 };
 
 }  // namespace yukinal::desktop_host::detail

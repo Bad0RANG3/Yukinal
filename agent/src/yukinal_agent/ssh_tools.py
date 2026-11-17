@@ -1,9 +1,14 @@
 from __future__ import annotations
 
 import asyncio
+import contextvars
+import functools
 import hashlib
+import hmac
 import json
+import os
 import re
+import stat
 import unicodedata
 from pathlib import Path
 from typing import Any
@@ -42,6 +47,156 @@ _MAX_DOCKER_PS_CONTAINERS = 200
 _MAX_DOCKER_LOG_LINE_CHARS = 4_000
 _MAX_AGENT_EDIT_BYTES = 512 * 1024
 _MAX_AGENT_BACKUP_BYTES = 1024 * 1024
+_MAX_CONNECTION_IDENTITY_FILE_BYTES = 1024 * 1024
+_CREDENTIAL_PAYLOADS: contextvars.ContextVar[list[dict[str, Any]] | None] = contextvars.ContextVar(
+    "ssh_credential_payloads", default=None,
+)
+
+
+def _with_credential_cleanup(handler):
+    @functools.wraps(handler)
+    async def wrapped(*args, **kwargs):
+        payloads: list[dict[str, Any]] = []
+        scope = _CREDENTIAL_PAYLOADS.set(payloads)
+        try:
+            return await handler(*args, **kwargs)
+        finally:
+            for credentials in payloads:
+                for value in credentials.values():
+                    if isinstance(value, bytearray):
+                        value[:] = b"\x00" * len(value)
+                credentials.clear()
+            _CREDENTIAL_PAYLOADS.reset(scope)
+    return wrapped
+
+
+async def _request_desktop_target(host: HostRpcClient, method: str, params: dict[str, Any], *, timeout_seconds: float):
+    payload = await host.request(method, params, timeout_seconds=timeout_seconds)
+    tracked = _CREDENTIAL_PAYLOADS.get()
+    if tracked is not None and isinstance(payload, dict):
+        for item in (payload, payload.get("targetData")):
+            if isinstance(item, dict) and isinstance(item.get("credentials"), dict):
+                tracked.append(item["credentials"])
+    return payload
+
+
+def _connection_file_binding(path: object, key: bytes) -> str:
+    """Hash bounded identity/trust file bytes with the installation secret.
+
+    The file may contain a certificate, known hosts, or a private identity.
+    Neither its plaintext nor an offline-guessable unkeyed digest is persisted.
+    """
+    if (not isinstance(path, str) or not Path(path).is_absolute() or len(path) > 4096
+            or any(ord(char) < 0x20 or 0x7F <= ord(char) <= 0x9F for char in path)):
+        raise ValueError("invalid connection identity path")
+    buffer = bytearray(64 * 1024)
+    try:
+        # Nonblocking open also prevents an unexpected Unix FIFO from hanging
+        # admission. Only regular files qualify as identity material.
+        # Passing the path (not an existing descriptor) gives FileIO ownership
+        # even when construction rejects a POSIX directory or other bad file.
+        with open(path, "rb", buffering=0, opener=lambda filename, flags:
+                  os.open(filename, flags | getattr(os, "O_NONBLOCK", 0))) as handle:
+            before = os.fstat(handle.fileno())
+            if not stat.S_ISREG(before.st_mode) or before.st_size > _MAX_CONNECTION_IDENTITY_FILE_BYTES:
+                raise ValueError("connection identity file exceeds its bounds")
+            digest = hmac.new(key, b"yukinal-ssh-identity-file-v1\x00", hashlib.sha256)
+            total = 0
+            while count := handle.readinto(buffer):
+                total += count
+                if total > _MAX_CONNECTION_IDENTITY_FILE_BYTES:
+                    raise ValueError("connection identity file exceeds its bounds")
+                digest.update(memoryview(buffer)[:count])
+            after = os.fstat(handle.fileno())
+            if ((before.st_dev, before.st_ino, before.st_size, before.st_mtime_ns)
+                    != (after.st_dev, after.st_ino, after.st_size, after.st_mtime_ns)):
+                raise ValueError("connection identity file changed during admission")
+            return digest.hexdigest()
+    finally:
+        buffer[:] = b"\x00" * len(buffer)
+
+
+async def desktop_connection_binding(host: HostRpcClient, server_id: str, key: bytes, runtime_epoch: bytes = b"") -> str:
+    """Bind checkpoints to the complete trusted SSH identity without storing secrets.
+
+    A private, persistent installation key prevents password dictionary attacks
+    against a checkpoint digest. Resolving the target again detects rotated
+    credentials, host-key policy, proxy, and allowed-root changes on resume.
+    """
+    if not isinstance(key, bytes) or len(key) < 32:
+        raise ValueError("the connection binding key must contain at least 32 bytes")
+    if not isinstance(server_id, str) or not re.fullmatch(r"srv_[a-z0-9]+", server_id):
+        raise ToolCallError("target_required", "the connection binding requires a valid remote target")
+    payload: object = None
+    encoded = bytearray()
+    try:
+        payload = await host.request("host.ssh.service_target", {"serverId": server_id}, timeout_seconds=8.0)
+        target = payload.get("target") if isinstance(payload, dict) else None
+        credentials = payload.get("credentials") if isinstance(payload, dict) else None
+        if not isinstance(target, dict) or target.get("target_id") != server_id or not isinstance(credentials, dict):
+            raise ToolCallError("ssh_target_unavailable", "the host could not bind the selected SSH connection")
+        binding = {"target": target, "credentials": credentials}
+        auth = target.get("auth", {})
+        if not isinstance(auth, dict):
+            raise ToolCallError("ssh_target_unavailable", "the host could not bind the selected SSH connection")
+        file_bindings = {}
+        for name, source, field in (("auth.public_key_file", auth, "public_key_file"),
+                                    ("auth.private_key_file", auth, "private_key_file"),
+                                    ("known_hosts_file", target, "known_hosts_file")):
+            if field in source:
+                file_bindings[name] = await asyncio.to_thread(_connection_file_binding, source[field], key)
+        if file_bindings:
+            binding["identityFiles"] = file_bindings
+        if auth.get("type") == "agent":
+            # The socket name cannot attest keys held by another process. Never
+            # restore such a checkpoint across sidecar lifetimes.
+            binding["agentRuntimeEpoch"] = runtime_epoch.hex()
+        encoded.extend(json.dumps(
+            binding, sort_keys=True, separators=(",", ":"),
+            ensure_ascii=False,
+        ).encode("utf-8"))
+        return hmac.new(key, encoded, hashlib.sha256).hexdigest()
+    except asyncio.CancelledError:
+        raise
+    except ToolCallError:
+        raise
+    except Exception:
+        raise ToolCallError("ssh_target_unavailable", "the host could not bind the selected SSH connection") from None
+    finally:
+        encoded[:] = b"\x00" * len(encoded)
+        if isinstance(payload, dict) and isinstance(payload.get("credentials"), dict):
+            payload["credentials"].clear()
+
+
+def _prepare_desktop_target(payload: object, context: ExecutionContext) -> object:
+    if isinstance(payload, dict) and isinstance(payload.get("target"), dict):
+        target = payload["target"]
+        # This flag reaches the service even when callers use existing channels.
+        if getattr(context, "confirmation_read_only", False):
+            target["confirmation_read_only"] = True
+        else:
+            target.setdefault("confirmation_read_only", False)
+        deadline = getattr(context, "approval_expires_at_ms", None)
+        if deadline is not None:
+            host_deadline = target.get("execution_expires_at_ms")
+            if host_deadline is None:
+                target["execution_expires_at_ms"] = deadline
+            elif isinstance(host_deadline, int) and not isinstance(host_deadline, bool):
+                target["execution_expires_at_ms"] = min(deadline, host_deadline)
+    return payload
+
+
+def _desktop_client(
+    process: SshServiceProcess, token: str, base_url: str, context: ExecutionContext,
+) -> SshServiceClient:
+    client = SshServiceClient(
+        token, base_url=base_url,
+        execution_deadline_ms=getattr(context, "approval_expires_at_ms", None),
+    )
+    process.bind_client(client)
+    return client
+
+
 _SYSTEMD_RESTART_INPUT_SCHEMA = {
     "type": "object",
     "properties": {
@@ -338,6 +493,7 @@ def register_desktop_ssh_tools(
         ),
     )
 
+    @_with_credential_cleanup
     async def execute(
         tool_name: str,
         operation: str,
@@ -362,8 +518,8 @@ def register_desktop_ssh_tools(
                 )
             elif operation == "filesystem_list":
                 params.update({"path": arguments["path"]})
-            payload = await host.request(
-                method, params, timeout_seconds=8.0
+            payload = await _request_desktop_target(
+                host, method, params, timeout_seconds=8.0
             )
         except asyncio.CancelledError:
             raise
@@ -372,7 +528,7 @@ def register_desktop_ssh_tools(
                 raise ToolCallError("ssh_target_unavailable", "could not resolve the selected target for C++ SSH") from None
             return await _execute_on_host(host, tool_name, arguments, context)
         try:
-            process, token, base_url = SshServiceProcess.for_desktop_target(binary, payload)
+            process, token, base_url = SshServiceProcess.for_desktop_target(binary, _prepare_desktop_target(payload, context))
         except SshServiceProcessError:
             if tool_name == "ssh.disk_usage":
                 raise ToolCallError("ssh_target_unsupported", "the selected target is not supported by the C++ SSH service") from None
@@ -390,7 +546,7 @@ def register_desktop_ssh_tools(
             return await _execute_on_host(host, tool_name, arguments, context)
 
         try:
-            client = SshServiceClient(token, base_url=base_url)
+            client = _desktop_client(process, token, base_url, context)
             if operation == "filesystem_read":
                 read_binding = (
                     payload.get("filesystemRead") if isinstance(payload, dict) else None
@@ -846,6 +1002,7 @@ async def _finish_desktop_ssh_effectful_action(
         )
 
 
+@_with_credential_cleanup
 async def _desktop_ssh_effectful_action(
     host: HostRpcClient,
     binary: Path,
@@ -862,8 +1019,8 @@ async def _desktop_ssh_effectful_action(
     resource = arguments.get(resource_key)
     tool_call = _ssh_effectful_action_host_call(tool_name, arguments, context)
     try:
-        response = await host.request(
-            "host.ssh.effectful_action_target",
+        response = await _request_desktop_target(
+            host, "host.ssh.effectful_action_target",
             {"toolCall": tool_call},
             timeout_seconds=15.0,
         )
@@ -910,14 +1067,14 @@ async def _desktop_ssh_effectful_action(
     operation_started = False
     cancelled = False
     try:
-        process, token, base_url = SshServiceProcess.for_desktop_target(binary, payload)
+        process, token, base_url = SshServiceProcess.for_desktop_target(binary, _prepare_desktop_target(payload, context))
         target = payload.get("target")
         target_id = context.context_target_id
         if not isinstance(target, dict) or target.get("target_id") != target_id:
             raise SshServiceProcessError("the desktop host returned the wrong SSH action target")
         await process.start()
         operation_started = True
-        client = SshServiceClient(token, base_url=base_url)
+        client = _desktop_client(process, token, base_url, context)
         if tool_name == "systemd.restart":
             result = await asyncio.to_thread(
                 client.systemd_restart,
@@ -956,19 +1113,29 @@ async def _desktop_ssh_effectful_action(
         cancelled = True
         if operation_started:
             outcome = "unknown"
+        if process is not None:
+            # Revoke/close the transport before reporting approval cancellation;
+            # the remote operation must not outlive its authorization record.
+            await asyncio.shield(process.stop())
         await asyncio.shield(_finish_desktop_ssh_effectful_action(host, tool_call, outcome))
         raise
     except SshServiceError as error:
         outcome = "unknown" if operation_started else "failed"
+        if process is not None:
+            await process.stop()
         await _finish_desktop_ssh_effectful_action(host, tool_call, outcome)
         raise ToolCallError(error.code, str(error)) from None
     except SshServiceProcessError:
+        if process is not None:
+            await process.stop()
         await _finish_desktop_ssh_effectful_action(host, tool_call, "failed")
         raise ToolCallError(
             "host_unavailable", "the C++ SSH service could not start for the approved action"
         ) from None
     except Exception:
         outcome = "unknown" if operation_started else "failed"
+        if process is not None:
+            await process.stop()
         await _finish_desktop_ssh_effectful_action(host, tool_call, outcome)
         raise ToolCallError(
             "transport", "the approved SSH action did not return a usable result"
@@ -1045,6 +1212,7 @@ def _validate_server_exec_output(value: object, max_output_bytes: int) -> dict[s
     return dict(value)
 
 
+@_with_credential_cleanup
 async def _desktop_filesystem_write(
     host: HostRpcClient,
     binary: Path,
@@ -1097,8 +1265,8 @@ async def _desktop_filesystem_write(
         return output
 
     try:
-        payload = await host.request(
-            "host.ssh.filesystem_write_target",
+        payload = await _request_desktop_target(
+            host, "host.ssh.filesystem_write_target",
             {
                 "serverId": target_id,
                 "path": arguments["path"],
@@ -1123,7 +1291,7 @@ async def _desktop_filesystem_write(
     ):
         raise ToolCallError("invalid_host_response", "The desktop host returned an invalid write binding")
     try:
-        process, token, base_url = SshServiceProcess.for_desktop_target(binary, payload)
+        process, token, base_url = SshServiceProcess.for_desktop_target(binary, _prepare_desktop_target(payload, context))
     except SshServiceProcessError:
         return await run_host_compatibility_path()
     try:
@@ -1136,7 +1304,7 @@ async def _desktop_filesystem_write(
         return await run_host_compatibility_path()
 
     try:
-        client = SshServiceClient(token, base_url=base_url)
+        client = _desktop_client(process, token, base_url, context)
         await asyncio.to_thread(
             client.sftp_write,
             target_id,
@@ -1161,6 +1329,7 @@ async def _desktop_filesystem_write(
         await process.stop()
 
 
+@_with_credential_cleanup
 async def _desktop_filesystem_edit(
     host: HostRpcClient,
     binary: Path,
@@ -1213,8 +1382,8 @@ async def _desktop_filesystem_edit(
         return output
 
     try:
-        payload = await host.request(
-            "host.ssh.filesystem_edit_target",
+        payload = await _request_desktop_target(
+            host, "host.ssh.filesystem_edit_target",
             {
                 "serverId": target_id,
                 **arguments,
@@ -1236,7 +1405,7 @@ async def _desktop_filesystem_edit(
     if binding != expected_binding:
         raise ToolCallError("invalid_host_response", "The desktop host returned an invalid edit binding")
     try:
-        process, token, base_url = SshServiceProcess.for_desktop_target(binary, payload)
+        process, token, base_url = SshServiceProcess.for_desktop_target(binary, _prepare_desktop_target(payload, context))
     except SshServiceProcessError:
         return await run_host_compatibility_path()
     try:
@@ -1249,7 +1418,7 @@ async def _desktop_filesystem_edit(
         return await run_host_compatibility_path()
 
     def edit_remote_file() -> dict[str, object]:
-        client = SshServiceClient(token, base_url=base_url)
+        client = _desktop_client(process, token, base_url, context)
         before = client.sftp_read(target_id, arguments["path"], _MAX_AGENT_EDIT_BYTES)
         if len(before) > _MAX_AGENT_EDIT_BYTES:
             raise ToolCallError("invalid_input", "The remote file exceeds the 512 KiB edit limit")
@@ -1334,6 +1503,7 @@ async def _desktop_filesystem_edit(
         await process.stop()
 
 
+@_with_credential_cleanup
 async def _desktop_filesystem_backup(
     host: HostRpcClient,
     binary: Path,
@@ -1386,8 +1556,8 @@ async def _desktop_filesystem_backup(
         return output
 
     try:
-        payload = await host.request(
-            "host.ssh.filesystem_backup_target",
+        payload = await _request_desktop_target(
+            host, "host.ssh.filesystem_backup_target",
             {
                 "serverId": target_id,
                 "path": arguments["path"],
@@ -1411,7 +1581,7 @@ async def _desktop_filesystem_backup(
     backup_path = binding["backupPath"]
     _validate_host_backup_path(arguments["path"], backup_path)
     try:
-        process, token, base_url = SshServiceProcess.for_desktop_target(binary, payload)
+        process, token, base_url = SshServiceProcess.for_desktop_target(binary, _prepare_desktop_target(payload, context))
     except SshServiceProcessError:
         return await run_host_compatibility_path()
     try:
@@ -1424,7 +1594,7 @@ async def _desktop_filesystem_backup(
         return await run_host_compatibility_path()
 
     def create_remote_backup() -> dict[str, object]:
-        client = SshServiceClient(token, base_url=base_url)
+        client = _desktop_client(process, token, base_url, context)
         before = client.sftp_stat(target_id, arguments["path"])
         if before["kind"] != "file":
             raise ToolCallError("unsafe_remote_write", "Only a regular remote file can be backed up")
@@ -1516,6 +1686,7 @@ def _bounded_cleanup_reason(value: str) -> str:
     return readable.encode("utf-8")[:256].decode("utf-8", errors="ignore")
 
 
+@_with_credential_cleanup
 async def _desktop_filesystem_restore(
     host: HostRpcClient,
     binary: Path,
@@ -1568,8 +1739,8 @@ async def _desktop_filesystem_restore(
         return output
 
     try:
-        payload = await host.request(
-            "host.ssh.filesystem_restore_target",
+        payload = await _request_desktop_target(
+            host, "host.ssh.filesystem_restore_target",
             {
                 "serverId": target_id,
                 **arguments,
@@ -1599,7 +1770,7 @@ async def _desktop_filesystem_restore(
     backup_path = binding["backupPath"]
     _validate_host_backup_path(arguments["path"], backup_path)
     try:
-        process, token, base_url = SshServiceProcess.for_desktop_target(binary, payload)
+        process, token, base_url = SshServiceProcess.for_desktop_target(binary, _prepare_desktop_target(payload, context))
     except SshServiceProcessError:
         return await run_host_compatibility_path()
     try:
@@ -1612,7 +1783,7 @@ async def _desktop_filesystem_restore(
         return await run_host_compatibility_path()
 
     def restore_remote_file() -> dict[str, object]:
-        client = SshServiceClient(token, base_url=base_url)
+        client = _desktop_client(process, token, base_url, context)
         target_path = arguments["path"]
         target_before = client.sftp_stat(target_id, target_path)
         if target_before["kind"] != "file":
@@ -1726,6 +1897,7 @@ async def _desktop_filesystem_restore(
         await process.stop()
 
 
+@_with_credential_cleanup
 async def _desktop_filesystem_backup_cleanup(
     host: HostRpcClient,
     binary: Path,
@@ -1799,8 +1971,8 @@ async def _desktop_filesystem_backup_cleanup(
         return output
 
     try:
-        payload = await host.request(
-            "host.ssh.filesystem_cleanup_target",
+        payload = await _request_desktop_target(
+            host, "host.ssh.filesystem_cleanup_target",
             {
                 "serverId": target_id,
                 "input": arguments,
@@ -1895,7 +2067,7 @@ async def _desktop_filesystem_backup_cleanup(
         return output
 
     try:
-        process, token, base_url = SshServiceProcess.for_desktop_target(binary, payload)
+        process, token, base_url = SshServiceProcess.for_desktop_target(binary, _prepare_desktop_target(payload, context))
     except SshServiceProcessError:
         return await run_host_compatibility_path()
     try:
@@ -1907,7 +2079,7 @@ async def _desktop_filesystem_backup_cleanup(
         await process.stop()
         return await run_host_compatibility_path()
 
-    client = SshServiceClient(token, base_url=base_url)
+    client = _desktop_client(process, token, base_url, context)
 
     def remove_verified_backup(item: dict[str, Any], binding_item: dict[str, Any]) -> dict[str, object]:
         backup_path = item["backupPath"]

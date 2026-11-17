@@ -37,7 +37,7 @@ class RepetitionGuardTests(unittest.IsolatedAsyncioTestCase):
         ))
         approvals = {} if requires_approval else {
             approval_fingerprint("server.exec", None, prepare_model_tool_arguments("server.exec", call["args"]),
-                task_id="repeat-test", tenant_id="tenant", user_id="user"): "fixture-approval"
+                task_id="repeat-test", tenant_id="tenant", user_id="user"): "fixture-approval-" + call["id"]
             for response in responses for call in response.tool_calls
         }
         model = ScriptedModel(responses)

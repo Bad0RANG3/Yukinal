@@ -5,6 +5,8 @@ import json
 import re
 from typing import Any
 
+from .untrusted_output import untrusted_tool_content
+
 
 def long_goal_requested(text: str) -> bool:
     # Admission uses the current user's instruction, never archives/tool output.
@@ -87,10 +89,14 @@ def successful_evidence(results: list[dict[str, Any]]) -> set[str]:
 def review_payload(prompt: str, answer: str, results: list[dict[str, Any]]) -> str:
     evidence = []
     for item in results:
-        raw = json.dumps(item.get("result", {"error": item.get("error_code")}), ensure_ascii=False, default=str)
-        excerpt = len(raw) > 2400
+        # Review uses a HumanMessage, so the normal ToolMessage projection does
+        # not run here. Apply the same trust boundary before this second model
+        # call and retain the boundary when the evidence must be truncated.
+        value = item.get("result", {"error": item.get("error_code")})
+        raw = untrusted_tool_content(value, max_bytes=2400)
+        excerpt = json.loads(raw).get("projection") == "bounded_tool_excerpt"
         evidence.append({"id": item.get("call_id"), "tool": item.get("tool"), "status": item.get("status"),
-                         "excerpt": excerpt, "result": raw[:1800] + "\n[excerpt]\n" + raw[-600:] if excerpt else raw})
+                         "excerpt": excerpt, "result": raw})
     return json.dumps({"originalGoal": prompt, "proposedAnswer": answer, "evidence": evidence}, ensure_ascii=False)
 
 

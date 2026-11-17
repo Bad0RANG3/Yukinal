@@ -280,17 +280,26 @@ test("activity page separates loading, failure, successful empty and cached targ
 });
 
 test("remote file list distinguishes unknown, empty and failed reads, retaining previous directory rows", () => {
-  const key = ["remote-files", serverId, "/"];
+  const key = ["remote-files", serverId, "."];
   pending(key); let markup = render(<RemoteFilesPane serverId={serverId} />); assert.match(markup, /aria-label="加载文件列表"/); assert.doesNotMatch(markup, /空目录/);
   failed(key); markup = render(<RemoteFilesPane serverId={serverId} />); assertAlert(markup); assert.doesNotMatch(markup, /空目录/);
   client.setQueryData(key, { path: "/", entries: [] }); markup = render(<RemoteFilesPane serverId={serverId} />); assert.match(markup, /空目录/);
   const data = remoteFiles(); client.setQueryData(key, data); failed(key);
   markup = render(<RemoteFilesPane serverId={serverId} />); assertAlert(markup); assert.ok(markup.includes(data.entries[0]!.name));
 });
+
+test("remote file browser opens the configured root instead of probing filesystem root", () => {
+  client.setQueryData(["servers"], servers.map((server) => server.id === serverId
+    ? { ...server, connection: { ...server.connection, sftpAllowedRoots: ["/srv/app"] } } : server));
+  client.setQueryData(["remote-files", serverId, "/srv/app"], { path: "/srv/app", entries: [] });
+  const markup = render(<RemoteFilesPane serverId={serverId} />);
+  assert.match(markup, /value="\/srv\/app"/);
+  assert.match(markup, /空目录/);
+});
 test("transfer cards keep cancellation limited to active states and unknown totals remain indeterminate", () => {
   const base = transferFixtures()[0]!;
   const states: TransferSnapshot["status"][] = ["queued", "running", "waitingConflict", "completed", "partial", "failed", "cancelled", "interrupted"];
-  client.setQueryData(["remote-files", serverId, "/"], { path: "/", entries: [] });
+  client.setQueryData(["remote-files", serverId, "."], { path: "/home/user", entries: [] });
   client.setQueryData(["file-transfers", serverId], states.map((status, i) => ({ ...base, transferId: `fixture_${i}`, status, currentItem: undefined, activeConflict: undefined, totalBytes: null, totalFiles: null, transferredBytes: 12, failures: status === "failed" ? [{ item: "fixture", message: "staged failure", stagingResidue: "/tmp/.owned.part" }] : [] })));
   const markup = render(<RemoteFilesPane serverId={serverId} />);
   assert.equal((markup.match(/class="transfer-card"/g) ?? []).length, 8);
@@ -305,7 +314,7 @@ test("transfer cards keep cancellation limited to active states and unknown tota
 test("file conflicts expose only host-authorized choices and keep blank rename disabled", () => {
   const conflict = transferFixtures().find((transfer) => transfer.activeConflict);
   assert.ok(conflict?.activeConflict);
-  client.setQueryData(["remote-files", serverId, "/"], { path: "/", entries: [] });
+  client.setQueryData(["remote-files", serverId, "."], { path: "/home/user", entries: [] });
   client.setQueryData(["file-transfers", serverId], [{ ...conflict, activeConflict: { ...conflict.activeConflict, allowedActions: ["skip", "rename"] } }]);
   const markup = render(<RemoteFilesPane serverId={serverId} />);
   assert.match(markup, /跳过/); assert.match(markup, /aria-label="重命名目标"/);

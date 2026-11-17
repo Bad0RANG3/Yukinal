@@ -5,6 +5,14 @@ shown in [`ssh-service.example.json`](./ssh-service.example.json). The operator
 documentation is [`docs/security.md`](../docs/security.md); this file is only a
 reading aid for the example.
 
+Targets default to SFTP confinement within the authenticated account's home
+directory (`sftp_allowed_roots: ["."]`). Add only the absolute remote directories
+the agent actually needs; each configured root must exist and resolve through
+SFTP realpath. `truecolor` controls the optional `COLORTERM=truecolor` request.
+`stream_audit_file` stores outbound byte digests and provenance separately from
+tool-call logs. See the [native service contract](../native/README.md) for the
+mandatory per-request `execution` lease and cancellation endpoint.
+
 ## Where it goes
 
 - The **root** list is service-level. Every target inherits it, and the entries

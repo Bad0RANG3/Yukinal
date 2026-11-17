@@ -56,6 +56,25 @@ std::string denylist_error(const json& value) {
 
 }  // namespace
 
+YUKINAL_TEST(config_rejects_option_hosts_and_unsafe_file_roots) {
+  for (const auto* host : {"-oProxyCommand=id", "-oProxyJump=host", "-w1:1"}) {
+    auto value = valid_config(); value["targets"][0]["host"] = host;
+    YUKINAL_REQUIRE(config_rejected(value));
+  }
+  for (const auto* root : {"/home/../etc", "relative", "/home/line\nbreak"}) {
+    auto value = valid_config(); value["targets"][0]["sftp_allowed_roots"] = json::array({root});
+    YUKINAL_REQUIRE(config_rejected(value));
+  }
+  auto value = valid_config();
+  value["targets"][0]["sftp_allowed_roots"] = json::array({"/srv/app", "."});
+  value["targets"][0]["truecolor"] = false;
+  value["targets"][0]["confirmation_read_only"] = true;
+  const auto target = parse_config(value).targets.begin()->second;
+  YUKINAL_REQUIRE(!target.truecolor);
+  YUKINAL_REQUIRE(target.confirmation_read_only);
+  YUKINAL_REQUIRE(target.sftp_allowed_roots.size() == 2);
+}
+
 YUKINAL_TEST(config_resolves_paths_relative_to_config) {
   const std::filesystem::path base_directory("config-root");
   const auto config = parse_config(valid_config(), base_directory.string());

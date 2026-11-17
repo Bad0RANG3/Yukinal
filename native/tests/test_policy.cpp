@@ -6,6 +6,7 @@
 #include "yukinal/http_service.hpp"
 #include "yukinal/policy.hpp"
 #include "yukinal/ssh.hpp"
+#include "yukinal/ssh_security.hpp"
 
 using nlohmann::json;
 using yukinal::ssh_service::ApiError;
@@ -15,6 +16,56 @@ using yukinal::ssh_service::parse_exec_request;
 using yukinal::ssh_service::parse_server_exec_denylist;
 using yukinal::ssh_service::server_exec_command_is_denied;
 using yukinal::ssh_service::TargetConfig;
+
+YUKINAL_TEST(security_shell_values_are_single_posix_words) {
+  using yukinal::ssh_service::shell_quote;
+  YUKINAL_REQUIRE(shell_quote("a;b`id`\n#comment") == "'a;b`id`\n#comment'");
+  YUKINAL_REQUIRE(shell_quote("it's") == "'it'\\''s'");
+  YUKINAL_REQUIRE(shell_quote("") == "''");
+  bool rejected = false;
+  try { shell_quote(std::string("a\0b", 3)); } catch (const std::invalid_argument&) { rejected = true; }
+  YUKINAL_REQUIRE(rejected);
+}
+
+YUKINAL_TEST(security_ansi_filter_keeps_colours_and_drops_remote_controls_across_chunks) {
+  using yukinal::ssh_service::SgrOutputFilter;
+  SgrOutputFilter filter;
+  YUKINAL_REQUIRE(filter.consume("before\x1b[2J\x1b[Hafter") == "beforeafter");
+  YUKINAL_REQUIRE(filter.consume("\x1b[31mred\x1b[0m\x1b[38;2;1;2;3mtrue\x1b[48;5;200m") == "\x1b[31mred\x1b[0m\x1b[38;2;1;2;3mtrue\x1b[48;5;200m");
+  YUKINAL_REQUIRE(filter.consume("\x1b]8;;https://evil.example") == "");
+  YUKINAL_REQUIRE(filter.consume("\x1b\\visible\x1bPpayload") == "visible");
+  YUKINAL_REQUIRE(filter.consume("\x1b\\safe\x1b[?1049h\x1b[?25l") == "safe");
+  YUKINAL_REQUIRE(filter.consume("\xe4\xb8") == "");
+  YUKINAL_REQUIRE(filter.consume("\xad\xe6\x96\x87") == "\xe4\xb8\xad\xe6\x96\x87");
+  YUKINAL_REQUIRE(filter.consume("\xc2") == "");
+  YUKINAL_REQUIRE(filter.consume("\x9b" "2Jvisible\xc2\x9d" "hidden\xc2\x9c") == "visible");
+  YUKINAL_REQUIRE(filter.consume("\x1bPhidden\x07\x1b[31mstill-hidden\x1b\\visible") == "visible");
+}
+
+YUKINAL_TEST(security_paths_reject_traversal_and_root_prefix_collisions) {
+  using yukinal::ssh_service::safe_sftp_path;
+  using yukinal::ssh_service::path_within_root;
+  YUKINAL_REQUIRE(!safe_sftp_path("/home/ops/../secret"));
+  YUKINAL_REQUIRE(!safe_sftp_path("../secret"));
+  YUKINAL_REQUIRE(!safe_sftp_path("/home/ops/line\nbreak"));
+  YUKINAL_REQUIRE(safe_sftp_path("."));
+  YUKINAL_REQUIRE(path_within_root("/home/ops/config", "/home/ops"));
+  YUKINAL_REQUIRE(!path_within_root("/home/ops-other/config", "/home/ops"));
+}
+
+YUKINAL_TEST(security_expired_and_read_only_operations_never_connect) {
+  TargetConfig target;
+  target.target_id = "safe"; target.host = "203.0.113.1";
+  target.confirmation_read_only = true;
+  for (const auto* operation : {"docker_restart", "systemd_restart", "package_install", "server_exec", "sftp_write", "sftp_replace_guarded", "sftp_create_dir", "sftp_publish_no_replace"}) {
+    ExecRequest request; request.operation = operation;
+    YUKINAL_REQUIRE(yukinal::ssh_service::run_operation(target, request).error_code == "denied_by_policy");
+  }
+  target.confirmation_read_only = false;
+  target.execution_expires_at_ms = 1;
+  ExecRequest request; request.operation = "service_status";
+  YUKINAL_REQUIRE(yukinal::ssh_service::run_operation(target, request).error_code == "execution_expired");
+}
 
 namespace {
 

@@ -1,6 +1,7 @@
 #include "yukinal/ssh.hpp"
 #include "yukinal/snapshot_toolkit.hpp"
 #include "yukinal/policy.hpp"
+#include "yukinal/ssh_security.hpp"
 
 #include <algorithm>
 #include <array>
@@ -15,9 +16,11 @@
 #include <cstring>
 #include <deque>
 #include <fstream>
+#include <filesystem>
 #include <iostream>
 #include <memory>
 #include <mutex>
+#include <set>
 #include <string_view>
 #include <thread>
 #include <utility>
@@ -51,6 +54,7 @@
 #include <libssh2_sftp.h>
 #include <nlohmann/json.hpp>
 #include <openssl/ssl.h>
+#include <openssl/evp.h>
 
 namespace yukinal::ssh_service {
 namespace {
@@ -65,6 +69,48 @@ constexpr Socket kInvalidSocket = -1;
 
 constexpr std::size_t kMaxOutputBytes = 64 * 1024;
 using Clock = std::chrono::steady_clock;
+
+std::string new_stream_id() {
+  static std::atomic_uint64_t sequence{0};
+  return std::to_string(std::chrono::system_clock::now().time_since_epoch().count()) + "-" + std::to_string(sequence.fetch_add(1));
+}
+
+bool audit_stream(const TargetConfig& target, std::string_view source,
+                   std::string_view kind, std::string_view bytes, const std::string& session_id) {
+  try {
+    std::array<unsigned char, EVP_MAX_MD_SIZE> digest{};
+    unsigned int digest_size = 0;
+    if (EVP_Digest(bytes.data(), bytes.size(), digest.data(), &digest_size, EVP_sha256(), nullptr) != 1) return false;
+    constexpr char hex[] = "0123456789abcdef";
+    std::string digest_text;
+    for (unsigned int i = 0; i < digest_size; ++i) { digest_text += hex[digest[i] >> 4]; digest_text += hex[digest[i] & 15]; }
+    nlohmann::json record{
+      {"source", source}, {"target_id", target.target_id}, {"session_id", session_id},
+      {"execution_id", current_execution_lease ? current_execution_lease->id : session_id},
+      {"kind", kind}, {"direction", "outbound"}, {"byte_count", bytes.size()},
+      {"timestamp_ms", std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::system_clock::now().time_since_epoch()).count()}};
+    // A digest of one typed byte is reversible by enumeration. Manual stdin
+    // therefore retains attribution and length only, never a keystroke digest.
+    if (source != "user_pty" || kind != "pty_stdin") record["sha256"] = digest_text;
+    static std::mutex audit_mutex;
+    std::lock_guard lock(audit_mutex);
+    const auto path = std::filesystem::path(target.stream_audit_file);
+    if (path.empty()) return false;
+    std::error_code error;
+    if (!path.parent_path().empty()) std::filesystem::create_directories(path.parent_path(), error);
+    if (error || std::filesystem::is_symlink(path, error)) return false;
+    std::ofstream stream(path, std::ios::binary | std::ios::app);
+    if (!stream) return false;
+#ifndef _WIN32
+    std::filesystem::permissions(path, std::filesystem::perms::owner_read | std::filesystem::perms::owner_write,
+                                 std::filesystem::perm_options::replace, error);
+    if (error) return false;
+#endif
+    stream << record.dump() << '\n';
+    stream.flush();
+    return static_cast<bool>(stream);
+  } catch (...) { return false; }
+}
 
 void close_socket(Socket socket) {
   if (socket == kInvalidSocket) return;
@@ -87,6 +133,7 @@ bool prevent_sigpipe(Socket socket) {
 }
 
 int remaining_ms(Clock::time_point deadline) {
+  if (!execution_allowed()) return 0;
   const auto remaining = std::chrono::duration_cast<std::chrono::milliseconds>(deadline - Clock::now()).count();
   if (remaining <= 0) return 0;
   return static_cast<int>(std::min<std::int64_t>(remaining, INT_MAX));
@@ -267,6 +314,18 @@ struct Libssh2SessionContext {
 };
 
 void wipe(std::string* value);
+struct StringWiper {
+  std::string* value;
+  ~StringWiper() { wipe(value); }
+};
+struct ByteVectorWiper {
+  std::vector<unsigned char>* value;
+  ~ByteVectorWiper() {
+    volatile unsigned char* data = value->empty() ? nullptr : value->data();
+    for (std::size_t i = 0; i < value->size(); ++i) data[i] = 0;
+    value->clear();
+  }
+};
 std::string base64_encode(const std::vector<unsigned char>& bytes);
 
 bool wait_connect(Socket socket, int timeout_ms) {
@@ -414,14 +473,18 @@ ProxyTunnelFailure establish_http_connect_tunnel(const TargetConfig& target, Soc
 
   std::string request = "CONNECT " + authority + " HTTP/1.1\r\nHost: " + authority +
                         "\r\nProxy-Connection: Keep-Alive\r\n";
+  const StringWiper request_wiper{&request};
   std::string encoded_credential;
+  const StringWiper encoded_wiper{&encoded_credential};
   if (!target.proxy_auth_env.empty()) {
     std::string credential = detail::read_ssh_credential(target.proxy_auth_env);
+    const StringWiper credential_wiper{&credential};
     if (credential.empty() || credential.size() > 1024) {
       wipe(&credential);
       return ProxyTunnelFailure::authentication;
     }
     std::vector<unsigned char> credential_bytes(credential.begin(), credential.end());
+    const ByteVectorWiper bytes_wiper{&credential_bytes};
     encoded_credential = base64_encode(credential_bytes);
     volatile unsigned char* credential_data =
         credential_bytes.empty() ? nullptr : credential_bytes.data();
@@ -618,6 +681,7 @@ ProxyTunnelFailure establish_socks5_tunnel(const TargetConfig& target, Socket so
   if (auth_required) {
     if (method != 2) return ProxyTunnelFailure::authentication;
     std::string credential = detail::read_ssh_credential(target.proxy_auth_env);
+    const StringWiper credential_wiper{&credential};
     const auto separator = credential.find(':');
     if (credential.empty() || credential.size() > 1024 || separator == std::string::npos ||
         separator == 0 || separator + 1 >= credential.size() || separator > 255 ||
@@ -626,6 +690,7 @@ ProxyTunnelFailure establish_socks5_tunnel(const TargetConfig& target, Socket so
       return ProxyTunnelFailure::authentication;
     }
     std::string auth_request;
+    const StringWiper auth_wiper{&auth_request};
     auth_request.reserve(3 + credential.size());
     auth_request.push_back('\x01');
     auth_request.push_back(static_cast<char>(separator));
@@ -900,6 +965,8 @@ ssize_t proxy_tls_write(libssh2_socket_t, const void* buffer, std::size_t length
 class SshResources {
  public:
   ~SshResources() {
+    stop_cancellation_watch_.store(true);
+    if (cancellation_watch_.joinable()) cancellation_watch_.join();
     if (shutdown_socket_before_cleanup_ && session_) {
       // Metadata discovery has its own total deadline. Keep its cleanup from
       // extending that deadline while the remote SFTP endpoint is unresponsive.
@@ -966,6 +1033,23 @@ class SshResources {
   }
 
   bool initialize_session() {
+    if (current_execution_lease && socket_ != kInvalidSocket) {
+      // Xcode 16's libc++ does not expose std::jthread without its experimental
+      // library. Keep cancellation portable with an owned, joined std::thread.
+      cancellation_watch_ = std::thread([this, lease = current_execution_lease, socket = socket_] {
+        while (!stop_cancellation_watch_.load()) {
+          if (!lease->valid()) {
+#ifdef _WIN32
+            shutdown(socket, SD_BOTH);
+#else
+            shutdown(socket, SHUT_RDWR);
+#endif
+            return;
+          }
+          std::this_thread::sleep_for(std::chrono::milliseconds(10));
+        }
+      });
+    }
     session_ = libssh2_session_init_ex(nullptr, nullptr, nullptr, &session_context_);
     if (!session_) return false;
     if (proxy_tls_) {
@@ -990,6 +1074,9 @@ class SshResources {
   LIBSSH2_SFTP* sftp_ = nullptr;
   LIBSSH2_SFTP_HANDLE* sftp_handle_ = nullptr;
   LIBSSH2_CHANNEL* channel_ = nullptr;
+  std::atomic_bool stop_cancellation_watch_{false};
+  std::thread cancellation_watch_;
+  std::string audit_session_id_ = new_stream_id();
 };
 
 int known_host_key_type(detail::HostKeyAlgorithm algorithm) {
@@ -1015,11 +1102,6 @@ void wipe(std::string* value) {
   for (std::size_t i = 0; i < value->size(); ++i) data[i] = '\0';
   value->clear();
 }
-
-struct StringWiper {
-  std::string* value;
-  ~StringWiper() { wipe(value); }
-};
 
 void wipe_json_strings(nlohmann::json* value) {
   if (value->is_string()) {
@@ -1099,6 +1181,10 @@ bool connect_authenticated(const TargetConfig& target, Clock::time_point deadlin
                            TerminalAuthContext* terminal_auth = nullptr,
                            detail::SftpMetadataDeadline* metadata_deadline = nullptr) {
   using Phase = detail::SftpMetadataDeadline::Phase;
+  if (!valid_target_id(target.target_id) || target.host.empty() || target.host.front() == '-' || !execution_allowed()) {
+    fail(result, "denied_by_policy", "The SSH target or execution authorization is invalid");
+    return false;
+  }
   if (metadata_deadline) {
     resources->shutdown_socket_before_cleanup_ = true;
     deadline = metadata_deadline->enter(Phase::host_key);
@@ -1302,9 +1388,12 @@ bool connect_authenticated(const TargetConfig& target, Clock::time_point deadlin
   }
   else if (!target.private_key_file.empty() || !target.private_key_env.empty()) {
     std::string passphrase = detail::read_ssh_credential(target.passphrase_env);
+    const StringWiper passphrase_wiper{&passphrase};
     if (!target.private_key_env.empty()) {
       std::string private_key = detail::read_ssh_credential(target.private_key_env);
+      const StringWiper private_key_wiper{&private_key};
       std::string public_key;
+      const StringWiper public_key_wiper{&public_key};
       if (private_key.empty()) {
         fail(result, "credential_unavailable", "The configured SSH private key is not available");
         wipe(&passphrase);
@@ -1333,6 +1422,7 @@ bool connect_authenticated(const TargetConfig& target, Clock::time_point deadlin
     wipe(&passphrase);
   } else {
     std::string password = detail::read_ssh_credential(target.password_env);
+    const StringWiper password_wiper{&password};
     if (password.empty()) {
       fail(result, "credential_unavailable", "The configured SSH credential is not available");
       return false;
@@ -1391,6 +1481,70 @@ bool connect_sftp(const TargetConfig& target, Clock::time_point deadline,
 void annotate_metadata_connection_failure(ExecResult* result,
                                           const detail::SftpMetadataDeadline& budget) {
   result->error_message = std::string("SFTP ") + budget.phase_label() + "阶段：" + result->error_message;
+}
+
+// Resolve and check before any stat/open/list, including optional existence
+// queries. All denied/missing/outside-root paths have the same policy response.
+bool confined_sftp_path(const TargetConfig& target, SshResources* resources,
+                        Clock::time_point deadline, std::string* path,
+                        bool may_create, ExecResult* result) {
+  const auto deny = [&] {
+    fail(result, "denied_by_policy", "The remote path is outside the allowed roots or cannot be safely resolved");
+    return false;
+  };
+  if (!path || !safe_sftp_path(*path) || target.sftp_allowed_roots.empty()) return deny();
+  const auto realpath = [&](const std::string& value, std::string* resolved) {
+    std::array<char, 4097> buffer{};
+    if (!set_session_timeout(resources->session_, deadline)) return false;
+    const int count = libssh2_sftp_symlink_ex(resources->sftp_, value.data(),
+        static_cast<unsigned int>(value.size()), buffer.data(),
+        static_cast<unsigned int>(buffer.size() - 1), LIBSSH2_SFTP_REALPATH);
+    if (count <= 0 || count > 4096) return false;
+    resolved->assign(buffer.data(), static_cast<std::size_t>(count));
+    while (resolved->size() > 1 && resolved->back() == '/') resolved->pop_back();
+    return safe_sftp_path(*resolved) && resolved->front() == '/';
+  };
+  std::vector<std::string> roots;
+  for (const auto& configured : target.sftp_allowed_roots) {
+    std::string root;
+    if (!safe_sftp_path(configured) || !realpath(configured, &root)) return deny();
+    roots.push_back(std::move(root));
+  }
+  std::string candidate = *path;
+  if (candidate == "." && !realpath(".", &candidate)) return deny();
+  // POSIX path handling must not depend on the service host's path syntax.
+  while (candidate.size() > 1 && candidate.back() == '/') candidate.pop_back();
+  const auto allowed = [&](const std::string& value) {
+    return std::any_of(roots.begin(), roots.end(), [&](const auto& root) { return path_within_root(value, root); });
+  };
+  if (!allowed(candidate)) return deny(); // no existence oracle outside the roots
+  std::string resolved;
+  if (!realpath(candidate, &resolved)) {
+    if (!may_create) return deny();
+    const auto separator = candidate.find_last_of('/');
+    const auto name = candidate.substr(separator + 1);
+    if (name.empty() || name == "." || name == "..") return deny();
+    std::string parent;
+    if (!realpath(separator == 0 ? "/" : candidate.substr(0, separator), &parent) || !allowed(parent)) return deny();
+    LIBSSH2_SFTP_ATTRIBUTES existing{};
+    if (!set_session_timeout(resources->session_, deadline)) return deny();
+    // A dangling symlink is not a new file. Never truncate/follow it.
+    if (libssh2_sftp_stat_ex(resources->sftp_, candidate.data(), static_cast<unsigned int>(candidate.size()),
+                             LIBSSH2_SFTP_LSTAT, &existing) == 0 ||
+        (libssh2_sftp_last_error(resources->sftp_) != LIBSSH2_FX_NO_SUCH_FILE &&
+         libssh2_sftp_last_error(resources->sftp_) != LIBSSH2_FX_NO_SUCH_PATH)) return deny();
+    resolved = parent + (parent == "/" ? "" : "/") + name;
+  }
+  if (!allowed(resolved)) return deny();
+  LIBSSH2_SFTP_ATTRIBUTES attributes{};
+  if (!set_session_timeout(resources->session_, deadline)) return deny();
+  if (libssh2_sftp_stat_ex(resources->sftp_, resolved.data(), static_cast<unsigned int>(resolved.size()),
+                           LIBSSH2_SFTP_LSTAT, &attributes) == 0 &&
+      (attributes.flags & LIBSSH2_SFTP_ATTR_PERMISSIONS) != 0 &&
+      ((attributes.permissions & LIBSSH2_SFTP_S_IFMT) == 0140000 ||
+       (attributes.permissions & LIBSSH2_SFTP_S_IFMT) == LIBSSH2_SFTP_S_IFLNK)) return deny();
+  *path = std::move(resolved);
+  return true;
 }
 
 std::string base64_encode(const std::vector<unsigned char>& bytes) {
@@ -1563,8 +1717,11 @@ bool queue_terminal_input_line(const std::shared_ptr<TerminalInputQueue>& input,
     }
     const std::string type = message["type"].get<std::string>();
     TerminalInputCommand command;
-    if (type == "write" && message.size() == 2 && message.contains("data") &&
-        message["data"].is_string()) {
+    // This worker has no AI step-approval authority. Fail closed for AI writes,
+    // including a second write after an approved session/open operation. Only
+    // the desktop's user-only IPC endpoint can emit user_pty frames.
+    if (type == "write" && message.size() == 3 && message.contains("data") &&
+        message["data"].is_string() && message.value("source", std::string()) == "user_pty") {
       command.kind = TerminalInputCommand::Kind::write;
       command.data = message["data"].get<std::string>();
       if (command.data.size() > kMaxTerminalInputFrameBytes) {
@@ -1825,7 +1982,8 @@ void terminal_keyboard_interactive_callback(
   for (auto& secret : command.responses) wipe(&secret);
 }
 
-bool write_terminal_channel(SshResources* resources, const std::string& data) {
+bool write_terminal_channel(SshResources* resources, const TargetConfig& target, const std::string& data) {
+  if (!audit_stream(target, "user_pty", "pty_stdin", data, resources->audit_session_id_)) return false;
   std::size_t offset = 0;
   const auto deadline = Clock::now() + std::chrono::seconds(10);
   while (offset < data.size()) {
@@ -1880,6 +2038,11 @@ int run_terminal_session(const TargetConfig& target, std::uint16_t columns,
     return 2;
   }
   const std::string terminal_type = "xterm-256color";
+  if (target.truecolor && set_session_timeout(resources.session_, deadline)) {
+    // Env requests must precede shell startup. Servers may refuse env forwarding;
+    // xterm-256color remains the compatible fallback when AcceptEnv is absent.
+    (void)libssh2_channel_setenv_ex(resources.channel_, "COLORTERM", 9, "truecolor", 9);
+  }
   if (!set_session_timeout(resources.session_, deadline) ||
       libssh2_channel_request_pty_ex(resources.channel_, terminal_type.data(),
                                      static_cast<unsigned int>(terminal_type.size()), nullptr, 0,
@@ -1901,6 +2064,7 @@ int run_terminal_session(const TargetConfig& target, std::uint16_t columns,
 
   bool running = true;
   bool failed = false;
+  SgrOutputFilter terminal_output_filter;
   // `exit_status_received` distinguishes "the peer sent exit-status" from "the
   // peer closed without one"; `exit_code` alone cannot, because libssh2 seeds a
   // channel's status to zero and a legitimately received RFC 4254 uint32 may also
@@ -1943,7 +2107,11 @@ int run_terminal_session(const TargetConfig& target, std::uint16_t columns,
         break;
       }
       if (command.kind == TerminalInputCommand::Kind::write) {
-        if (!write_terminal_channel(&resources, command.data)) {
+        if (target.confirmation_read_only) {
+          emit_terminal_message({{"type", "error"}, {"code", "denied_by_policy"}, {"message", "PTY input is disabled during read-only confirmation"}});
+          failed = true; running = false; break;
+        }
+        if (!write_terminal_channel(&resources, target, command.data)) {
           emit_terminal_message({{"type", "error"}, {"message", "Writing to the SSH terminal failed"}});
           failed = true;
           running = false;
@@ -1985,7 +2153,10 @@ int run_terminal_session(const TargetConfig& target, std::uint16_t columns,
         }
         made_progress = true;
         std::vector<unsigned char> bytes(buffer.begin(), buffer.begin() + count);
-        if (!emit_terminal_message({{"type", "output"}, {"data", base64_encode(bytes)}})) {
+        const auto clean = terminal_output_filter.consume(std::string_view(reinterpret_cast<const char*>(bytes.data()), bytes.size()));
+        if (clean.empty()) continue;
+        const std::vector<unsigned char> safe_bytes(clean.begin(), clean.end());
+        if (!emit_terminal_message({{"type", "output"}, {"data", base64_encode(safe_bytes)}})) {
           running = false;
           break;
         }
@@ -2148,8 +2319,9 @@ void read_sftp_stream_input(const std::shared_ptr<SftpStreamInput>& input) {
   input->changed.notify_all();
 }
 
-bool write_sftp_stream_chunk(SshResources* resources,
+bool write_sftp_stream_chunk(SshResources* resources, const TargetConfig& target,
                              const std::vector<unsigned char>& data) {
+  if (!audit_stream(target, "user_pty", "sftp_data", std::string_view(reinterpret_cast<const char*>(data.data()), data.size()), resources->audit_session_id_)) return false;
   std::size_t offset = 0;
   auto deadline = Clock::now() + std::chrono::seconds(30);
   while (offset < data.size()) {
@@ -2206,7 +2378,11 @@ bool emit_sftp_stream_error(const std::string& code, const std::string& message)
 
 }  // namespace
 
-int run_sftp_stream(const TargetConfig& target, const std::string& path, bool upload) {
+int run_sftp_stream(const TargetConfig& target, const std::string& input_path, bool upload) {
+  std::string path = input_path;
+  if (upload && target.confirmation_read_only) {
+    emit_sftp_stream_error("denied_by_policy", "SFTP uploads are disabled during read-only confirmation"); return 2;
+  }
   if (path.empty() || path.size() > 4096 || path.find('\0') != std::string::npos) {
     emit_sftp_stream_error("invalid_parameters", "The SFTP stream path is invalid");
     return 2;
@@ -2218,6 +2394,10 @@ int run_sftp_stream(const TargetConfig& target, const std::string& path, bool up
   if (!connect_sftp(target, startup_deadline, &resources, &connection_result)) {
     emit_sftp_stream_error(connection_result.error_code.empty() ? "sftp_error" : connection_result.error_code,
                            connection_result.error_message.empty() ? "SFTP connection failed" : connection_result.error_message);
+    return 2;
+  }
+  if (!confined_sftp_path(target, &resources, startup_deadline, &path, upload, &connection_result)) {
+    emit_sftp_stream_error(connection_result.error_code, connection_result.error_message);
     return 2;
   }
   const long flags = upload
@@ -2312,7 +2492,7 @@ int run_sftp_stream(const TargetConfig& target, const std::string& path, bool up
       } else if (has_command && command.close) {
         close_received = true;
       } else if (has_command) {
-        if (!write_sftp_stream_chunk(&resources, command.data)) {
+        if (!write_sftp_stream_chunk(&resources, target, command.data)) {
           emit_sftp_stream_error("sftp_error", "Writing the remote staging file failed");
           succeeded = false;
         } else {
@@ -2371,6 +2551,10 @@ static ExecResult run_ssh_command_with_limits(const TargetConfig& target,
     return result;
   }
 
+  if (!audit_stream(target, current_audit_source, "exec", command, resources.audit_session_id_)) {
+    fail(&result, "audit_unavailable", "SSH byte-stream auditing is unavailable");
+    return result;
+  }
   if (!set_session_timeout(resources.session_, deadline) ||
       libssh2_channel_process_startup(resources.channel_, "exec", 4, command.c_str(),
                                       static_cast<unsigned int>(command.size())) != 0) {
@@ -2473,6 +2657,16 @@ static ExecResult server_exec_operation(const TargetConfig& target,
     fail(&result, "operation_not_allowed", "server.exec requires a one-shot host authorization");
     return result;
   }
+  // Raw shells cannot be a route to another authenticated SSH session. Local
+  // service connections themselves use libssh2 and never read ssh_config or
+  // ControlMaster sockets. Block explicit multiplexing/socket interfaces here
+  // as a second gate behind the agent's structured shell policy.
+  const std::regex socket_access(R"((^|[\s;&|()])(?:[^\s;&|()]*/)?(?:ssh|scp|sftp|socat|nc|ncat|netcat)([\s;&|()]|$)|ControlMaster|ControlPath|ControlPersist|SSH_AUTH_SOCK|/tmp/[^\s]*\.sock)", std::regex::icase);
+  if (std::regex_search(request.command, socket_access)) {
+    ExecResult result;
+    fail(&result, "denied_by_policy", "Nested SSH and Unix-socket access require a dedicated authorized transport");
+    return result;
+  }
   // Operator-configured command blacklist: a pure additional deny layer that runs
   // after the one-shot capability gate above (which it must never mask) and before
   // any command string is built or any SSH connection is attempted. Matching is on
@@ -2486,26 +2680,17 @@ static ExecResult server_exec_operation(const TargetConfig& target,
     return result;
   }
   std::string command;
-  const auto quote = [](const std::string& value) {
-    std::string quoted = "'";
-    for (const char character : value) {
-      if (character == '\'') quoted += "'\\''";
-      else quoted += character;
-    }
-    quoted += '\'';
-    return quoted;
-  };
-  if (!request.workdir.empty()) command = "cd " + quote(request.workdir) + " && ";
+  if (!request.workdir.empty()) command = "cd " + shell_quote(request.workdir) + " && ";
   if (!request.environment.empty()) {
-    command += "env";
+    command += "env --";
     for (const auto& [key, value] : request.environment) {
-      command += " " + key + "=" + quote(value);
+      command += " " + shell_quote(key + "=" + value);
     }
     command += " /bin/sh -c ";
   } else {
     command += "/bin/sh -c ";
   }
-  command += quote(request.command);
+  command += shell_quote(request.command);
   return run_ssh_command_with_limits(target, command,
                                      std::chrono::milliseconds(request.timeout_ms),
                                      request.max_output_bytes, true);
@@ -2523,7 +2708,7 @@ ExecResult service_status(const TargetConfig& target, const std::string& service
     fail(&result, "invalid_parameters", "The read-only SSH operation parameters are invalid");
     return result;
   }
-  return run_ssh_command(target, "systemctl is-active -- " + service, timeout_seconds);
+  return run_ssh_command(target, "systemctl is-active -- " + shell_quote(service), timeout_seconds);
 }
 
 ExecResult disk_usage(const TargetConfig& target, int timeout_seconds) {
@@ -2589,7 +2774,7 @@ ExecResult docker_logs(const TargetConfig& target, const std::string& container,
     return result;
   }
   const std::string command = "docker logs --tail " + std::to_string(tail) +
-                              " --timestamps -- '" + container + "' 2>&1";
+                              " --timestamps -- " + shell_quote(container) + " 2>&1";
   return run_ssh_command(target, command, timeout_seconds);
 }
 
@@ -2601,8 +2786,8 @@ ExecResult docker_inspect(const TargetConfig& target, const std::string& contain
     fail(&result, "invalid_parameters", "The Docker inspect parameters are invalid");
     return result;
   }
-  const std::string command = "docker inspect --format '{{json .}}' -- '" + container +
-                              "' 2>/dev/null";
+  const std::string command = "docker inspect --format '{{json .}}' -- " + shell_quote(container) +
+                              " 2>/dev/null";
   return run_ssh_command(target, command, timeout_seconds);
 }
 
@@ -2615,8 +2800,8 @@ ExecResult systemd_inspect(const TargetConfig& target, const std::string& unit,
     return result;
   }
   const std::string command =
-      "systemctl show --no-pager --property=LoadState,ActiveState,SubState,Description --value -- '" +
-      unit + "' 2>&1";
+      "systemctl show --no-pager --property=LoadState,ActiveState,SubState,Description --value -- " +
+      shell_quote(unit) + " 2>&1";
   return run_ssh_command(target, command, timeout_seconds);
 }
 
@@ -2628,7 +2813,7 @@ ExecResult package_inspect(const TargetConfig& target, const std::string& manage
     fail(&result, "invalid_parameters", "The package inspect parameters are invalid");
     return result;
   }
-  const std::string package_arg = "'" + package + "'";
+  const std::string package_arg = shell_quote(package);
   // `rpm -q` prints "package X is not installed" on STDOUT (not stderr) and exits
   // non-zero, and `dpkg-query` may print several records. Publishing the raw
   // query would hand the parser a second line that is not our status, so capture
@@ -2645,7 +2830,7 @@ ExecResult package_inspect(const TargetConfig& target, const std::string& manage
     const std::string command = manager == "apt"
         ? "if command -v apt-get >/dev/null 2>&1 && command -v dpkg-query >/dev/null 2>&1; then " +
               apt_query + "; else printf '%s\\n' unsupported; fi"
-        : "if command -v " + manager + " >/dev/null 2>&1 && command -v rpm >/dev/null 2>&1; then " +
+        : "if command -v " + shell_quote(manager) + " >/dev/null 2>&1 && command -v rpm >/dev/null 2>&1; then " +
               rpm_query + "; else printf '%s\\n' unsupported; fi";
     return run_ssh_command(target, command, timeout_seconds);
   }
@@ -2670,6 +2855,7 @@ ExecResult package_inspect(const TargetConfig& target, const std::string& manage
 
 ExecResult docker_restart(const TargetConfig& target, const std::string& container,
                           std::uint32_t grace_period_seconds, int timeout_seconds) {
+  if (target.confirmation_read_only) { ExecResult result; fail(&result, "denied_by_policy", "Writes are disabled during read-only confirmation"); return result; }
   if (target.probe_only || !valid_container_ref(container) || grace_period_seconds < 1 ||
       grace_period_seconds > 120 || timeout_seconds < 1 || timeout_seconds > 30) {
     ExecResult result;
@@ -2677,13 +2863,14 @@ ExecResult docker_restart(const TargetConfig& target, const std::string& contain
     return result;
   }
   const std::string command = "docker restart --time " +
-                              std::to_string(grace_period_seconds) + " -- '" + container +
-                              "' 2>&1";
+                              std::to_string(grace_period_seconds) + " -- " + shell_quote(container) +
+                              " 2>&1";
   return run_ssh_command(target, command, timeout_seconds);
 }
 
 ExecResult systemd_restart(const TargetConfig& target, const std::string& unit,
                            int timeout_seconds) {
+  if (target.confirmation_read_only) { ExecResult result; fail(&result, "denied_by_policy", "Writes are disabled during read-only confirmation"); return result; }
   if (target.probe_only || !valid_service_name(unit) || !unit.ends_with(".service") ||
       timeout_seconds < 1 || timeout_seconds > 120) {
     ExecResult result;
@@ -2691,13 +2878,14 @@ ExecResult systemd_restart(const TargetConfig& target, const std::string& unit,
     return result;
   }
   const std::string command =
-      "systemctl restart --no-ask-password --wait -- '" + unit + "' 2>&1";
+      "systemctl restart --no-ask-password --wait -- " + shell_quote(unit) + " 2>&1";
   return run_ssh_command_with_timeout_limit(target, command, timeout_seconds, 120);
 }
 
 ExecResult package_install(const TargetConfig& target, const std::string& manager,
                            const std::string& package, const std::string& version,
                            int timeout_seconds) {
+  if (target.confirmation_read_only) { ExecResult result; fail(&result, "denied_by_policy", "Writes are disabled during read-only confirmation"); return result; }
   if (target.probe_only || !valid_package_manager(manager) || !valid_package_ref(package) ||
       (!version.empty() && !valid_package_version(version)) || timeout_seconds < 1 ||
       timeout_seconds > 600) {
@@ -2708,7 +2896,7 @@ ExecResult package_install(const TargetConfig& target, const std::string& manage
   if (manager != "auto") {
     std::string specification = package;
     if (!version.empty()) specification += manager == "apt" ? "=" + version : "-" + version;
-    const std::string package_arg = "'" + specification + "'";
+    const std::string package_arg = shell_quote(specification);
     const std::string command = manager == "apt"
         ? "DEBIAN_FRONTEND=noninteractive apt-get install --yes --no-install-recommends --no-remove -- " +
               package_arg + " 2>&1"
@@ -2722,7 +2910,7 @@ ExecResult package_install(const TargetConfig& target, const std::string& manage
       "elif command -v dnf >/dev/null 2>&1 && command -v rpm >/dev/null 2>&1; then manager=dnf; "
       "elif command -v yum >/dev/null 2>&1 && command -v rpm >/dev/null 2>&1; then manager=yum; "
       "else manager=unsupported; fi; ";
-  const std::string command = "manager=''; package='" + package + "'; version='" + version + "'; " +
+  const std::string command = "manager=''; package=" + shell_quote(package) + "; version=" + shell_quote(version) + "; " +
       detect_manager +
       "if [ -n \"$version\" ]; then if [ \"$manager\" = apt ]; then specification=\"$package=$version\"; "
       "else specification=\"$package-$version\"; fi; else specification=$package; fi; "
@@ -2768,7 +2956,7 @@ END {
   return "{ " + probe +
          "; yk_inventory_status=$?; printf '\\n__YUKINAL_STATUS__=%s\\n' \"$yk_inventory_status\"; } | "
          "LC_ALL=C awk -v maximum_lines=" + std::to_string(maximum_lines) +
-         " -v source=" + source + " '" + limiter + "'";
+         " -v " + shell_quote("source=" + source) + " " + shell_quote(limiter);
 }
 
 ExecResult service_inventory(const TargetConfig& target, int timeout_seconds) {
@@ -2841,8 +3029,8 @@ ExecResult server_logs(const TargetConfig& target,
     return result;
   }
   std::string journal_probe = "journalctl -n 100 --no-pager -o short-iso";
-  if (since_seconds) journal_probe += " --since '-" + std::to_string(*since_seconds) + " seconds'";
-  if (!unit.empty()) journal_probe += " --unit '" + unit + "'";
+  if (since_seconds) journal_probe += " --since " + shell_quote("-" + std::to_string(*since_seconds) + " seconds");
+  if (!unit.empty()) journal_probe += " --unit " + shell_quote(unit);
   journal_probe += " 2>/dev/null";
   std::string command =
       "if command -v journalctl >/dev/null 2>&1; then " +
@@ -2948,7 +3136,8 @@ ExecResult host_key_probe(const TargetConfig& target, int timeout_seconds) {
   return result;
 }
 
-ExecResult sftp_list(const TargetConfig& target, const std::string& path, int timeout_seconds) {
+ExecResult sftp_list(const TargetConfig& target, const std::string& input_path, int timeout_seconds) {
+  std::string path = input_path;
   ExecResult result;
   const auto started = Clock::now();
   const DurationTracker duration_tracker{result, started};
@@ -2965,6 +3154,8 @@ ExecResult sftp_list(const TargetConfig& target, const std::string& path, int ti
     return result;
   }
   const auto deadline = budget.enter(detail::SftpMetadataDeadline::Phase::operation);
+  if (!confined_sftp_path(target, &resources, deadline, &path, false, &result)) return result;
+  result.resolved_path = path;
   if (!set_session_timeout(resources.session_, deadline)) {
     fail(&result, "timeout", "SFTP directory listing timed out");
     return result;
@@ -2998,6 +3189,8 @@ ExecResult sftp_list(const TargetConfig& target, const std::string& path, int ti
       return result;
     }
     const std::string entry_name(name.data(), static_cast<std::size_t>(count));
+    if (entry_name == "." || entry_name == ".." || entry_name.empty() ||
+        entry_name.find('/') != std::string::npos || entry_name.find('\0') != std::string::npos) continue;
     std::string file_type = "other";
     if ((attributes.flags & LIBSSH2_SFTP_ATTR_PERMISSIONS) != 0) {
       switch (attributes.permissions & LIBSSH2_SFTP_S_IFMT) {
@@ -3010,7 +3203,8 @@ ExecResult sftp_list(const TargetConfig& target, const std::string& path, int ti
     const std::uint64_t size = (attributes.flags & LIBSSH2_SFTP_ATTR_SIZE) != 0
                                    ? attributes.filesize
                                    : 0;
-    entries.push_back({{"name", entry_name}, {"file_type", file_type}, {"size", size}});
+    entries.push_back({{"name", entry_name}, {"path", path + (path == "/" ? "" : "/") + entry_name},
+                       {"file_type", file_type}, {"size", size}});
     if (entries.size() > 4096) {
       fail(&result, "output_limit", "The remote directory contains too many entries to list safely");
       return result;
@@ -3027,8 +3221,9 @@ ExecResult sftp_list(const TargetConfig& target, const std::string& path, int ti
   return result;
 }
 
-static ExecResult sftp_stat_impl(const TargetConfig& target, const std::string& path,
+static ExecResult sftp_stat_impl(const TargetConfig& target, const std::string& input_path,
                                  int timeout_seconds, bool optional) {
+  std::string path = input_path;
   ExecResult result;
   const auto started = Clock::now();
   const DurationTracker duration_tracker{result, started};
@@ -3044,6 +3239,7 @@ static ExecResult sftp_stat_impl(const TargetConfig& target, const std::string& 
     return result;
   }
   const auto deadline = budget.enter(detail::SftpMetadataDeadline::Phase::operation);
+  if (!confined_sftp_path(target, &resources, deadline, &path, optional, &result)) return result;
   if (!set_session_timeout(resources.session_, deadline)) {
     fail(&result, "timeout", "SFTP metadata request timed out");
     return result;
@@ -3098,9 +3294,11 @@ ExecResult sftp_lstat_optional(const TargetConfig& target, const std::string& pa
   return sftp_stat_impl(target, path, timeout_seconds, true);
 }
 
-ExecResult sftp_create_dir(const TargetConfig& target, const std::string& path,
+ExecResult sftp_create_dir(const TargetConfig& target, const std::string& input_path,
                            int timeout_seconds) {
+  std::string path = input_path;
   ExecResult result;
+  if (target.confirmation_read_only) { fail(&result, "denied_by_policy", "Writes are disabled during read-only confirmation"); return result; }
   const auto started = Clock::now();
   const DurationTracker duration_tracker{result, started};
   if (path.empty() || path.size() > 4096 || path.find('\0') != std::string::npos ||
@@ -3116,6 +3314,7 @@ ExecResult sftp_create_dir(const TargetConfig& target, const std::string& path,
     return result;
   }
   const auto deadline = budget.enter(detail::SftpMetadataDeadline::Phase::operation);
+  if (!confined_sftp_path(target, &resources, deadline, &path, true, &result)) return result;
   if (!set_session_timeout(resources.session_, deadline)) {
     fail(&result, "timeout", "SFTP directory creation timed out");
     return result;
@@ -3133,8 +3332,9 @@ ExecResult sftp_create_dir(const TargetConfig& target, const std::string& path,
   return result;
 }
 
-ExecResult sftp_read(const TargetConfig& target, const std::string& path,
+ExecResult sftp_read(const TargetConfig& target, const std::string& input_path,
                      std::uint32_t max_bytes, int timeout_seconds) {
+  std::string path = input_path;
   ExecResult result;
   const auto started = Clock::now();
   const DurationTracker duration_tracker{result, started};
@@ -3146,6 +3346,7 @@ ExecResult sftp_read(const TargetConfig& target, const std::string& path,
   const auto deadline = started + std::chrono::seconds(timeout_seconds);
   SshResources resources;
   if (!connect_sftp(target, deadline, &resources, &result)) return result;
+  if (!confined_sftp_path(target, &resources, deadline, &path, false, &result)) return result;
   if (!set_session_timeout(resources.session_, deadline)) {
     fail(&result, "timeout", "SFTP file read timed out");
     return result;
@@ -3191,10 +3392,12 @@ ExecResult sftp_read(const TargetConfig& target, const std::string& path,
 
 namespace {
 
-ExecResult sftp_write_impl(const TargetConfig& target, const std::string& path,
+ExecResult sftp_write_impl(const TargetConfig& target, const std::string& input_path,
                            const std::vector<unsigned char>& content, bool exclusive,
                            int timeout_seconds) {
+  std::string path = input_path;
   ExecResult result;
+  if (target.confirmation_read_only) { fail(&result, "denied_by_policy", "Writes are disabled during read-only confirmation"); return result; }
   const auto started = Clock::now();
   const DurationTracker duration_tracker{result, started};
   const std::size_t maximum = exclusive ? 1024 * 1024 : 512 * 1024;
@@ -3207,6 +3410,10 @@ ExecResult sftp_write_impl(const TargetConfig& target, const std::string& path,
   const auto deadline = started + std::chrono::seconds(timeout_seconds);
   SshResources resources;
   if (!connect_sftp(target, deadline, &resources, &result)) return result;
+  if (!confined_sftp_path(target, &resources, deadline, &path, true, &result)) return result;
+  if (!audit_stream(target, current_audit_source, "sftp_data", std::string_view(reinterpret_cast<const char*>(content.data()), content.size()), resources.audit_session_id_)) {
+    fail(&result, "audit_unavailable", "SSH byte-stream auditing is unavailable"); return result;
+  }
   const long flags = LIBSSH2_FXF_WRITE | LIBSSH2_FXF_CREAT |
                      (exclusive ? LIBSSH2_FXF_EXCL : LIBSSH2_FXF_TRUNC);
   resources.sftp_handle_ = libssh2_sftp_open_ex(
@@ -3402,8 +3609,10 @@ class StagingFileCleanup {
   bool published_ = false;
 };
 
-ExecResult sftp_replace_guarded_impl(const TargetConfig& target, const ExecRequest& request) {
+ExecResult sftp_replace_guarded_impl(const TargetConfig& target, const ExecRequest& input_request) {
+  ExecRequest request = input_request;
   ExecResult result;
+  if (target.confirmation_read_only) { fail(&result, "denied_by_policy", "Writes are disabled during read-only confirmation"); return result; }
   const auto started = Clock::now();
   const DurationTracker duration_tracker{result, started};
   if (request.path.empty() || request.path.size() > 4096 || request.path.front() != '/' ||
@@ -3421,7 +3630,7 @@ ExecResult sftp_replace_guarded_impl(const TargetConfig& target, const ExecReque
   static std::atomic_uint64_t stage_sequence{0};
   const auto nonce = std::chrono::steady_clock::now().time_since_epoch().count() ^
                      static_cast<std::int64_t>(stage_sequence.fetch_add(1));
-  const std::string stage_path = request.path + ".yukinal-stage-" + std::to_string(nonce);
+  std::string stage_path = request.path + ".yukinal-stage-" + std::to_string(nonce);
   if (stage_path.size() > 4096) {
     fail(&result, "replace_unsupported", "The path is too long to place a sibling staging file safely");
     return result;
@@ -3430,6 +3639,14 @@ ExecResult sftp_replace_guarded_impl(const TargetConfig& target, const ExecReque
   const auto deadline = started + std::chrono::seconds(request.timeout_seconds);
   SshResources resources;
   if (!connect_sftp(target, deadline, &resources, &result)) return result;
+  if (!confined_sftp_path(target, &resources, deadline, &request.path, false, &result)) return result;
+  stage_path = request.path + ".yukinal-stage-" + std::to_string(nonce);
+  if (stage_path.size() > 4096) {
+    fail(&result, "replace_unsupported", "The resolved target cannot safely contain a sibling staging file"); return result;
+  }
+  if (!audit_stream(target, current_audit_source, "sftp_data", std::string_view(reinterpret_cast<const char*>(request.content.data()), request.content.size()), resources.audit_session_id_)) {
+    fail(&result, "audit_unavailable", "SSH byte-stream auditing is unavailable"); return result;
+  }
   LIBSSH2_SFTP_ATTRIBUTES source{};
   if (!sftp_lstat(resources.sftp_, request.path, deadline, resources.session_, &source)) {
     const bool timed_out = remaining_ms(deadline) == 0;
@@ -3682,19 +3899,6 @@ ExecResult sftp_replace_guarded_impl(const TargetConfig& target, const ExecReque
   return result;
 }
 
-std::string shell_single_quote(const std::string& value) {
-  std::string quoted = "'";
-  for (const char character : value) {
-    if (character == '\'') {
-      quoted += "'\\''";
-    } else {
-      quoted.push_back(character);
-    }
-  }
-  quoted.push_back('\'');
-  return quoted;
-}
-
 }  // namespace
 
 ExecResult sftp_write(const TargetConfig& target, const std::string& path,
@@ -3707,9 +3911,11 @@ ExecResult sftp_create_exclusive(const TargetConfig& target, const std::string& 
   return sftp_write_impl(target, path, content, true, timeout_seconds);
 }
 
-ExecResult sftp_remove_file(const TargetConfig& target, const std::string& path,
+ExecResult sftp_remove_file(const TargetConfig& target, const std::string& input_path,
                             int timeout_seconds) {
+  std::string path = input_path;
   ExecResult result;
+  if (target.confirmation_read_only) { fail(&result, "denied_by_policy", "Writes are disabled during read-only confirmation"); return result; }
   const auto started = Clock::now();
   const DurationTracker duration_tracker{result, started};
   if (path.empty() || path.size() > 4096 || path.find('\0') != std::string::npos ||
@@ -3724,6 +3930,7 @@ ExecResult sftp_remove_file(const TargetConfig& target, const std::string& path,
     return result;
   }
   const auto deadline = budget.enter(detail::SftpMetadataDeadline::Phase::operation);
+  if (!confined_sftp_path(target, &resources, deadline, &path, false, &result)) return result;
   if (!set_session_timeout(resources.session_, deadline)) {
     fail(&result, "timeout", "SFTP file removal timed out");
     return result;
@@ -3744,8 +3951,9 @@ ExecResult sftp_replace_guarded(const TargetConfig& target, const ExecRequest& r
   return sftp_replace_guarded_impl(target, request);
 }
 
-ExecResult sftp_link_count(const TargetConfig& target, const std::string& path,
+ExecResult sftp_link_count(const TargetConfig& target, const std::string& input_path,
                            int timeout_seconds) {
+  std::string path = input_path;
   ExecResult result;
   const auto started = Clock::now();
   const DurationTracker duration_tracker{result, started};
@@ -3755,10 +3963,16 @@ ExecResult sftp_link_count(const TargetConfig& target, const std::string& path,
     fail(&result, "invalid_parameters", "The SFTP link-count path is invalid");
     return result;
   }
-  const std::string quoted = shell_single_quote(path);
-  ExecResult probe = run_ssh_command(
+  SshResources resources;
+  const auto deadline = started + std::chrono::seconds(timeout_seconds);
+  if (!connect_sftp(target, deadline, &resources, &result) ||
+      !confined_sftp_path(target, &resources, deadline, &path, false, &result)) return result;
+  const std::string quoted = shell_quote(path);
+  const auto time_left = remaining_ms(deadline);
+  if (time_left == 0) { fail(&result, "timeout", "SFTP link-count verification timed out"); return result; }
+  ExecResult probe = run_ssh_command_with_limits(
       target, "stat -c %h " + quoted + " 2>/dev/null || stat -f %l " + quoted + " 2>/dev/null",
-      timeout_seconds);
+      std::chrono::milliseconds(time_left), kMaxOutputBytes, false);
   if (!probe.completed) return probe;
 
   std::string_view output(probe.stdout_text);
@@ -3807,9 +4021,10 @@ bool read_sftp_string(const std::vector<unsigned char>& packet, std::size_t* off
   return true;
 }
 
-bool write_sftp_channel(SshResources* resources,
+bool write_sftp_channel(SshResources* resources, const TargetConfig& target,
                         const std::vector<unsigned char>& bytes,
                         Clock::time_point deadline) {
+  if (!audit_stream(target, "system", "sftp_protocol", std::string_view(reinterpret_cast<const char*>(bytes.data()), bytes.size()), resources->audit_session_id_)) return false;
   std::size_t offset = 0;
   while (offset < bytes.size()) {
     if (!set_session_timeout(resources->session_, deadline)) return false;
@@ -3863,9 +4078,12 @@ bool read_sftp_channel_packet(SshResources* resources,
 
 }  // namespace
 
-ExecResult sftp_publish_no_replace(const TargetConfig& target, const std::string& source,
-                                   const std::string& destination, int timeout_seconds) {
+ExecResult sftp_publish_no_replace(const TargetConfig& target, const std::string& input_source,
+                                   const std::string& input_destination, int timeout_seconds) {
+  std::string source = input_source;
+  std::string destination = input_destination;
   ExecResult result;
+  if (target.confirmation_read_only) { fail(&result, "denied_by_policy", "Writes are disabled during read-only confirmation"); return result; }
   const auto started = Clock::now();
   const DurationTracker duration_tracker{result, started};
   if (source.empty() || destination.empty() || source.size() > 4096 ||
@@ -3890,11 +4108,18 @@ ExecResult sftp_publish_no_replace(const TargetConfig& target, const std::string
 
   detail::SftpMetadataDeadline budget(started, std::chrono::seconds(timeout_seconds));
   SshResources resources;
-  if (!connect_authenticated(target, budget.overall(), &resources, &result, nullptr, &budget)) {
+  if (!connect_sftp(target, budget.overall(), &resources, &result, &budget)) {
     annotate_metadata_connection_failure(&result, budget);
     return result;
   }
   auto deadline = budget.enter(detail::SftpMetadataDeadline::Phase::startup);
+  if (!confined_sftp_path(target, &resources, deadline, &source, false, &result) ||
+      !confined_sftp_path(target, &resources, deadline, &destination, true, &result)) return result;
+  if (source == destination || source.substr(0, source.find_last_of('/')) !=
+                                   destination.substr(0, destination.find_last_of('/'))) {
+    fail(&result, "denied_by_policy", "The resolved publication paths must be distinct siblings");
+    return result;
+  }
   if (!set_session_timeout(resources.session_, deadline)) {
     fail(&result, "timeout", "Starting the SFTP publication timed out");
     return result;
@@ -3927,7 +4152,7 @@ ExecResult sftp_publish_no_replace(const TargetConfig& target, const std::string
   std::vector<unsigned char> init_frame;
   append_sftp_u32(&init_frame, static_cast<std::uint32_t>(init_body.size()));
   init_frame.insert(init_frame.end(), init_body.begin(), init_body.end());
-  if (!write_sftp_channel(&resources, init_frame, deadline)) {
+  if (!write_sftp_channel(&resources, target, init_frame, deadline)) {
     const bool timed_out = session_timed_out(resources.session_, deadline);
     fail(&result, timed_out ? "timeout" : "sftp_error",
          timed_out ? "Negotiating the SFTP publication timed out"
@@ -3974,7 +4199,7 @@ ExecResult sftp_publish_no_replace(const TargetConfig& target, const std::string
   std::vector<unsigned char> request_frame;
   append_sftp_u32(&request_frame, static_cast<std::uint32_t>(request_body.size()));
   request_frame.insert(request_frame.end(), request_body.begin(), request_body.end());
-  if (!write_sftp_channel(&resources, request_frame, deadline) ||
+  if (!write_sftp_channel(&resources, target, request_frame, deadline) ||
       !read_sftp_channel_packet(&resources, &packet, deadline)) {
     const bool timed_out = session_timed_out(resources.session_, deadline);
     fail(&result, timed_out ? "timeout" : "sftp_error",
@@ -4000,7 +4225,7 @@ ExecResult sftp_publish_no_replace(const TargetConfig& target, const std::string
       std::vector<unsigned char> stat_frame;
       append_sftp_u32(&stat_frame, static_cast<std::uint32_t>(stat_body.size()));
       stat_frame.insert(stat_frame.end(), stat_body.begin(), stat_body.end());
-      if (write_sftp_channel(&resources, stat_frame, deadline) &&
+      if (write_sftp_channel(&resources, target, stat_frame, deadline) &&
           read_sftp_channel_packet(&resources, &packet, deadline) && packet.size() >= 9 &&
           read_sftp_u32(packet.data() + 1) == 2) {
         destination_exists = packet[0] == 105;  // SSH_FXP_ATTRS
@@ -4020,6 +4245,30 @@ ExecResult sftp_publish_no_replace(const TargetConfig& target, const std::string
 }
 
 ExecResult run_operation(const TargetConfig& target, const ExecRequest& request) {
+  ScopedAuditSource audit_scope("agent_tool");
+  auto lease = current_execution_lease;
+  if (target.execution_expires_at_ms) {
+    const auto now_ms = std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::system_clock::now().time_since_epoch()).count();
+    if (*target.execution_expires_at_ms <= now_ms || *target.execution_expires_at_ms > now_ms + 660000) {
+      ExecResult result;
+      fail(&result, "execution_expired", "The host approval has expired or exceeds its maximum lifetime");
+      return result;
+    }
+    if (!lease) lease = std::make_shared<ExecutionLease>();
+    if (lease->id.empty()) lease->id = new_stream_id();
+    lease->expires = std::min(lease->expires, std::chrono::system_clock::time_point(std::chrono::milliseconds(*target.execution_expires_at_ms)));
+  }
+  ScopedExecutionLease execution_scope(lease);
+  static const std::set<std::string> confirmation_operations{
+      "service_status", "disk_usage", "connection_check", "system_snapshot", "docker_ps",
+      "docker_logs", "docker_inspect", "systemd_inspect", "package_inspect", "service_inventory",
+      "process_inventory", "port_inventory", "server_logs", "host_key_probe", "sftp_list",
+      "sftp_stat", "sftp_lstat_optional", "sftp_read", "sftp_link_count"};
+  if (!execution_allowed() || (target.confirmation_read_only && !confirmation_operations.contains(request.operation))) {
+    ExecResult result;
+    fail(&result, "denied_by_policy", "The execution authorization forbids this operation");
+    return result;
+  }
   if (target.probe_only) {
     if (request.operation != "host_key_probe") {
       ExecResult result;

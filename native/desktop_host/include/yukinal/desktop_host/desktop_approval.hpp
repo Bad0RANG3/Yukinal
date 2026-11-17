@@ -19,9 +19,8 @@ namespace yukinal::desktop_host {
 // state only after the host learns the sidecar accepted the user's decision, and
 // consumes it once against the full host tool request before any remote effect.
 //
-// A recovered sidecar re-emits the same pending approval id with a fresh
-// deadline; that replay only refreshes the existing ticket. Everything else
-// fails closed.
+// A recovered sidecar may re-emit the same pending approval id. A replay can
+// shorten the original deadline, never extend it or restore a consumed ticket.
 class HostApprovalLedger {
  public:
   // A decision accepted just enough to be forwarded, but not yet approved. The
@@ -58,6 +57,9 @@ class HostApprovalLedger {
   // well-formed host action approval; the caller then simply keeps the normal
   // pending path. The ticket is still single-use and still expires.
   bool record_auto_approved_event(const nlohmann::json& params, std::int64_t now);
+
+  // Remote/tool output never grants authority for a later mutation in this run.
+  void observe_untrusted_result(const std::string& run_id);
 
   // Remember an approval the sidecar owns: every tool outside the four effectful
   // SSH actions announces itself on the same notification stream, but only the
@@ -123,7 +125,8 @@ class HostApprovalLedger {
   // erased and reported as TicketError::Expired.
   std::optional<TicketError> consume(const ExecutionBinding& request,
                                      const std::function<std::int64_t()>& now,
-                                     std::chrono::milliseconds wait = kConsumeWaitBudget);
+                                     std::chrono::milliseconds wait = kConsumeWaitBudget,
+                                     std::int64_t* expires_at = nullptr);
 
   // The upper bound on how long an effectful action waits for the approval RPC's
   // host-side acknowledgement. It equals the 180 s admission TTL the host accepts

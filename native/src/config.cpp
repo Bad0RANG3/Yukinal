@@ -15,6 +15,7 @@
 #include <vector>
 
 #include "yukinal/policy.hpp"
+#include "yukinal/ssh_security.hpp"
 #include "host_key.hpp"
 
 namespace yukinal::ssh_service {
@@ -346,7 +347,7 @@ bool host_matches_suffix(const std::string& host, const std::string& suffix) {
 }
 
 bool valid_host(const std::string& host) {
-  if (host.empty() || host.size() > 253) return false;
+  if (host.empty() || host.front() == '-' || host.size() > 253) return false;
   for (const unsigned char ch : host) {
     if (ch <= 0x20 || ch == 0x7f || ch == '/' || ch == '\\' || ch == '@' || ch == '?' || ch == '#') {
       return false;
@@ -584,7 +585,8 @@ ServiceConfig parse_config(const nlohmann::json& value, const std::string& base_
     require_only_keys(entry,
                       {"target_id", "host", "port", "username", "known_hosts_file",
                        "host_key_fingerprint", "host_certificate_authority", "auth", "probe_only", "proxy",
-                       "allow_server_exec", "server_exec_denylist"},
+                       "allow_server_exec", "server_exec_denylist", "truecolor",
+                       "confirmation_read_only", "sftp_allowed_roots", "stream_audit_file", "execution_expires_at_ms"},
                       label);
 
     TargetConfig target;
@@ -592,6 +594,25 @@ ServiceConfig parse_config(const nlohmann::json& value, const std::string& base_
     target.host = required_string(entry, "host", label);
     target.port = required_integer(entry, "port", 1, 65535, label);
     target.username = required_string(entry, "username", label);
+    for (const auto* key : {"truecolor", "confirmation_read_only"}) {
+      if (entry.contains(key) && !entry[key].is_boolean()) throw std::runtime_error(label + "." + key + " must be a boolean");
+    }
+    target.truecolor = entry.value("truecolor", true);
+    target.confirmation_read_only = entry.value("confirmation_read_only", false);
+    if (entry.contains("execution_expires_at_ms")) {
+      if (!entry["execution_expires_at_ms"].is_number_integer()) throw std::runtime_error(label + ".execution_expires_at_ms must be an integer");
+      target.execution_expires_at_ms = entry["execution_expires_at_ms"].get<std::int64_t>();
+    }
+    if (entry.contains("stream_audit_file")) target.stream_audit_file = required_string(entry, "stream_audit_file", label);
+    if (entry.contains("sftp_allowed_roots")) {
+      const auto& roots = entry["sftp_allowed_roots"];
+      if (!roots.is_array() || roots.empty() || roots.size() > 32) throw std::runtime_error(label + ".sftp_allowed_roots must contain 1..32 paths");
+      target.sftp_allowed_roots.clear();
+      for (const auto& root : roots) {
+        if (!root.is_string() || !safe_sftp_path(root.get_ref<const std::string&>())) throw std::runtime_error(label + ".sftp_allowed_roots contains an unsafe path");
+        target.sftp_allowed_roots.push_back(root.get<std::string>());
+      }
+    }
     // Service-level entries stay in front of the target's own entries. A target
     // without its own key still receives the service-level entries.
     target.server_exec_denylist.entries = config.server_exec_denylist.entries;

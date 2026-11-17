@@ -5,6 +5,7 @@ import json
 from typing import Any
 
 from langchain_core.messages import ToolMessage
+from .untrusted_output import untrusted_tool_content
 
 
 def model_messages(messages: list[Any], max_tool_bytes: int = 16 * 1024) -> list[Any]:
@@ -17,7 +18,7 @@ def model_messages(messages: list[Any], max_tool_bytes: int = 16 * 1024) -> list
         raw = content if isinstance(content, str) else json.dumps(content, ensure_ascii=False, separators=(",", ":"))
         encoded = raw.encode("utf-8")
         if len(encoded) <= max_tool_bytes:
-            result.append(message)
+            result.append(message.model_copy(update={"content": untrusted_tool_content(content, max_tool_bytes)}))
             continue
         half = (max_tool_bytes - 1024) // 4  # JSON escaping can double the text size.
         projection = {
@@ -32,5 +33,5 @@ def model_messages(messages: list[Any], max_tool_bytes: int = 16 * 1024) -> list
             projection.update(head=encoded[:half].decode("utf-8", errors="ignore"),
                               tail=encoded[-half:].decode("utf-8", errors="ignore") if half else "")
             projected = json.dumps(projection, ensure_ascii=False, separators=(",", ":"))
-        result.append(message.model_copy(update={"content": projected}))
+        result.append(message.model_copy(update={"content": untrusted_tool_content(projected, max_tool_bytes)}))
     return result

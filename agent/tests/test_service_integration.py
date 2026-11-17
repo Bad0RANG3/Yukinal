@@ -9,6 +9,7 @@ import time
 import unittest
 import urllib.error
 import urllib.request
+import uuid
 from pathlib import Path
 
 from yukinal_ssh import SshServiceClient, SshServiceError
@@ -89,9 +90,16 @@ class ServiceIntegrationTests(unittest.TestCase):
         self.assertEqual(caught.exception.http_status, 404)
 
     def test_known_target_connection_failure_is_classified(self) -> None:
+        started = time.monotonic()
         with self.assertRaises(SshServiceError) as caught:
             self.client.service_status("loopback-test", "nginx", timeout_seconds=2)
-        self.assertIn(caught.exception.code, {"connection_failed", "timeout"})
+        self.assertIn(caught.exception.code, {"connection_failed", "timeout", "execution_cancelled", "execution_expired"})
+        if caught.exception.code in {"execution_cancelled", "execution_expired"}:
+            # The execution lease and connection timeout share the same limit.
+            # Whichever observes expiry first must stop the attempt; native may
+            # report lease cancellation instead of the socket timeout beneath it.
+            self.assertEqual(caught.exception.http_status, 403)
+            self.assertGreaterEqual(time.monotonic() - started, 1.8)
 
     def test_server_exec_is_disabled_in_persistent_target_config(self) -> None:
         request = urllib.request.Request(
@@ -105,6 +113,7 @@ class ServiceIntegrationTests(unittest.TestCase):
                     "timeout_ms": 1000,
                 },
                 "timeout_seconds": 1,
+                "execution": {"id": uuid.uuid4().hex, "expires_at_ms": time.time_ns() // 1_000_000 + 3000},
             }).encode("utf-8"),
             headers={
                 "Authorization": f"Bearer {TOKEN}",
@@ -117,6 +126,26 @@ class ServiceIntegrationTests(unittest.TestCase):
         self.assertEqual(caught.exception.code, 502)
         body = json.loads(caught.exception.read())
         self.assertEqual(body["error"]["code"], "operation_not_allowed")
+        caught.exception.close()
+
+    def test_known_target_requires_execution_lease_before_connecting(self) -> None:
+        request = urllib.request.Request(
+            self.client._base_url + "/v1/ssh/exec",
+            data=json.dumps({
+                "target_id": "loopback-test",
+                "operation": "service_status",
+                "parameters": {"service": "nginx"},
+                "timeout_seconds": 2,
+            }).encode("utf-8"),
+            headers={"Authorization": f"Bearer {TOKEN}", "Content-Type": "application/json"},
+            method="POST",
+        )
+        with self.assertRaises(urllib.error.HTTPError) as caught:
+            urllib.request.urlopen(request, timeout=3)
+        self.assertEqual(caught.exception.code, 403)
+        body = json.loads(caught.exception.read())
+        caught.exception.close()
+        self.assertEqual(body["error"]["code"], "execution_required")
 
     def test_browser_origin_is_rejected_even_with_a_token(self) -> None:
         request = urllib.request.Request(
@@ -126,6 +155,7 @@ class ServiceIntegrationTests(unittest.TestCase):
                 "operation": "service_status",
                 "parameters": {"service": "nginx"},
                 "timeout_seconds": 2,
+                "execution": {"id": uuid.uuid4().hex, "expires_at_ms": time.time_ns() // 1_000_000 + 3000},
             }).encode("utf-8"),
             headers={
                 "Authorization": f"Bearer {TOKEN}",
@@ -137,6 +167,7 @@ class ServiceIntegrationTests(unittest.TestCase):
         with self.assertRaises(urllib.error.HTTPError) as caught:
             urllib.request.urlopen(request, timeout=3)
         self.assertEqual(caught.exception.code, 401)
+        caught.exception.close()
 
 
 if __name__ == "__main__":

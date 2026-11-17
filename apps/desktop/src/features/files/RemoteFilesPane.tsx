@@ -13,6 +13,7 @@ import { EmptyPanel, ErrorPanel } from "../../components/PanelStates.js";
 import { Icon } from "../../components/Icon.js";
 import { errorMessage, formatBytes } from "../../lib/format.js";
 import { callDesktop, isDesktopShell, subscribeDesktop } from "../../lib/ipc.js";
+import { useServers } from "../../lib/servers.js";
 import { useWorkspaceStore } from "../../stores/workspace-store.js";
 import { LOCAL_PATH_HANDLE_MIME, localHandleForDrop, REMOTE_FILE_PATH_MIME, remoteFileForDrop } from "./file-drag.js";
 import { transferProgress } from "./transfer-progress.js";
@@ -25,8 +26,12 @@ export function RemoteFilesPane({ serverId: explicitServerId }: { serverId?: str
   const serverId = explicitServerId === undefined ? workspaceServerId : explicitServerId;
   const shell = isDesktopShell();
   const queryClient = useQueryClient();
-  const [path, setPath] = useState("/");
-  const [draftPath, setDraftPath] = useState("/");
+  const servers = useServers();
+  const root = servers.data?.find((server) => server.id === serverId)?.connection.sftpAllowedRoots?.[0] ?? ".";
+  const [location, setLocation] = useState<{ serverId: string | null | undefined; root: string; path: string } | null>(null);
+  const path = location?.serverId === serverId && location.root === root ? location.path : root;
+  const setPath = (nextPath: string) => setLocation({ serverId, root, path: nextPath });
+  const [draftPath, setDraftPath] = useState(root);
   const [selectedRemote, setSelectedRemote] = useState<RemoteFileEntry | null>(null);
   const [localHandles, setLocalHandles] = useState<LocalPathHandle[]>([]);
   const [selectedLocal, setSelectedLocal] = useState<LocalPathHandle | null>(null);
@@ -39,12 +44,20 @@ export function RemoteFilesPane({ serverId: explicitServerId }: { serverId?: str
 
   const files = useQuery({
     queryKey: ["remote-files", serverId, path],
-    enabled: shell && Boolean(serverId),
+    enabled: shell && Boolean(serverId) && servers.isSuccess,
     retry: false,
     refetchOnWindowFocus: false,
     refetchOnReconnect: false,
     queryFn: () => callDesktop(IPC_COMMANDS.remoteFileList, { serverId: serverId as string, path }),
   });
+  useEffect(() => { setDraftPath(path); }, [path]);
+  useEffect(() => {
+    // The service's canonical path also handles an empty home directory, so
+    // upload/preview requests never have to guess the remote user's home.
+    if (path === "." && files.data?.path.startsWith("/")) {
+      setLocation({ serverId, root, path: files.data.path });
+    }
+  }, [path, files.data?.path, serverId, root]);
   const remotePreview = useQuery({
     queryKey: ["remote-file-preview", serverId, selectedRemote?.path],
     enabled: shell && Boolean(serverId && selectedRemote?.type === "file"),
@@ -188,8 +201,8 @@ export function RemoteFilesPane({ serverId: explicitServerId }: { serverId?: str
     <section className="remote-files-page">
       <form className="files-toolbar" onSubmit={(event) => { event.preventDefault(); navigate(draftPath); }}>
         <div className="files-location">
-        <button type="button" className="icon-button" onClick={() => navigate(parent)} disabled={path === "/"} aria-label="返回上级目录"><Icon name="arrowUp" size="sm" /></button>
-        <div className="files-address"><Icon name="folder" size="sm" /><input className="files-path-input" value={draftPath} onChange={(event) => setDraftPath(event.target.value)} aria-label="远程路径" pattern="/.*" required spellCheck={false} /><button type="submit" className="icon-button" aria-label="前往路径"><Icon name="chevronRight" size="sm" /></button></div>
+        <button type="button" className="icon-button" onClick={() => navigate(parent)} disabled={path === "/" || path === "." || path === root} aria-label="返回上级目录"><Icon name="arrowUp" size="sm" /></button>
+        <div className="files-address"><Icon name="folder" size="sm" /><input className="files-path-input" value={draftPath} onChange={(event) => setDraftPath(event.target.value)} aria-label="远程路径" pattern="(/.*|\.)" required spellCheck={false} /><button type="submit" className="icon-button" aria-label="前往路径"><Icon name="chevronRight" size="sm" /></button></div>
         <button type="button" className="icon-button" onClick={() => void files.refetch()} disabled={files.isFetching} aria-label="刷新远程文件"><Icon name="refresh" size="sm" /></button>
         </div>
         <div className="files-upload-actions">

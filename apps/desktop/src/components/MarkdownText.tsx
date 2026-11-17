@@ -23,6 +23,7 @@ import { memo, useState, type ReactNode } from "react";
 import { errorMessage } from "../lib/format.js";
 import { openExternalUrl } from "../lib/external.js";
 import { parseMarkdown, type Block, type ColumnAlign, type Inline } from "../lib/markdown.js";
+import { stripTerminalControls } from "../lib/terminal-safety.js";
 import { KeywordText } from "./KeywordText.js";
 import { CopyButton } from "./CopyButton.js";
 import { MarkdownWidgetBlock } from "./MarkdownWidgetBlock.js";
@@ -34,7 +35,7 @@ const HEADING_TAG = { 1: "h1", 2: "h2", 3: "h3", 4: "h4", 5: "h5", 6: "h6" } as 
 type HeadingIds = Map<Block, string>;
 
 export const MarkdownText = memo(function MarkdownText({ text, className, streaming = false }: { text: string; className?: string; streaming?: boolean }) {
-  const blocks = parseMarkdown(text, { preserveCodeSource: true });
+  const blocks = parseMarkdown(stripTerminalControls(text), { preserveCodeSource: true });
   const headingIds = assignHeadingIds(blocks);
   return (
     <div className={className} data-markdown-root="">

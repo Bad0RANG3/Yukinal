@@ -11,4 +11,5 @@ AuthorizedKeysFile .ssh/authorized_keys
 StrictModes yes
 UsePAM no
 LogLevel ERROR
+AcceptEnv COLORTERM
 Subsystem sftp internal-sftp

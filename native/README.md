@@ -51,6 +51,95 @@ they do not fall back to a Rust SSH connection. When pin or `known_hosts` trust 
 certificate, C++ fingerprints the certified public key, matching the desktop
 trust store.
 
+## Execution leases and outbound audit
+
+Every authenticated `POST /v1/ssh/exec` requires an `execution` object in addition
+to the existing structured operation fields:
+
+```json
+{"id":"unique-random-id-at-least-16-chars","expires_at_ms":1795000000000}
+```
+
+The caller supplies an actual future Unix-millisecond expiry, bounded to eleven
+minutes. The trusted target's `execution_expires_at_ms`, when present, can only
+shorten that lifetime. IDs are single use, including failed calls. Authenticated
+`POST /v1/ssh/cancel` with `{"execution_id":"..."}` revokes a running or queued
+operation; cancellation before execution creates a permanent tombstone for the
+service's lifetime. A socket watchdog closes an active connection on expiry or
+revocation. A disconnected SSH channel cannot guarantee termination of a process
+that the remote host has deliberately detached; such results remain unknown.
+Three execution slots leave one HTTP worker available for cancellation.
+
+`confirmation_read_only: true` permits only the service's explicit read-operation
+allowlist and disables every PTY write. The PTY worker accepts `write` frames
+only with `source: "user_pty"` from the user-only desktop IPC endpoint. There is
+currently no AI PTY write capability: `agent_tool`, missing, and unknown sources
+are rejected and close the worker. Adding AI PTY support requires a separately
+verified, single-use ChangePlan-step approval for **each** write; a session grant
+must never authorize stdin indefinitely.
+
+`stream_audit_file` selects an independent append-only JSON-lines stream audit
+(default `var/audit/ssh-stream.jsonl`; desktop targets supply an absolute app-data
+path). Records include source (`agent_tool`, `user_pty`, or `system`), target,
+session/execution correlation IDs and byte count. Manual PTY stdin records are
+metadata-only: even a SHA-256 digest of a single keystroke can be enumerated.
+Other outbound records include SHA-256; records contain no raw command, password,
+private key or terminal bytes and do not support session replay. Audit failure blocks the write.
+These records complement, rather than replace, the redacted tool-call audit.
+
+All shell arguments use the common `shell_quote` primitive even when an
+allowlist also validates them. The service uses libssh2, never an `ssh`/`scp`
+subprocess, and therefore never consults OpenSSH ControlMaster/ControlPath files.
+Explicit nested SSH, multiplexing settings, and socket-access commands are
+blocked in `server_exec`. That extra check is not a sandbox for arbitrary
+explicitly approved shell programs. The separate configured authentication-agent
+socket is used only for authentication, never as a model-selected file path.
+
+SFTP operations resolve their configured roots and requested paths using the
+remote SFTP realpath operation before metadata queries or opens. Requests outside
+the lexical and resolved boundary, traversal, escaped symlinks, and socket paths
+receive the same policy denial, including optional existence queries. New files
+require an allowed canonical parent; dangling symlinks are refused. Operations
+use the resolved path, and listings return `resolved_path` plus canonical entry
+paths. SFTP does not provide an `openat`/directory-descriptor confinement primitive;
+the SSH account must not allow an adversary to rename its permitted directories
+during an operation. Host-side filesystem isolation remains necessary against
+such a concurrent malicious filesystem owner.
+
+## Terminal display and file boundaries
+
+The desktop connection editor persists `truecolor` (default `true`) and
+`sftpAllowedRoots` (default `["."]`, the remote account's home directory).
+The service target uses `truecolor` and `sftp_allowed_roots` with the same defaults.
+Existing databases migrate to these restricted defaults; explicitly add absolute
+roots such as `/srv/app` before using file tools outside the account's home.
+SFTP canonicalizes each path and its configured roots remotely before access.
+Directory listings return canonical paths, including empty directories.
+
+PTY requests keep `TERM=xterm-256color`. With `truecolor` enabled, the SSH channel
+sends a `COLORTERM=truecolor` environment request before starting the shell. The
+server must allow it with `AcceptEnv COLORTERM` in `sshd_config`. An OpenSSH client
+connecting independently also needs `SendEnv COLORTERM`; Yukinal sends the channel
+request directly and does not read `ssh_config`. Servers may decline the variable;
+256-colour compatibility remains available. The switch only controls advertising:
+xterm renders `38;2;r;g;b` / `48;2;r;g;b` truecolor sequences by default.
+
+Remote output passes a stateful SGR allowlist before terminal rendering, both in
+the native worker and the UI. Cursor movement, erase-screen, mode changes,
+OSC hyperlinks/clipboard/title and DCS strings are discarded, even when split
+across frames. Tabs, newlines and carriage returns are retained for text layout.
+This intentionally limits full-screen TUIs and cursor-based shell redisplay;
+`ls --color`, ordinary `git status` and `git --no-pager diff` remain coloured.
+AI Markdown removes all ANSI rather than interpreting it.
+
+The terminal uses the application's surface/text colours with a complete
+16-colour dark or light palette, cursor and selection colours. Theme changes
+replace the whole palette. Monospaced fonts disable ligatures; pane/window/font
+changes run FitAddon and send the resulting columns/rows through the native
+PTY resize request. The current transport is C++/libssh2, not Tauri/russh.
+Only trusted desktop keyboard/paste writes carry `source: "user_pty"`; model
+tools cannot reuse that PTY. Agent commands use separately approved exec calls.
+
 ## Build
 
 ```powershell

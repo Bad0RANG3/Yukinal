@@ -1,4 +1,5 @@
 #include "yukinal/desktop_host/desktop_ssh.hpp"
+#include "scoped_secret_cleanup.hpp"
 
 #include "yukinal/desktop_host/content_revision.hpp"
 #include "yukinal/desktop_host/credential_store.hpp"
@@ -42,9 +43,15 @@ yukinal::ssh_service::TargetConfig build_target_config(const nlohmann::json& pay
 std::vector<std::pair<std::string, std::string>> credential_values(
     const nlohmann::json& payload) {
   std::vector<std::pair<std::string, std::string>> values;
-  for (auto item = payload.at("credentials").begin(); item != payload.at("credentials").end();
-       ++item) {
-    values.emplace_back(item.key(), item.value().get<std::string>());
+  values.reserve(payload.at("credentials").size());
+  try {
+    for (auto item = payload.at("credentials").begin(); item != payload.at("credentials").end();
+         ++item) {
+      values.emplace_back(item.key(), item.value().get_ref<const nlohmann::json::string_t&>());
+    }
+  } catch (...) {
+    for (auto& value : values) wipe_secret(value.second);
+    throw;
   }
   return values;
 }
@@ -163,12 +170,6 @@ std::string utf8_lossy(const std::vector<std::uint8_t>& bytes) {
   return out;
 }
 
-std::string join_remote_path(const std::string& parent, const std::string& name) {
-  if (parent == "/") return "/" + name;
-  if (!parent.empty() && parent.back() == '/') return parent + name;
-  return parent + "/" + name;
-}
-
 bool valid_browser_path(const std::string& path) {
   return !path.empty() && path.size() <= 4096 && path.find('\0') == std::string::npos &&
          path.find('\r') == std::string::npos && path.find('\n') == std::string::npos;
@@ -201,9 +202,11 @@ SshCommandResult run_server_logs(const DesktopDatabase& database,
   if (timeout_seconds < 1 || timeout_seconds > 30) {
     throw std::runtime_error("the server.logs timeout is out of range");
   }
-  const auto payload = resolve_ssh_service_target(database, credentials, server_id);
+  auto payload = resolve_ssh_service_target(database, credentials, server_id);
+  ScopedSecretCleanup credentials_cleanup(payload.at("credentials"));
   const auto target = build_target_config(payload);
   yukinal::ssh_service::ScopedCredentialOverride credentials_scope(credential_values(payload));
+  credentials_cleanup.clear();
   return to_result(
       yukinal::ssh_service::server_logs(target, since_seconds, unit, timeout_seconds));
 #else
@@ -224,9 +227,11 @@ SshCommandResult run_host_key_probe(const DesktopDatabase& database,
   if (timeout_seconds < 1 || timeout_seconds > 30) {
     throw std::runtime_error("the host-key probe timeout is out of range");
   }
-  const auto payload = resolve_ssh_service_probe_target(database, credentials, server_id);
+  auto payload = resolve_ssh_service_probe_target(database, credentials, server_id);
+  ScopedSecretCleanup credentials_cleanup(payload.at("credentials"));
   const auto target = build_target_config(payload);
   yukinal::ssh_service::ScopedCredentialOverride credentials_scope(credential_values(payload));
+  credentials_cleanup.clear();
   return to_result(yukinal::ssh_service::host_key_probe(target, timeout_seconds));
 #else
   (void)database;
@@ -244,9 +249,11 @@ SshCommandResult run_service_inventory(const DesktopDatabase& database,
   if (timeout_seconds < 1 || timeout_seconds > 30) {
     throw std::runtime_error("the service inventory timeout is out of range");
   }
-  const auto payload = resolve_ssh_service_target(database, credentials, server_id);
+  auto payload = resolve_ssh_service_target(database, credentials, server_id);
+  ScopedSecretCleanup credentials_cleanup(payload.at("credentials"));
   const auto target = build_target_config(payload);
   yukinal::ssh_service::ScopedCredentialOverride credentials_scope(credential_values(payload));
+  credentials_cleanup.clear();
   return to_result(yukinal::ssh_service::service_inventory(target, timeout_seconds));
 #else
   (void)database;
@@ -264,9 +271,11 @@ SshCommandResult run_process_inventory(const DesktopDatabase& database,
   if (timeout_seconds < 1 || timeout_seconds > 30) {
     throw std::runtime_error("the process inventory timeout is out of range");
   }
-  const auto payload = resolve_ssh_service_target(database, credentials, server_id);
+  auto payload = resolve_ssh_service_target(database, credentials, server_id);
+  ScopedSecretCleanup credentials_cleanup(payload.at("credentials"));
   const auto target = build_target_config(payload);
   yukinal::ssh_service::ScopedCredentialOverride credentials_scope(credential_values(payload));
+  credentials_cleanup.clear();
   return to_result(yukinal::ssh_service::process_inventory(target, timeout_seconds));
 #else
   (void)database;
@@ -284,9 +293,11 @@ SshCommandResult run_port_inventory(const DesktopDatabase& database,
   if (timeout_seconds < 1 || timeout_seconds > 30) {
     throw std::runtime_error("the port inventory timeout is out of range");
   }
-  const auto payload = resolve_ssh_service_target(database, credentials, server_id);
+  auto payload = resolve_ssh_service_target(database, credentials, server_id);
+  ScopedSecretCleanup credentials_cleanup(payload.at("credentials"));
   const auto target = build_target_config(payload);
   yukinal::ssh_service::ScopedCredentialOverride credentials_scope(credential_values(payload));
+  credentials_cleanup.clear();
   return to_result(yukinal::ssh_service::port_inventory(target, timeout_seconds));
 #else
   (void)database;
@@ -309,9 +320,11 @@ SshCommandResult run_docker_ps(const DesktopDatabase& database,
   if (timeout_seconds < 1 || timeout_seconds > 30) {
     throw std::runtime_error("the docker.ps timeout is out of range");
   }
-  const auto payload = resolve_ssh_service_target(database, credentials, server_id);
+  auto payload = resolve_ssh_service_target(database, credentials, server_id);
+  ScopedSecretCleanup credentials_cleanup(payload.at("credentials"));
   const auto target = build_target_config(payload);
   yukinal::ssh_service::ScopedCredentialOverride credentials_scope(credential_values(payload));
+  credentials_cleanup.clear();
   return to_result(yukinal::ssh_service::docker_ps(target, all, timeout_seconds));
 #else
   (void)database;
@@ -331,9 +344,11 @@ SshCommandResult run_docker_logs(const DesktopDatabase& database,
   if (timeout_seconds < 1 || timeout_seconds > 30) {
     throw std::runtime_error("the docker.logs timeout is out of range");
   }
-  const auto payload = resolve_ssh_service_target(database, credentials, server_id);
+  auto payload = resolve_ssh_service_target(database, credentials, server_id);
+  ScopedSecretCleanup credentials_cleanup(payload.at("credentials"));
   const auto target = build_target_config(payload);
   yukinal::ssh_service::ScopedCredentialOverride credentials_scope(credential_values(payload));
+  credentials_cleanup.clear();
   return to_result(
       yukinal::ssh_service::docker_logs(target, container, tail, timeout_seconds));
 #else
@@ -355,9 +370,11 @@ SshCommandResult run_docker_inspect(const DesktopDatabase& database,
   if (timeout_seconds < 1 || timeout_seconds > 30) {
     throw std::runtime_error("the docker.inspect timeout is out of range");
   }
-  const auto payload = resolve_ssh_service_target(database, credentials, server_id);
+  auto payload = resolve_ssh_service_target(database, credentials, server_id);
+  ScopedSecretCleanup credentials_cleanup(payload.at("credentials"));
   const auto target = build_target_config(payload);
   yukinal::ssh_service::ScopedCredentialOverride credentials_scope(credential_values(payload));
+  credentials_cleanup.clear();
   return to_result(yukinal::ssh_service::docker_inspect(target, container, timeout_seconds));
 #else
   (void)database;
@@ -377,9 +394,11 @@ SshCommandResult run_systemd_inspect(const DesktopDatabase& database,
   if (timeout_seconds < 1 || timeout_seconds > 30) {
     throw std::runtime_error("the systemd.inspect timeout is out of range");
   }
-  const auto payload = resolve_ssh_service_target(database, credentials, server_id);
+  auto payload = resolve_ssh_service_target(database, credentials, server_id);
+  ScopedSecretCleanup credentials_cleanup(payload.at("credentials"));
   const auto target = build_target_config(payload);
   yukinal::ssh_service::ScopedCredentialOverride credentials_scope(credential_values(payload));
+  credentials_cleanup.clear();
   return to_result(yukinal::ssh_service::systemd_inspect(target, service, timeout_seconds));
 #else
   (void)database;
@@ -399,9 +418,11 @@ SshCommandResult run_package_inspect(const DesktopDatabase& database,
   if (timeout_seconds < 1 || timeout_seconds > 30) {
     throw std::runtime_error("the package.inspect timeout is out of range");
   }
-  const auto payload = resolve_ssh_service_target(database, credentials, server_id);
+  auto payload = resolve_ssh_service_target(database, credentials, server_id);
+  ScopedSecretCleanup credentials_cleanup(payload.at("credentials"));
   const auto target = build_target_config(payload);
   yukinal::ssh_service::ScopedCredentialOverride credentials_scope(credential_values(payload));
+  credentials_cleanup.clear();
   return to_result(
       yukinal::ssh_service::package_inspect(target, manager, package, timeout_seconds));
 #else
@@ -423,11 +444,13 @@ nlohmann::json run_agent_filesystem_read(const DesktopDatabase& database,
   if (timeout_seconds < 1 || timeout_seconds > 30) {
     throw std::runtime_error("the filesystem.read timeout is out of range");
   }
-  const auto payload = resolve_ssh_service_filesystem_read_target(
+  auto payload = resolve_ssh_service_filesystem_read_target(
       database, credentials,
       {{"serverId", server_id}, {"path", path}, {"maxBytes", max_bytes}});
+  ScopedSecretCleanup credentials_cleanup(payload.at("credentials"));
   const auto target = build_target_config(payload);
   yukinal::ssh_service::ScopedCredentialOverride credentials_scope(credential_values(payload));
+  credentials_cleanup.clear();
   const auto bounded = payload.at("filesystemRead").at("maxBytes").get<std::uint32_t>();
   const auto result = yukinal::ssh_service::sftp_read(target, path, bounded, timeout_seconds);
   if (!result.error_code.empty() || !result.completed) {
@@ -460,9 +483,11 @@ SshCommandResult run_connection_check(const DesktopDatabase& database,
   if (timeout_seconds < 1 || timeout_seconds > 30) {
     throw std::runtime_error("the connection check timeout is out of range");
   }
-  const auto payload = resolve_ssh_service_target(database, credentials, server_id);
+  auto payload = resolve_ssh_service_target(database, credentials, server_id);
+  ScopedSecretCleanup credentials_cleanup(payload.at("credentials"));
   const auto target = build_target_config(payload);
   yukinal::ssh_service::ScopedCredentialOverride credentials_scope(credential_values(payload));
+  credentials_cleanup.clear();
   return to_result(yukinal::ssh_service::connection_check(target, timeout_seconds));
 #else
   (void)database;
@@ -480,9 +505,11 @@ nlohmann::json run_system_snapshot(const DesktopDatabase& database,
   if (timeout_seconds < 1 || timeout_seconds > 30) {
     throw std::runtime_error("the system snapshot timeout is out of range");
   }
-  const auto payload = resolve_ssh_service_target(database, credentials, server_id);
+  auto payload = resolve_ssh_service_target(database, credentials, server_id);
+  ScopedSecretCleanup credentials_cleanup(payload.at("credentials"));
   const auto target = build_target_config(payload);
   yukinal::ssh_service::ScopedCredentialOverride credentials_scope(credential_values(payload));
+  credentials_cleanup.clear();
   const auto nonce = new_snapshot_nonce();
   const auto result = yukinal::ssh_service::system_snapshot(target, nonce, timeout_seconds);
   if (!result.error_code.empty() || !result.completed) {
@@ -509,9 +536,11 @@ nlohmann::json run_remote_file_list(const DesktopDatabase& database,
   if (timeout_seconds < 1 || timeout_seconds > 30) {
     throw std::runtime_error("the remote listing timeout is out of range");
   }
-  const auto payload = resolve_ssh_service_target(database, credentials, server_id);
+  auto payload = resolve_ssh_service_target(database, credentials, server_id);
+  ScopedSecretCleanup credentials_cleanup(payload.at("credentials"));
   const auto target = build_target_config(payload);
   yukinal::ssh_service::ScopedCredentialOverride credentials_scope(credential_values(payload));
+  credentials_cleanup.clear();
   const auto result = yukinal::ssh_service::sftp_list(target, path, timeout_seconds);
   if (!result.error_code.empty() || !result.completed) {
     throw std::runtime_error(result.error_message.empty() ? result.error_code
@@ -537,15 +566,18 @@ nlohmann::json run_remote_file_list(const DesktopDatabase& database,
     const auto type = entry.at("file_type").get<std::string>();
     const bool known_type = type == "directory" || type == "file" || type == "symlink" ||
                             type == "other";
-    if (name.empty() || name.size() > 4096 || !known_type) {
+    if (name.empty() || name.size() > 4096 || name == "." || name == ".." ||
+        name.find('/') != std::string::npos || !known_type ||
+        !entry.contains("path") || !entry.at("path").is_string() ||
+        !valid_browser_preview_path(entry.at("path").get<std::string>())) {
       throw std::runtime_error("the SSH service returned an invalid directory entry");
     }
     converted.push_back({{"name", name},
-                         {"path", join_remote_path(path, name)},
+                         {"path", entry.at("path")},
                          {"type", type},
                          {"size", entry.at("size")}});
   }
-  return {{"path", path}, {"entries", std::move(converted)}};
+  return {{"path", result.resolved_path.empty() ? path : result.resolved_path}, {"entries", std::move(converted)}};
 #else
   (void)database;
   (void)credentials;
@@ -563,9 +595,11 @@ nlohmann::json run_remote_file_read(const DesktopDatabase& database,
 #ifdef YUKINAL_DESKTOP_HOST_WITH_SSH_CORE
   if (!valid_browser_path(path)) throw std::runtime_error("the remote path is invalid");
   constexpr std::uint32_t kBrowserReadBytes = 1024 * 1024;
-  const auto payload = resolve_ssh_service_target(database, credentials, server_id);
+  auto payload = resolve_ssh_service_target(database, credentials, server_id);
+  ScopedSecretCleanup credentials_cleanup(payload.at("credentials"));
   const auto target = build_target_config(payload);
   yukinal::ssh_service::ScopedCredentialOverride credentials_scope(credential_values(payload));
+  credentials_cleanup.clear();
   const auto result = yukinal::ssh_service::sftp_read(target, path, kBrowserReadBytes, timeout_seconds);
   if (!result.error_code.empty() || !result.completed) {
     throw std::runtime_error(result.error_message.empty() ? result.error_code
@@ -595,9 +629,11 @@ nlohmann::json run_remote_file_preview(const DesktopDatabase& database,
 #ifdef YUKINAL_DESKTOP_HOST_WITH_SSH_CORE
   if (!valid_browser_preview_path(path)) throw std::runtime_error("the remote path is invalid");
   constexpr std::uint32_t kBrowserReadBytes = 1024 * 1024;
-  const auto payload = resolve_ssh_service_target(database, credentials, server_id);
+  auto payload = resolve_ssh_service_target(database, credentials, server_id);
+  ScopedSecretCleanup credentials_cleanup(payload.at("credentials"));
   const auto target = build_target_config(payload);
   yukinal::ssh_service::ScopedCredentialOverride credentials_scope(credential_values(payload));
+  credentials_cleanup.clear();
   const auto stat = yukinal::ssh_service::sftp_stat(target, path, timeout_seconds);
   if (!stat.error_code.empty() || !stat.completed) {
     throw std::runtime_error(stat.error_message.empty() ? stat.error_code : stat.error_message);

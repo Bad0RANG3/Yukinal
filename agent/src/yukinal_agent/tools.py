@@ -116,8 +116,17 @@ class ExecutionContext:
     run_id: str = ""
     trace_id: str = ""
     call_id: str = ""
+    confirmation_read_only: bool = False
+    approval_expires_at_ms: int | None = None
 
     def __post_init__(self) -> None:
+        if not isinstance(self.confirmation_read_only, bool):
+            raise ValueError("confirmation_read_only must be a boolean")
+        if self.approval_expires_at_ms is not None and (
+            isinstance(self.approval_expires_at_ms, bool) or not isinstance(self.approval_expires_at_ms, int)
+            or self.approval_expires_at_ms <= 0
+        ):
+            raise ValueError("approval_expires_at_ms must be a positive timestamp")
         for field_name in ("task_id", "tenant_id", "user_id"):
             value = getattr(self, field_name)
             if not isinstance(value, str) or not _IDENTIFIER.fullmatch(value):
@@ -222,6 +231,7 @@ class ToolRegistry:
         self._audit = audit
         self._authorization = authorization or AllowlistAuthorization()
         self._tools: dict[str, ToolSpec] = {}
+        self._consumed_grants: set[tuple[str, str, str, str]] = set()
 
     def register(self, spec: ToolSpec) -> None:
         self.register_many((spec,))
@@ -332,10 +342,29 @@ class ToolRegistry:
         approval_status = "not_required"
         try:
             self.validate_arguments(name, arguments)
+            # This guard runs independently of a pluggable authorization policy.
+            if context.confirmation_read_only and spec.risk_level != "read":
+                raise ToolCallError("read_only_verification_required", "The confirmation turn is read-only")
+            if spec.requires_approval and context.approval_expires_at_ms is not None and (
+                time.time_ns() // 1_000_000 >= context.approval_expires_at_ms
+            ):
+                raise ToolCallError("approval_timeout", "The approval expired before execution")
             approval_status = "required" if spec.requires_approval else "not_required"
             policy_status = self._authorization.authorize(context, spec, arguments)
             if policy_status not in {"not_required", "approved"}:
                 raise ToolCallError("authorization_failed", "Authorization policy returned an invalid result")
+            if policy_status == "approved":
+                fingerprint = _approval_fingerprint(spec.name, target_id, arguments,
+                    task_id=context.task_id, tenant_id=context.tenant_id, user_id=context.user_id)
+                reference = context.approved_actions.get(fingerprint)
+                if reference:
+                    grant = (context.tenant_id, context.user_id, context.task_id, reference)
+                    if grant in self._consumed_grants or len(self._consumed_grants) >= 65536:
+                        raise ToolCallError("approval_required", "This call needs a fresh single-use approval",
+                                            approval_fingerprint=fingerprint, target_id=target_id)
+                    # No await between checking and consuming: concurrent calls
+                    # cannot spend one approval twice, even on an error path.
+                    self._consumed_grants.add(grant)
             approval_status = policy_status
             handler_context = replace(
                 context,

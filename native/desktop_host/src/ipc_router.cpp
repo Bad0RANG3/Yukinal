@@ -36,6 +36,7 @@
 #include <set>
 #include <sstream>
 #include <string_view>
+#include <thread>
 #include <utility>
 #include <vector>
 
@@ -658,9 +659,11 @@ bool normalize_server_input(const std::string& method, const nlohmann::json& par
   const bool add = method == "server_add";
   const std::set<std::string> add_allowed = {
       "name", "host", "port", "username", "environment", "groupId",
+      "truecolor", "sftpAllowedRoots",
       "hostCertificateAuthority", "authentication"};
   const std::set<std::string> update_allowed = {
       "serverId", "name", "host", "port", "username", "environment", "groupId",
+      "truecolor", "sftpAllowedRoots",
       "hostCertificateAuthority", "clearHostCertificateAuthority", "authentication"};
   const std::set<std::string> required = add
       ? std::set<std::string>{"name", "host", "username", "environment", "authentication"}
@@ -673,6 +676,9 @@ bool normalize_server_input(const std::string& method, const nlohmann::json& par
   if (!valid_request_text(params, "name", 256, true, name) ||
       !valid_request_text(params, "host", 256, true, host) ||
       !valid_request_text(params, "username", 256, true, username)) return false;
+  if (host.front() == '-' || std::any_of(host.begin(), host.end(), [](unsigned char byte) {
+        return byte <= 0x20 || byte == 0x7f;
+      })) return false;
   int port = 22;
   if (params.contains("port") &&
       !valid_integer_range(params.at("port"), 1, 65'535, port)) return false;
@@ -683,6 +689,24 @@ bool normalize_server_input(const std::string& method, const nlohmann::json& par
   output = {{"name", std::move(name)}, {"host", std::move(host)},
             {"port", port}, {"username", std::move(username)},
             {"environment", params.at("environment")}};
+  if (params.contains("truecolor")) {
+    if (!params.at("truecolor").is_boolean()) return false;
+    output["truecolor"] = params.at("truecolor");
+  }
+  if (params.contains("sftpAllowedRoots")) {
+    const auto& roots = params.at("sftpAllowedRoots");
+    if (!roots.is_array() || roots.empty() || roots.size() > 32) return false;
+    for (const auto& value : roots) {
+      if (!value.is_string()) return false;
+      const auto root = value.get<std::string>();
+      if (root.empty() || root.size() > 4096 || (root != "." && root.front() != '/') ||
+          std::any_of(root.begin(), root.end(), [](unsigned char byte) { return byte < 0x20 || byte == 0x7f; })) return false;
+      std::istringstream segments(root);
+      std::string segment;
+      while (std::getline(segments, segment, '/')) if (segment == "..") return false;
+    }
+    output["sftpAllowedRoots"] = roots;
+  }
   if (params.contains("serverId")) {
     std::string server_id;
     if (!valid_request_text(params, "serverId", 256, true, server_id) ||
@@ -4560,11 +4584,13 @@ nlohmann::json handle_ssh_effectful_action_target(
     }
     binding.evidence_ids = std::move(ids);
   }
+  std::int64_t approval_expires_at = 0;
   const auto ticket =
       binding.approval_id.empty()
           ? std::optional<HostApprovalLedger::TicketError>(
                 HostApprovalLedger::TicketError::Missing)
-          : approvals.consume(binding, [] { return now_epoch_seconds(); });
+          : approvals.consume(binding, [] { return now_epoch_seconds(); },
+                              HostApprovalLedger::kConsumeWaitBudget, &approval_expires_at);
   if (ticket.has_value()) {
     const auto response = host_action_approval_failure(*ticket);
     finish_host_tool_call(database, tool_call, token, response, replay_mutex, replays);
@@ -4580,6 +4606,7 @@ nlohmann::json handle_ssh_effectful_action_target(
     return response;
   }
   nlohmann::json response = {{"status", "success"}, {"targetData", target_data}};
+  response["targetData"]["target"]["execution_expires_at_ms"] = approval_expires_at * 1000;
   if (tool_name == kToolServerExec) {
     auto& resolved_target = response["targetData"]["target"];
     if (!resolved_target.is_object() ||
@@ -8963,6 +8990,8 @@ IpcReply IpcRouter::server_command(const std::string& method,
   }
   if (normalized.contains("groupId")) server["groupId"] = normalized.at("groupId");
   auto& connection = server["connection"];
+  if (normalized.contains("truecolor")) connection["truecolor"] = normalized.at("truecolor");
+  if (normalized.contains("sftpAllowedRoots")) connection["sftpAllowedRoots"] = normalized.at("sftpAllowedRoots");
   if (selected_identity_id.empty()) connection.erase("identityId");
   else connection["identityId"] = selected_identity_id;
   if (normalized.contains("hostCertificateAuthority")) {
@@ -9616,6 +9645,10 @@ void IpcRouter::configure_sidecar() {
   });
   sidecar_->set_notification_sink([this](const std::string& method,
                                          const nlohmann::json& params) {
+    if (method == "agent.stream" && params.is_object() &&
+        params.value("type", std::string()) == "agent.tool_result") {
+      approvals_.observe_untrusted_result(params.value("runId", std::string()));
+    }
     // A host action approval ticket is minted here, from the raw notification,
     // before the `hostInput` it fingerprints is stripped from the projected event.
     const bool waiting_approval =
@@ -10913,6 +10946,7 @@ nlohmann::json IpcRouter::host_tool_execute_command(
   const auto token = decision.token;
 
   // Effectful tools additionally need the one-shot host approval ticket.
+  std::int64_t execution_expires_at = 0;
   if (host_tool_is_effectful(tool_name, mcp_.get())) {
     HostApprovalLedger::ExecutionBinding binding;
     binding.approval_id = json_text_field(params, "approvalId");
@@ -10944,7 +10978,8 @@ nlohmann::json IpcRouter::host_tool_execute_command(
         binding.approval_id.empty()
             ? std::optional<HostApprovalLedger::TicketError>(
                   HostApprovalLedger::TicketError::Missing)
-            : approvals_.consume(binding, [] { return now_epoch_seconds(); });
+            : approvals_.consume(binding, [] { return now_epoch_seconds(); },
+                                 HostApprovalLedger::kConsumeWaitBudget, &execution_expires_at);
     if (ticket.has_value()) {
       const auto response = host_action_approval_failure(*ticket);
       finish_host_tool_call(*database_, params, token, response, host_tool_replay_mutex_,
@@ -10959,20 +10994,57 @@ nlohmann::json IpcRouter::host_tool_execute_command(
     runner = host_tool_runner_;
   }
   nlohmann::json response;
-  try {
-    const auto output = runner ? runner(tool_name, server_id, input, cancel)
-                               : default_host_tool_run(tool_name, server_id, input, cancel);
-    response = host_tool_success(output);
-  } catch (const UnsupportedHostToolError& error) {
-    response = host_tool_failed("unsupported_route", error.what(), false, std::nullopt);
-  } catch (const HostToolTransportError& error) {
-    if (cancel != nullptr && cancel->load()) {
-      response = host_tool_failed("cancelled", "Host operation cancelled", false, std::nullopt);
-    } else {
-      response = host_tool_failed("transport", error.what(), true, std::nullopt);
+  const auto execution_cancel = cancel ? cancel : std::make_shared<std::atomic<bool>>(false);
+  std::atomic_bool stop_expiry_watch{false};
+  std::thread expiry_watch;
+  struct ExpiryWatchJoiner {
+    std::atomic_bool& stop;
+    std::thread& watch;
+    ~ExpiryWatchJoiner() {
+      stop.store(true);
+      if (watch.joinable()) watch.join();
     }
+  } expiry_watch_joiner{stop_expiry_watch, expiry_watch};
+  if (execution_expires_at > 0) {
+    expiry_watch = std::thread([execution_cancel, execution_expires_at, &stop_expiry_watch] {
+      while (!stop_expiry_watch.load()) {
+        if (now_epoch_seconds() >= execution_expires_at) {
+          execution_cancel->store(true);
+          return;
+        }
+        std::this_thread::sleep_for(std::chrono::milliseconds(25));
+      }
+    });
+  }
+  const auto execution_revoked = [&] {
+    if (execution_expires_at > 0 && now_epoch_seconds() >= execution_expires_at) {
+      execution_cancel->store(true);
+    }
+    return execution_cancel->load();
+  };
+  const auto cancelled_response = [] {
+    return host_tool_failed("cancelled", "Host operation cancelled or approval expired; the remote outcome may be unknown",
+                            false, std::nullopt);
+  };
+  try {
+    if (execution_revoked()) {
+      response = cancelled_response();
+    } else {
+      const auto output = runner ? runner(tool_name, server_id, input, execution_cancel)
+                                 : default_host_tool_run(tool_name, server_id, input, execution_cancel);
+      // A runner may finish concurrently with cancellation, or return after its
+      // transport was closed. Neither case establishes an authorized success.
+      response = execution_revoked() ? cancelled_response() : host_tool_success(output);
+    }
+  } catch (const UnsupportedHostToolError& error) {
+    response = execution_revoked() ? cancelled_response()
+                                  : host_tool_failed("unsupported_route", error.what(), false, std::nullopt);
+  } catch (const HostToolTransportError& error) {
+    response = execution_revoked() ? cancelled_response()
+                                  : host_tool_failed("transport", error.what(), true, std::nullopt);
   } catch (const std::exception& error) {
-    response = host_tool_failed("execution_failed", error.what(), false, std::nullopt);
+    response = execution_revoked() ? cancelled_response()
+                                  : host_tool_failed("execution_failed", error.what(), false, std::nullopt);
   }
   finish_host_tool_call(*database_, params, token, response, host_tool_replay_mutex_,
                         host_tool_replays_);

@@ -1,7 +1,7 @@
 FROM debian:bookworm-slim
 
 RUN apt-get update \
-    && DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends openssh-server \
+    && DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends openssh-server git \
     && rm -rf /var/lib/apt/lists/* \
     && useradd --create-home --shell /bin/sh yukinal \
     && passwd -d yukinal \

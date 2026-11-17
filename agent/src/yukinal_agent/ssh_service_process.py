@@ -13,6 +13,8 @@ import tempfile
 from pathlib import Path
 from urllib.parse import urlsplit
 
+from yukinal_ssh import SshServiceClient
+
 
 class SshServiceProcessError(RuntimeError):
     """A configured local SSH service could not be started safely."""
@@ -44,9 +46,10 @@ class SshServiceProcess:
         self._token_env = ""
         self._token_value = ""
         self._secret_env: set[str] = set()
-        self._secret_values: dict[str, str] | None = None
+        self._secret_values: dict[str, bytearray] | None = None
         self._temporary_directory: tempfile.TemporaryDirectory[str] | None = None
         self._port = 0
+        self._execution_client: SshServiceClient | None = None
 
     @classmethod
     def from_environment(cls) -> SshServiceProcess | None:
@@ -97,6 +100,11 @@ class SshServiceProcess:
         for target in targets:
             if not isinstance(target, dict):
                 raise SshServiceProcessError("the SSH service target allowlist is invalid")
+            for identity_key in ("target_id", "host"):
+                identity = target.get(identity_key)
+                if isinstance(identity, str) and identity.startswith("-"):
+                    raise SshServiceProcessError("the SSH service target identity cannot begin with an option prefix")
+            _validate_target_security_options(target)
             try:
                 if "server_exec_denylist" in target:
                     _validate_server_exec_denylist(
@@ -186,6 +194,25 @@ class SshServiceProcess:
         cls, binary: Path, payload: object
     ) -> tuple[SshServiceProcess, str, str]:
         """Create an ephemeral one-target config from a trusted desktop Host RPC result."""
+        try:
+            return cls._consume_desktop_target(binary, payload)
+        except (UnicodeError, TypeError, ValueError):
+            raise SshServiceProcessError("the desktop host returned an invalid SSH target or credential") from None
+        finally:
+            # The RPC JSON decoder necessarily creates Python strings. Never
+            # retain that credential-bearing result in tool frames, including
+            # validation and launch failures. Owned secrets use zeroable buffers.
+            credentials = payload.get("credentials") if isinstance(payload, dict) else None
+            if isinstance(credentials, dict):
+                for value in credentials.values():
+                    if isinstance(value, bytearray):
+                        value[:] = b"\x00" * len(value)
+                credentials.clear()
+
+    @classmethod
+    def _consume_desktop_target(
+        cls, binary: Path, payload: object
+    ) -> tuple[SshServiceProcess, str, str]:
         if not binary.is_file():
             raise SshServiceProcessError("the packaged C++ SSH service executable is missing")
         if not isinstance(payload, dict):
@@ -197,7 +224,8 @@ class SshServiceProcess:
         required_target_fields = {"target_id", "host", "port", "username", "auth"}
         optional_target_fields = {
             "host_key_fingerprint", "host_certificate_authority", "proxy", "allow_server_exec",
-            "server_exec_denylist",
+            "server_exec_denylist", "sftp_allowed_roots", "truecolor", "confirmation_read_only",
+            "execution_expires_at_ms", "stream_audit_file",
         }
         trust_sources = {"host_key_fingerprint", "host_certificate_authority"} & set(target)
         if (
@@ -207,6 +235,7 @@ class SshServiceProcess:
             or ("allow_server_exec" in target and not isinstance(target["allow_server_exec"], bool))
         ):
             raise SshServiceProcessError("the desktop host returned an invalid SSH target")
+        _validate_target_security_options(target)
         try:
             if "server_exec_denylist" in payload:
                 _validate_server_exec_denylist(
@@ -229,8 +258,9 @@ class SshServiceProcess:
             or not re.fullmatch(r"srv_[a-z0-9]+", target_id)
             or not isinstance(host, str)
             or not host
+            or host.startswith("-")
             or len(host) > 253
-            or any(ord(character) <= 0x20 or ord(character) == 0x7f for character in host)
+            or any(ord(character) <= 0x20 or 0x7f <= ord(character) <= 0x9f for character in host)
             or isinstance(port, bool)
             or not isinstance(port, int)
             or not 1 <= port <= 65535
@@ -328,12 +358,21 @@ class SshServiceProcess:
         instance._token_env = "YUKINAL_SSH_API_TOKEN"
         instance._token_value = token
         instance._secret_env = set(credential_names)
-        instance._secret_values = dict(credentials)
+        instance._secret_values = {name: bytearray(value, "utf-8") for name, value in credentials.items()}
         instance._port = listen_port
         instance._temporary_directory = temporary_directory
         return instance, token, f"http://127.0.0.1:{listen_port}"
 
     async def start(self) -> None:
+        try:
+            await self._start()
+        finally:
+            self._clear_secret_values()
+
+    def bind_client(self, client: SshServiceClient) -> None:
+        self._execution_client = client
+
+    async def _start(self) -> None:
         if self._process is not None:
             if self._process.returncode is None:
                 return
@@ -352,11 +391,11 @@ class SshServiceProcess:
         }
         env[self._token_env] = self._token_value
         for name in self._secret_env:
-            value = (
-                self._secret_values.get(name)
-                if self._secret_values is not None
-                else os.environ.get(name)
-            )
+            if self._secret_values is not None:
+                secret = self._secret_values.get(name)
+                value = secret.decode("utf-8") if secret is not None else None
+            else:
+                value = os.environ.get(name)
             if not value:
                 raise SshServiceProcessError(f"the SSH service credential environment variable {name} is not set")
             env[name] = value
@@ -371,12 +410,19 @@ class SshServiceProcess:
                 str(os.getpid()),
                 stdin=asyncio.subprocess.DEVNULL,
                 stdout=asyncio.subprocess.DEVNULL,
-                stderr=None,
+                # Native startup diagnostics are deliberately not inherited:
+                # authentication libraries may include decrypted input in errors.
+                stderr=asyncio.subprocess.DEVNULL,
                 env=env,
                 creationflags=creationflags,
             )
         except OSError:
             raise SshServiceProcessError("the C++ SSH service could not be launched") from None
+        finally:
+            for name in self._secret_env | {self._token_env}:
+                env.pop(name, None)
+            value = None
+            self._clear_secret_values()
 
         deadline = asyncio.get_running_loop().time() + 8.0
         while asyncio.get_running_loop().time() < deadline:
@@ -402,6 +448,9 @@ class SshServiceProcess:
     async def stop(self) -> None:
         process, self._process = self._process, None
         try:
+            client, self._execution_client = self._execution_client, None
+            if client is not None:
+                await asyncio.to_thread(client.cancel_pending)
             if process is None:
                 return
             if process.returncode is not None:
@@ -419,13 +468,52 @@ class SshServiceProcess:
             except ProcessLookupError:
                 await process.wait()
         finally:
-            if self._secret_values is not None:
-                self._secret_values.clear()
-                self._secret_values = None
+            self._clear_secret_values()
             self._token_value = ""
             if self._temporary_directory is not None:
                 self._temporary_directory.cleanup()
                 self._temporary_directory = None
+
+    def _clear_secret_values(self) -> None:
+        if self._secret_values is not None:
+            for secret in self._secret_values.values():
+                secret[:] = b"\x00" * len(secret)
+            self._secret_values.clear()
+            self._secret_values = None
+
+
+def _validate_target_security_options(target: dict[str, object]) -> None:
+    for name in ("truecolor", "confirmation_read_only"):
+        if name in target and not isinstance(target[name], bool):
+            raise SshServiceProcessError("the SSH service target security options are invalid")
+    deadline = target.get("execution_expires_at_ms")
+    if deadline is not None and (isinstance(deadline, bool) or not isinstance(deadline, int) or deadline < 1):
+        raise SshServiceProcessError("the SSH service execution deadline is invalid")
+    audit_path = target.get("stream_audit_file")
+    if audit_path is not None and (
+        not isinstance(audit_path, str)
+        or not Path(audit_path).is_absolute()
+        or len(audit_path) > 4096
+        or any(ord(char) < 0x20 or 0x7F <= ord(char) <= 0x9F for char in audit_path)
+    ):
+        raise SshServiceProcessError("the SSH stream audit path must be an absolute local path")
+    roots = target.get("sftp_allowed_roots", ["."])
+    if (
+        not isinstance(roots, list)
+        or not 1 <= len(roots) <= 32
+        or any(
+            not isinstance(root, str)
+            or not root
+            or len(root.encode("utf-8")) > 4096
+            or (root != "." and not root.startswith("/"))
+            # Configured roots may use harmless redundant separators/dots;
+            # the remote SFTP realpath is authoritative before each operation.
+            or ".." in root.split("/")
+            or any(ord(char) < 0x20 or 0x7F <= ord(char) <= 0x9F for char in root)
+            for root in roots
+        )
+    ):
+        raise SshServiceProcessError("the SSH service SFTP allowed roots are invalid")
 
 
 def _valid_env_name(value: object) -> bool:

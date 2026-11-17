@@ -7,6 +7,8 @@ import json
 import re
 import secrets
 import socket
+import threading
+import time
 import urllib.error
 import urllib.parse
 import urllib.request
@@ -41,6 +43,7 @@ class SshOperationResult:
     stderr: str
     duration_ms: int
     output_truncated: bool
+    resolved_path: str | None = None
 
 
 @dataclass(frozen=True)
@@ -103,7 +106,10 @@ def _parse_system_snapshot_output(output: str, nonce: str) -> dict[str, tuple[in
 class SshServiceClient:
     """Calls the loopback-only service using structured, allow-listed operations."""
 
-    def __init__(self, token: str, base_url: str = "http://127.0.0.1:8765") -> None:
+    def __init__(
+        self, token: str, base_url: str = "http://127.0.0.1:8765", *,
+        execution_deadline_ms: int | None = None,
+    ) -> None:
         if not isinstance(token, str) or not _TOKEN.fullmatch(token):
             raise ValueError("token must be 32 to 256 URL-safe characters")
         parsed = urllib.parse.urlsplit(base_url)
@@ -122,6 +128,16 @@ class SshServiceClient:
         self._base_url = f"http://127.0.0.1:{parsed.port}"
         self._token = token
         self._opener = urllib.request.build_opener(_NoRedirect())
+        if execution_deadline_ms is not None and (
+            isinstance(execution_deadline_ms, bool)
+            or not isinstance(execution_deadline_ms, int)
+            or execution_deadline_ms < 1
+        ):
+            raise ValueError("execution_deadline_ms must be a positive Unix millisecond timestamp")
+        self._execution_deadline_ms = execution_deadline_ms
+        self._execution_lock = threading.Lock()
+        self._active_executions: set[str] = set()
+        self._cancelled = False
 
     def health(self) -> bool:
         response = self._request("GET", "/health", None, timeout=3, authorized=False)
@@ -160,12 +176,15 @@ class SshServiceClient:
         self, target_id: str, path: str, timeout_seconds: int = 10
     ) -> list[dict[str, Any]]:
         """List one remote directory level without following symlinks."""
-        self._validate_sftp_path(path)
-        if not path.startswith("/") or "\r" in path or "\n" in path:
-            raise ValueError("path must be an absolute SFTP path without line breaks")
+        # A single dot discovers the configured home root. The native service
+        # resolves it before root checks; every other operation stays absolute.
+        if path != ".":
+            self._validate_sftp_path(path)
         result = self._execute_operation(
             target_id, "sftp_list", {"path": path}, timeout_seconds
         )
+        if path == "." and result.resolved_path is None:
+            raise SshServiceTransportError("invalid_response", "SSH service omitted the canonical directory path")
         try:
             entries = json.loads(result.stdout)
         except json.JSONDecodeError:
@@ -180,10 +199,14 @@ class SshServiceClient:
         for entry in entries:
             if (
                 not isinstance(entry, dict)
-                or set(entry) != {"name", "file_type", "size"}
+                or not {"name", "file_type", "size"}.issubset(entry)
+                or not set(entry).issubset({"name", "file_type", "size", "path"})
                 or not isinstance(entry["name"], str)
                 or not entry["name"]
                 or len(entry["name"]) > 4096
+                or entry["name"] in {".", ".."}
+                or "/" in entry["name"]
+                or any(ord(char) < 0x20 or 0x7F <= ord(char) <= 0x9F for char in entry["name"])
                 or entry["file_type"] not in {"file", "directory", "symlink", "other"}
                 or isinstance(entry["size"], bool)
                 or not isinstance(entry["size"], int)
@@ -192,6 +215,12 @@ class SshServiceClient:
                 raise SshServiceTransportError(
                     "invalid_response", "SSH service returned an invalid directory entry"
                 )
+            if "path" in entry:
+                expected_path = (result.resolved_path or path).rstrip("/") + "/" + entry["name"]
+                if entry["path"] != expected_path:
+                    raise SshServiceTransportError(
+                        "invalid_response", "SSH service returned an invalid directory entry path"
+                    )
             listing.append({"name": entry["name"], "type": entry["file_type"], "size": entry["size"]})
         return listing
 
@@ -392,17 +421,14 @@ class SshServiceClient:
             parameters["workdir"] = workdir
         if env is not None:
             parameters["env"] = env
-        body = self._request(
-            "POST",
-            "/v1/ssh/exec",
+        body = self._execute_request(
             {
                 "target_id": target_id,
                 "operation": "server_exec",
                 "parameters": parameters,
                 "timeout_seconds": timeout_seconds,
             },
-            timeout=timeout_seconds + 5,
-            authorized=True,
+            timeout_seconds=timeout_seconds,
         )
         expected = {
             "status", "target_id", "operation", "exit_code", "stdout", "stderr",
@@ -700,11 +726,14 @@ class SshServiceClient:
     def _validate_sftp_path(path: str) -> None:
         if (
             not isinstance(path, str)
-            or not path
+            or not path.startswith("/")
             or len(path.encode("utf-8")) > 4096
-            or "\x00" in path
+            or "//" in path
+            or (path != "/" and path.endswith("/"))
+            or any(part in {".", ".."} for part in path.split("/"))
+            or any(ord(character) < 0x20 or 0x7F <= ord(character) <= 0x9F for character in path)
         ):
-            raise ValueError("path must be a non-empty SFTP path of at most 4096 bytes")
+            raise ValueError("path must be a canonical absolute SFTP path without traversal or controls")
 
     @classmethod
     def _validate_sftp_publication_path(cls, path: str) -> None:
@@ -745,12 +774,18 @@ class SshServiceClient:
             "parameters": parameters,
             "timeout_seconds": timeout_seconds,
         }
-        body = self._request("POST", "/v1/ssh/exec", payload, timeout=timeout_seconds + 5, authorized=True)
+        body = self._execute_request(payload, timeout_seconds=timeout_seconds)
         if not isinstance(body, dict) or body.get("status") != "succeeded":
             raise SshServiceTransportError("invalid_response", "SSH service returned an invalid operation result")
         expected = {"status", "target_id", "operation", "exit_code", "stdout", "stderr", "duration_ms", "output_truncated", "error"}
-        if set(body) != expected:
+        optional = {"resolved_path"} if operation == "sftp_list" else set()
+        if not expected.issubset(body) or not set(body).issubset(expected | optional):
             raise SshServiceTransportError("invalid_response", "SSH service returned an invalid operation result")
+        if "resolved_path" in body:
+            try:
+                self._validate_sftp_path(body["resolved_path"])
+            except ValueError:
+                raise SshServiceTransportError("invalid_response", "SSH service returned an invalid resolved path") from None
         if (
             body.get("target_id") != target_id
             or body.get("operation") != operation
@@ -773,7 +808,52 @@ class SshServiceClient:
             stderr=body["stderr"],
             duration_ms=body["duration_ms"],
             output_truncated=body["output_truncated"],
+            resolved_path=body.get("resolved_path"),
         )
+
+    def _execute_request(self, payload: dict[str, Any], *, timeout_seconds: int) -> dict[str, Any]:
+        """Bind every transport operation to one expiring, revocable execution ID.
+
+        Cancellation is sticky for this client so a queued worker cannot begin an
+        operation after its owning asyncio task has already been cancelled.
+        """
+        now_ms = time.time_ns() // 1_000_000
+        expires_at_ms = now_ms + timeout_seconds * 1000
+        if self._execution_deadline_ms is not None:
+            expires_at_ms = min(expires_at_ms, self._execution_deadline_ms)
+        execution_id = secrets.token_hex(24)
+        with self._execution_lock:
+            if self._cancelled or expires_at_ms <= now_ms:
+                raise SshServiceError("execution_expired", "SSH execution authorization has expired or was cancelled")
+            self._active_executions.add(execution_id)
+        try:
+            return self._request(
+                "POST", "/v1/ssh/exec",
+                {**payload, "execution": {"id": execution_id, "expires_at_ms": expires_at_ms}},
+                timeout=timeout_seconds + 5, authorized=True,
+            )
+        finally:
+            # Also revoke on transport errors: the service may have accepted the
+            # request even though its response did not reach this process.
+            self._cancel_execution(execution_id)
+            with self._execution_lock:
+                self._active_executions.discard(execution_id)
+
+    def _cancel_execution(self, execution_id: str) -> None:
+        try:
+            self._request("POST", "/v1/ssh/cancel", {"execution_id": execution_id}, timeout=2, authorized=True)
+        except Exception:
+            # Expiry remains enforced in the native service. The owner also
+            # terminates its one-shot child if cancellation cannot be delivered.
+            pass
+
+    def cancel_pending(self) -> None:
+        """Revoke current and future calls before closing the owning SSH child."""
+        with self._execution_lock:
+            self._cancelled = True
+            pending = tuple(self._active_executions)
+        for execution_id in pending:
+            self._cancel_execution(execution_id)
 
     def _request(self, method: str, path: str, payload: dict[str, Any] | None, *,
                  timeout: int, authorized: bool) -> dict[str, Any]:
@@ -793,7 +873,10 @@ class SshServiceClient:
                     raise SshServiceTransportError("response_too_large", "SSH service response exceeded the size limit")
                 return self._decode_json(raw)
         except urllib.error.HTTPError as error:
-            raw = error.read(_MAX_BODY_BYTES + 1)
+            try:
+                raw = error.read(_MAX_BODY_BYTES + 1)
+            finally:
+                error.close()
             if len(raw) > _MAX_BODY_BYTES:
                 raise SshServiceTransportError("response_too_large", "SSH service response exceeded the size limit",
                                                http_status=error.code) from None
@@ -803,8 +886,18 @@ class SshServiceClient:
                 raise SshServiceTransportError("invalid_error_response", "SSH service returned an invalid error response",
                                                http_status=error.code) from None
             error_info = body.get("error") if isinstance(body, dict) else None
-            if isinstance(error_info, dict) and isinstance(error_info.get("code"), str) and isinstance(error_info.get("message"), str):
-                raise SshServiceError(error_info["code"], error_info["message"], http_status=error.code) from None
+            if (
+                isinstance(error_info, dict)
+                and isinstance(error_info.get("code"), str)
+                and re.fullmatch(r"[a-z][a-z0-9_]{0,63}", error_info["code"])
+                and isinstance(error_info.get("message"), str)
+            ):
+                # A native/library error may include a supplied credential or
+                # remote text. Preserve its machine code, never its raw message.
+                raise SshServiceError(
+                    error_info["code"], "The SSH service rejected the requested operation",
+                    http_status=error.code,
+                ) from None
             raise SshServiceTransportError("invalid_error_response", "SSH service returned an invalid error response",
                                            http_status=error.code) from None
         except (urllib.error.URLError, TimeoutError, socket.timeout, OSError, http.client.HTTPException) as error:

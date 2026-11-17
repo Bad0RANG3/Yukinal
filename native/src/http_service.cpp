@@ -1,4 +1,5 @@
 #include "yukinal/http_service.hpp"
+#include "yukinal/ssh_security.hpp"
 
 #include <algorithm>
 #include <atomic>
@@ -10,6 +11,7 @@
 #include <mutex>
 #include <thread>
 #include <unordered_set>
+#include <unordered_map>
 #include <utility>
 
 #ifdef _WIN32
@@ -94,6 +96,8 @@ int error_status(const ExecResult& result) { return error_status_for(result); }
 }  // namespace
 
 int error_status_for(const ExecResult& result) {
+  if (result.error_code == "execution_cancelled" || result.error_code == "execution_expired") return 403;
+  if (result.error_code == "audit_unavailable") return 503;
   if (result.error_code == "denied_by_policy") return 403;
   if (result.error_code == "already_exists") return 409;
   if (result.error_code == "timeout") return 504;
@@ -121,8 +125,37 @@ bool serve(const ServiceConfig& config, const std::string& api_token, OperationR
 
   std::mutex consumed_server_exec_mutex;
   std::unordered_set<std::string> consumed_server_exec_targets;
+  std::mutex leases_mutex;
+  // Retain tombstones until process exit. A cancelled/expired id can never be
+  // replayed, including cancel arriving before exec. Bound memory and fail closed.
+  std::unordered_map<std::string, std::shared_ptr<ExecutionLease>> leases;
+  std::atomic_int active_executions{0};
+  const auto valid_execution_id = [](const std::string& id) {
+    return id.size() >= 16 && id.size() <= 128 && std::all_of(id.begin(), id.end(), [](unsigned char ch) {
+      return (ch >= 'a' && ch <= 'z') || (ch >= 'A' && ch <= 'Z') ||
+             (ch >= '0' && ch <= '9') || ch == '-' || ch == '_';
+    });
+  };
+  server.Post("/v1/ssh/cancel", [&](const httplib::Request& request, httplib::Response& response) {
+    if (!authorized(request, api_token)) { set_api_error(response, 401, "unauthorized", "A valid local service token is required"); return; }
+    const auto body = Json::parse(request.body, nullptr, false);
+    if (!body.is_object() || body.size() != 1 || !body.contains("execution_id") ||
+        !body["execution_id"].is_string() || !valid_execution_id(body["execution_id"].get<std::string>())) {
+      set_api_error(response, 422, "invalid_parameters", "A valid execution_id is required"); return;
+    }
+    std::lock_guard lock(leases_mutex);
+    const std::string id = body["execution_id"].get<std::string>();
+    if (!leases.contains(id) && leases.size() >= 65536) {
+      set_api_error(response, 503, "execution_capacity", "Execution authorization capacity exhausted"); return;
+    }
+    auto& lease = leases[id];
+    if (!lease) lease = std::make_shared<ExecutionLease>();
+    lease->cancelled.store(true);
+    set_json(response, 200, {{"status", "cancelled"}});
+  });
   server.Post("/v1/ssh/exec", [&config, &api_token, &consumed_server_exec_mutex,
-                               &consumed_server_exec_targets, runner = std::move(runner)](
+                               &consumed_server_exec_targets, &leases_mutex, &leases,
+                               &valid_execution_id, &active_executions, runner = std::move(runner)](
                                   const httplib::Request& request, httplib::Response& response) {
     if (!authorized(request, api_token)) {
       set_api_error(response, 401, "unauthorized", "A valid local service token is required");
@@ -153,6 +186,36 @@ bool serve(const ServiceConfig& config, const std::string& api_token, OperationR
       set_api_error(response, 404, "unknown_target", "target_id is not present in the configured allowlist");
       return;
     }
+    std::shared_ptr<ExecutionLease> lease;
+    if (!body.contains("execution")) {
+      set_api_error(response, 403, "execution_required", "Every SSH operation requires a single-use execution lease"); return;
+    }
+    if (body.contains("execution")) {
+      const auto& execution = body["execution"];
+      if (!execution.is_object() || execution.size() != 2 || !execution.contains("id") ||
+          !execution["id"].is_string() || !valid_execution_id(execution["id"].get<std::string>()) ||
+          !execution.contains("expires_at_ms") || !execution["expires_at_ms"].is_number_integer()) {
+        set_api_error(response, 422, "invalid_parameters", "Execution requires a unique id and expiry"); return;
+      }
+      const auto milliseconds = execution["expires_at_ms"].get<std::int64_t>();
+      lease = std::make_shared<ExecutionLease>();
+      lease->id = execution["id"].get<std::string>();
+      {
+        std::lock_guard lock(leases_mutex);
+        if (leases.size() >= 65536 || !leases.emplace(lease->id, lease).second) {
+          set_api_error(response, 403, "execution_cancelled", "Execution authorization is cancelled or already consumed"); return;
+        }
+      }
+      const auto now = std::chrono::system_clock::now();
+      const auto now_ms = std::chrono::duration_cast<std::chrono::milliseconds>(now.time_since_epoch()).count();
+      if (milliseconds <= now_ms || milliseconds > now_ms + 660000) {
+        lease->cancelled.store(true);
+        set_api_error(response, 403, "execution_expired", "Execution authorization is expired or exceeds its maximum lifetime"); return;
+      }
+      const auto expiry = std::chrono::system_clock::time_point(std::chrono::milliseconds(milliseconds));
+      lease->expires = expiry;
+    }
+    ScopedExecutionLease execution_scope(lease);
     if (parsed.operation == "server_exec" && target->second.allow_server_exec) {
       bool first_use = false;
       {
@@ -167,6 +230,13 @@ bool serve(const ServiceConfig& config, const std::string& api_token, OperationR
     }
 
     ExecResult result;
+    // Reserve one HTTP worker for revocation even when remote servers hang.
+    const int concurrent = active_executions.fetch_add(1);
+    struct ActiveGuard { std::atomic_int& count; ~ActiveGuard() { count.fetch_sub(1); } } active_guard{active_executions};
+    if (concurrent >= 3) {
+      if (lease) lease->cancelled.store(true);
+      set_api_error(response, 503, "execution_capacity", "SSH execution capacity exhausted"); return;
+    }
     try {
       result = runner(target->second, parsed);
     } catch (const std::exception&) {
@@ -175,6 +245,14 @@ bool serve(const ServiceConfig& config, const std::string& api_token, OperationR
     } catch (...) {
       result.error_code = "internal_error";
       result.error_message = "The SSH operation failed unexpectedly";
+    }
+    if (lease) {
+      if (!lease->valid()) {
+        result.completed = false;
+        result.error_code = "execution_cancelled";
+        result.error_message = "Execution authorization expired or was cancelled; the channel has been closed";
+      }
+      lease->cancelled.store(true);
     }
     Json output{{"status", result.completed ? "succeeded" : "failed"},
                 {"target_id", parsed.target_id},
@@ -188,6 +266,7 @@ bool serve(const ServiceConfig& config, const std::string& api_token, OperationR
       output["stdout_truncated"] = result.stdout_truncated;
       output["stderr_truncated"] = result.stderr_truncated;
     }
+    if (!result.resolved_path.empty()) output["resolved_path"] = result.resolved_path;
     if (result.completed) {
       output["error"] = nullptr;
       set_json(response, 200, output);

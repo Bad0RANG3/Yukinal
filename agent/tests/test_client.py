@@ -3,6 +3,7 @@ from __future__ import annotations
 import base64
 import json
 import threading
+import time
 import unittest
 from http.server import BaseHTTPRequestHandler, HTTPServer
 from unittest.mock import patch
@@ -19,9 +20,17 @@ class _Handler(BaseHTTPRequestHandler):
 
     def do_POST(self) -> None:
         length = int(self.headers.get("Content-Length", "0"))
+        body = json.loads(self.rfile.read(length))
+        if self.path == "/v1/ssh/cancel":
+            self.server.cancel_requests.append(body)
+            self._respond(200, {"status": "cancelled"})
+            return
+        # Assert the independent execution envelope in focused lifecycle tests;
+        # operation-shape tests below continue to compare their exact parameters.
+        self.server.last_execution = body.pop("execution", None)
         self.server.last_request = {
             "authorization": self.headers.get("Authorization"),
-            "body": json.loads(self.rfile.read(length)),
+            "body": body,
         }
         self._respond(self.server.status_code, self.server.response_body)
 
@@ -53,6 +62,8 @@ class ClientTests(unittest.TestCase):
             "error": None,
         }
         self.server.last_request = None
+        self.server.last_execution = None
+        self.server.cancel_requests = []
         self.thread = threading.Thread(target=self.server.serve_forever, daemon=True)
         self.thread.start()
         self.client = SshServiceClient(TOKEN, f"http://127.0.0.1:{self.server.server_port}")
@@ -79,6 +90,119 @@ class ClientTests(unittest.TestCase):
                 },
             },
         )
+
+    def test_execution_envelope_has_one_shot_id_deadline_and_revocation(self) -> None:
+        now_ms = time.time_ns() // 1_000_000
+        self.client.service_status("staging-web-01", "nginx", 8)
+        first = self.server.last_execution
+        self.assertEqual(set(first), {"id", "expires_at_ms"})
+        self.assertRegex(first["id"], r"^[0-9a-f]{48}$")
+        self.assertGreater(first["expires_at_ms"], now_ms)
+        self.assertLessEqual(first["expires_at_ms"], time.time_ns() // 1_000_000 + 8000)
+        self.assertEqual(self.server.cancel_requests, [{"execution_id": first["id"]}])
+        self.client.service_status("staging-web-01", "nginx", 8)
+        self.assertNotEqual(self.server.last_execution["id"], first["id"])
+
+    def test_approval_deadline_limits_execution_and_expired_or_cancelled_calls_never_send(self) -> None:
+        deadline = time.time_ns() // 1_000_000 + 2000
+        client = SshServiceClient(TOKEN, self.client._base_url, execution_deadline_ms=deadline)
+        client.service_status("staging-web-01", "nginx", 8)
+        self.assertEqual(self.server.last_execution["expires_at_ms"], deadline)
+        self.server.last_request = None
+        client.cancel_pending()
+        with self.assertRaises(SshServiceError) as cancelled:
+            client.service_status("staging-web-01", "nginx", 8)
+        self.assertEqual(cancelled.exception.code, "execution_expired")
+        expired = SshServiceClient(TOKEN, self.client._base_url, execution_deadline_ms=1)
+        with self.assertRaises(SshServiceError):
+            expired.service_status("staging-web-01", "nginx", 8)
+        self.assertIsNone(self.server.last_request)
+
+    def test_cancellation_revokes_a_request_that_has_already_entered_the_worker(self) -> None:
+        entered = threading.Event()
+        release = threading.Event()
+        requests: list[tuple[str, dict[str, object]]] = []
+
+        def request(method, path, payload, **kwargs):
+            requests.append((path, payload))
+            if path == "/v1/ssh/exec":
+                entered.set()
+                self.assertTrue(release.wait(timeout=3))
+            return dict(self.server.response_body)
+
+        with patch.object(self.client, "_request", side_effect=request):
+            worker = threading.Thread(target=self.client.service_status, args=("staging-web-01", "nginx"))
+            worker.start()
+            self.assertTrue(entered.wait(timeout=3))
+            self.client.cancel_pending()
+            self.assertEqual(requests[1], ("/v1/ssh/cancel", {"execution_id": requests[0][1]["execution"]["id"]}))
+            release.set()
+            worker.join(timeout=3)
+            self.assertFalse(worker.is_alive())
+
+    def test_all_sftp_operations_reject_traversal_controls_and_relative_paths_before_transport(self) -> None:
+        operations = (
+            lambda path: self.client.sftp_list("staging-web-01", path),
+            lambda path: self.client.sftp_read("staging-web-01", path, 100),
+            lambda path: self.client.sftp_stat("staging-web-01", path),
+            lambda path: self.client.sftp_write("staging-web-01", path, b"safe"),
+            lambda path: self.client.sftp_create_exclusive("staging-web-01", path, b"safe"),
+            lambda path: self.client.sftp_remove_file("staging-web-01", path),
+            lambda path: self.client.sftp_link_count("staging-web-01", path),
+        )
+        for path in ("../etc/passwd", "/srv/../etc/passwd", "/srv/./secret", "/srv//secret", "/srv/a\nwhoami", "/srv/\x1b[2J", "/srv/\x85file"):
+            for invoke in operations:
+                with self.subTest(path=path), self.assertRaises(ValueError):
+                    invoke(path)
+        self.assertIsNone(self.server.last_request)
+
+    def test_option_hosts_and_shell_metacharacters_in_identifiers_are_rejected(self) -> None:
+        for target in ("-oProxyCommand=id", "-oProxyJump=evil", "-w", "-alias"):
+            with self.subTest(target=target), self.assertRaises(ValueError):
+                self.client.service_status(target, "nginx")
+        for service in ("nginx;id", "nginx`id`", "nginx\nuseradd hacker", "nginx#ignored"):
+            with self.subTest(service=service), self.assertRaises(ValueError):
+                self.client.service_status("staging-web-01", service)
+        self.assertIsNone(self.server.last_request)
+
+    def test_native_error_text_cannot_disclose_credentials_into_agent_logs(self) -> None:
+        self.server.status_code = 500
+        self.server.response_body = {"error": {"code": "authentication_failed", "message": "password=do-not-log-secret\x1b[2J"}}
+        with self.assertRaises(SshServiceError) as failed:
+            self.client.service_status("staging-web-01", "nginx")
+        self.assertEqual(failed.exception.code, "authentication_failed")
+        self.assertNotIn("do-not-log-secret", str(failed.exception))
+        self.assertNotIn("\x1b", str(failed.exception))
+
+    def test_list_accepts_the_canonical_path_returned_by_the_confined_native_service(self) -> None:
+        entries = [{"name": "config.txt", "path": "/srv/app/config.txt", "file_type": "file", "size": 12}]
+        self.server.response_body.update(operation="sftp_list", stdout=json.dumps(entries), resolved_path="/srv/app")
+        self.assertEqual(self.client.sftp_list("staging-web-01", "/srv/app"), [{"name": "config.txt", "type": "file", "size": 12}])
+        entries[0]["path"] = "/etc/config.txt"
+        self.server.response_body["stdout"] = json.dumps(entries)
+        with self.assertRaises(SshServiceError) as wrong_parent:
+            self.client.sftp_list("staging-web-01", "/srv/app")
+        self.assertEqual(wrong_parent.exception.code, "invalid_response")
+        self.server.response_body["resolved_path"] = "/srv/../etc"
+        with self.assertRaises(SshServiceError) as failed:
+            self.client.sftp_list("staging-web-01", "/srv/app")
+        self.assertEqual(failed.exception.code, "invalid_response")
+
+    def test_only_directory_listing_accepts_home_discovery_and_requires_canonical_response(self) -> None:
+        self.server.response_body.update(operation="sftp_list", stdout="[]", resolved_path="/home/operator")
+        self.assertEqual(self.client.sftp_list("staging-web-01", "."), [])
+        self.assertEqual(self.server.last_request["body"]["parameters"], {"path": "."})
+        for invoke in (
+            lambda: self.client.sftp_read("staging-web-01", ".", 100),
+            lambda: self.client.sftp_stat("staging-web-01", "."),
+            lambda: self.client.sftp_write("staging-web-01", ".", b"data"),
+        ):
+            with self.assertRaises(ValueError):
+                invoke()
+        self.server.response_body.pop("resolved_path")
+        with self.assertRaises(SshServiceError) as missing:
+            self.client.sftp_list("staging-web-01", ".")
+        self.assertEqual(missing.exception.code, "invalid_response")
 
     def test_nonzero_remote_exit_code_is_a_completed_status_query(self) -> None:
         self.server.response_body["exit_code"] = 3

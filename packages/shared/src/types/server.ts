@@ -47,6 +47,10 @@ export interface ServerConnection {
   host: string;
   port: number;
   username: string;
+  /** Advertise COLORTERM=truecolor to the remote PTY (default true). */
+  truecolor?: boolean;
+  /** Canonical SFTP sandbox roots; defaults to the remote user's home ("."). */
+  sftpAllowedRoots?: string[];
   /** Reference to `identities` in SQLite. Secret material stays in the OS store. */
   identityId?: string;
   /** Optional explicit OpenSSH host-certificate trust root. */
@@ -85,6 +89,8 @@ export interface AddServerInput {
   host: string;
   port?: number;
   username: string;
+  truecolor?: boolean;
+  sftpAllowedRoots?: string[];
   environment: Environment;
   groupId?: string;
   hostCertificateAuthority?: HostCertificateAuthority;
@@ -117,6 +123,8 @@ export interface UpdateServerInput {
   host: string;
   port?: number;
   username: string;
+  truecolor?: boolean;
+  sftpAllowedRoots?: string[];
   environment: Environment;
   groupId?: string;
   hostCertificateAuthority?: HostCertificateAuthority;

@@ -3,6 +3,8 @@ from __future__ import annotations
 import argparse
 import asyncio
 import base64
+import concurrent.futures
+import copy
 import datetime
 import hashlib
 import http.server
@@ -23,6 +25,7 @@ import sys
 import tempfile
 import threading
 import time
+import uuid
 from pathlib import Path
 from typing import Any
 
@@ -68,12 +71,11 @@ class ParamikoMockSshServiceClient(SshServiceClient):
                     method, path, payload, timeout=timeout, authorized=authorized
                 )
             except SshServiceError as error:
-                transient_mock_kex_failure = (
-                    error.code == "ssh_handshake_failed"
-                    and "Unable to exchange encryption keys" in str(error)
-                )
+                transient_mock_kex_failure = error.code == "ssh_handshake_failed"
                 if not transient_mock_kex_failure or attempt == 2:
                     raise
+                if payload is not None and isinstance(payload.get("execution"), dict):
+                    payload = {**payload, "execution": {**payload["execution"], "id": uuid.uuid4().hex}}
                 print(
                     "Transient Paramiko mock key-exchange failure; "
                     f"retrying before authentication ({attempt + 1}/2).",
@@ -88,9 +90,12 @@ BAD_PASSWORD = "intentionally-wrong-local-password"
 EXEC_COMMANDS: list[bytes] = []
 AUTH_EVENTS: list[str] = []
 TERMINAL_DIMENSIONS: list[tuple[int, int]] = []
+TERMINAL_ENVIRONMENTS: list[tuple[bytes, bytes]] = []
+SFTP_OPEN_PATHS: list[str] = []
 PROXY_CONNECT_TARGETS: list[str] = []
 HTTPS_PROXY_CONNECT_TARGETS: list[str] = []
 SOCKS5_CONNECT_TARGETS: list[tuple[str, int, int]] = []
+KRL_DOWNLOAD_PORTS: list[int] = []
 
 
 def unused_port() -> int:
@@ -172,6 +177,10 @@ class ExecServer(paramiko.ServerInterface):
         self.terminal_ready.set()
         return True
 
+    def check_channel_env_request(self, channel: paramiko.Channel, name: bytes, value: bytes) -> bool:
+        TERMINAL_ENVIRONMENTS.append((name, value))
+        return name == b"COLORTERM" and value == b"truecolor"
+
     def check_channel_window_change_request(
         self,
         channel: paramiko.Channel,
@@ -197,6 +206,13 @@ class StaticSftpInterface(paramiko.SFTPServerInterface):
     }
     _directories: set[str] = {"/"}
     _files_lock = threading.Lock()
+
+    def canonicalize(self, path: str) -> str:
+        if path == "/configs/escape":
+            return "/settings.toml"
+        if path in {".", "/."}:
+            return "/"
+        return path
 
     def list_folder(self, path: str) -> list[paramiko.SFTPAttributes]:
         directory = paramiko.SFTPAttributes()
@@ -235,6 +251,7 @@ class StaticSftpInterface(paramiko.SFTPServerInterface):
         return self.stat(path)
 
     def open(self, path: str, flags: int, attr: paramiko.SFTPAttributes) -> paramiko.SFTPHandle:
+        SFTP_OPEN_PATHS.append(path)
         with self._files_lock:
             exists = path in self._files
             if path not in {"/settings.toml", "/large.bin", "/write.bin", "/backup.bin", "/backup-published.bin", "/transfer-stream.bin", "/stream-failure.bin"}:
@@ -386,7 +403,7 @@ def start_ssh_mock(
                 return
             if server.terminal_ready.is_set():
                 channel.settimeout(0.2)
-                channel.sendall(b"terminal-ready\n")
+                channel.sendall(b"\x1b[2J\x1b]8;;https://evil.example\x07terminal-ready\x1b]8;;\x07\n")
                 while not channel.closed:
                     try:
                         data = channel.recv(4096)
@@ -504,10 +521,10 @@ def start_ssh_mock(
             ):
                 channel.sendall(b"Installed: fastfetch\n")
                 channel.send_exit_status(0)
-            elif command == b"systemctl is-active -- nginx.service":
+            elif command == b"systemctl is-active -- 'nginx.service'":
                 channel.sendall(b"active\n")
                 channel.send_exit_status(0)
-            elif command == b"cd '/srv/app' && env LANG='C' /bin/sh -c 'printf server-exec-ok'":
+            elif command == b"cd '/srv/app' && env -- 'LANG=C' /bin/sh -c 'printf server-exec-ok'":
                 channel.sendall(b"authorized-output\n")
                 channel.send_exit_status(0)
             elif command == b"/bin/sh -c 'server-exec-large-output'":
@@ -527,20 +544,20 @@ def start_ssh_mock(
                         b"__YUKINAL_SOURCE__=journalctl\n"
                     )
                     channel.send_exit_status(0)
-            elif command == b"systemctl is-active -- slow.service":
+            elif command == b"systemctl is-active -- 'slow.service'":
                 time.sleep(4)
                 channel.sendall(b"active\n")
                 channel.send_exit_status(0)
-            elif command == b"systemctl is-active -- large.service":
+            elif command == b"systemctl is-active -- 'large.service'":
                 channel.sendall(b"A" * 70000)
                 channel.send_exit_status(0)
-            elif command == b"systemctl is-active -- no-exit-status.service":
+            elif command == b"systemctl is-active -- 'no-exit-status.service'":
                 # Deliberately no send_exit_status(): the peer closes the channel
                 # without the RFC 4254 "exit-status" request. libssh2 seeds the
                 # status field to zero, so only libssh2_channel_has_exit_status
                 # can tell this apart from a clean `exit 0`.
                 channel.sendall(b"inactive\n")
-            elif command == b"systemctl is-active -- big-exit-status.service":
+            elif command == b"systemctl is-active -- 'big-exit-status.service'":
                 # RFC 4254 carries the exit status as a uint32; 0x80000000 is
                 # representable on the wire and narrows to a negative `int` in
                 # libssh2. It must be reported as a received status, not as
@@ -680,6 +697,7 @@ def start_https_krl_server(
             if self.path != "/revoked.krl":
                 self.send_error(404)
                 return
+            KRL_DOWNLOAD_PORTS.append(int(self.server.server_address[1]))
             self.send_response(200)
             self.send_header("Content-Type", "application/octet-stream")
             self.send_header("Content-Length", str(len(krl)))
@@ -898,6 +916,7 @@ def exercise_cpp_terminal(
     *,
     keyboard_interactive: bool = False,
     server_exit_status: bool = False,
+    reject_agent_write: bool = False,
 ) -> None:
     terminal_config = root / "terminal-service.json"
     terminal_config.write_text(
@@ -954,11 +973,20 @@ def exercise_cpp_terminal(
         if output.get("type") != "output" or base64.b64decode(str(output.get("data", ""))) != b"terminal-ready\n":
             raise AssertionError(f"C++ terminal output did not match the PTY banner: {output!r}")
 
-        process.stdin.write(json.dumps({"type": "write", "data": "ping\n"}) + "\n")
+        process.stdin.write(json.dumps({"type": "write", "source": "user_pty", "data": "ping\n"}) + "\n")
         process.stdin.flush()
         echoed = next_event()
         if echoed.get("type") != "output" or base64.b64decode(str(echoed.get("data", ""))) != b"echo:ping\n":
             raise AssertionError(f"C++ terminal did not forward interactive input: {echoed!r}")
+        if reject_agent_write:
+            process.stdin.write(json.dumps({"type": "write", "source": "agent_tool", "data": "foo\nuseradd hacker\n"}) + "\n")
+            process.stdin.flush()
+            rejected = next_event()
+            if rejected.get("type") != "error":
+                raise AssertionError(f"C++ terminal accepted a second AI stdin write: {rejected!r}")
+            if next_event().get("type") != "closed" or process.wait(timeout=5) == 0:
+                raise AssertionError("C++ terminal did not close after unauthorized AI stdin")
+            return
 
         process.stdin.write(json.dumps({"type": "resize", "columns": 100, "rows": 30}) + "\n")
         process.stdin.flush()
@@ -971,7 +999,7 @@ def exercise_cpp_terminal(
         if server_exit_status:
             # Let the *server* end the shell so the following `closed` frame
             # carries a server-reported exit-status rather than `null`.
-            process.stdin.write(json.dumps({"type": "write", "data": "quit\n"}) + "\n")
+            process.stdin.write(json.dumps({"type": "write", "source": "user_pty", "data": "quit\n"}) + "\n")
             process.stdin.flush()
             farewell = next_event()
             if farewell.get("type") != "output" or base64.b64decode(str(farewell.get("data", ""))) != b"bye\n":
@@ -999,6 +1027,83 @@ def exercise_cpp_terminal(
         if process.poll() is None:
             process.kill()
             process.wait(timeout=3)
+
+
+def exercise_security_boundaries(client: SshServiceClient) -> None:
+    def raw(payload: dict[str, Any]) -> dict[str, Any]:
+        payload.setdefault("execution", {"id": uuid.uuid4().hex, "expires_at_ms": int(time.time() * 1000) + 8000})
+        return client._request("POST", "/v1/ssh/exec", payload, timeout=8, authorized=True)
+
+    def denied(payload: dict[str, Any], expected: set[str]) -> None:
+        before = len(EXEC_COMMANDS)
+        try:
+            raw(payload)
+        except SshServiceError as error:
+            if error.code not in expected:
+                raise AssertionError(f"wrong security failure {error.code}, expected {expected}") from error
+        else:
+            raise AssertionError("unsafe SSH request unexpectedly succeeded")
+        if len(EXEC_COMMANDS) != before:
+            raise AssertionError("rejected request reached the remote exec channel")
+
+    status = {"target_id": "srv_stage1", "operation": "service_status", "parameters": {"service": "nginx.service"}, "timeout_seconds": 8}
+    before = len(EXEC_COMMANDS)
+    try:
+        client._request("POST", "/v1/ssh/exec", status, timeout=3, authorized=True)
+    except SshServiceError as error:
+        if error.code != "execution_required" or error.http_status != 403:
+            raise AssertionError("missing execution lease was not rejected with HTTP 403") from error
+    else:
+        raise AssertionError("SSH request without execution lease succeeded")
+    if len(EXEC_COMMANDS) != before:
+        raise AssertionError("missing execution lease reached the remote exec channel")
+    denied({**status, "target_id": "-oProxyCommand=touch-bad"}, {"invalid_target_id"})
+    for value in ("nginx;id", "nginx`id`", "nginx\nuseradd hacker"):
+        denied({**status, "parameters": {"service": value}}, {"invalid_parameters"})
+    denied({"target_id": "srv_confined", "operation": "sftp_list", "parameters": {"path": "/configs/../"}, "timeout_seconds": 5}, {"invalid_parameters"})
+    before_opens = len(SFTP_OPEN_PATHS)
+    for path in ("/settings.toml", "/does-not-exist", "/configs/escape"):
+        denied({"target_id": "srv_confined", "operation": "sftp_read", "parameters": {"path": path, "max_bytes": 128}, "timeout_seconds": 5}, {"denied_by_policy"})
+    if len(SFTP_OPEN_PATHS) != before_opens:
+        raise AssertionError("SFTP attempted to open an escaped or outside-root path")
+
+    cancelled_id = uuid.uuid4().hex
+    client._request("POST", "/v1/ssh/cancel", {"execution_id": cancelled_id}, timeout=3, authorized=True)
+    denied({**status, "execution": {"id": cancelled_id, "expires_at_ms": int(time.time() * 1000) + 5000}}, {"execution_cancelled"})
+    expired_id = uuid.uuid4().hex
+    denied({**status, "execution": {"id": expired_id, "expires_at_ms": int(time.time() * 1000) - 1}}, {"execution_expired"})
+    denied({**status, "execution": {"id": expired_id, "expires_at_ms": int(time.time() * 1000) + 5000}}, {"execution_cancelled"})
+    denied({**status, "target_id": "srv_no_audit"}, {"audit_unavailable"})
+
+    # The peer keeps attempting output for four seconds. A lease must close the
+    # actual channel before that, even when no Python cancellation is sent.
+    started = time.monotonic()
+    try:
+        raw({**status, "parameters": {"service": "slow.service"}, "execution": {"id": uuid.uuid4().hex, "expires_at_ms": int(time.time() * 1000) + 1500}})
+    except SshServiceError as error:
+        if error.code != "execution_cancelled":
+            raise AssertionError(f"expired channel was not cancelled: {error.code}") from error
+    else:
+        raise AssertionError("remote command completed after its approval expired")
+    if time.monotonic() - started > 3.5:
+        raise AssertionError("expired approval left the remote channel open")
+    running_id = uuid.uuid4().hex
+    before = len(EXEC_COMMANDS)
+    with concurrent.futures.ThreadPoolExecutor(max_workers=1) as executor:
+        pending = executor.submit(raw, {**status, "parameters": {"service": "slow.service"}, "execution": {"id": running_id, "expires_at_ms": int(time.time() * 1000) + 8000}})
+        wait_until = time.monotonic() + 3
+        while len(EXEC_COMMANDS) == before and time.monotonic() < wait_until:
+            time.sleep(0.01)
+        if len(EXEC_COMMANDS) == before:
+            raise AssertionError("cancellation fixture did not reach an SSH channel")
+        client._request("POST", "/v1/ssh/cancel", {"execution_id": running_id}, timeout=3, authorized=True)
+        try:
+            pending.result(timeout=2)
+        except SshServiceError as error:
+            if error.code != "execution_cancelled":
+                raise AssertionError(f"explicit cancellation did not close the channel: {error.code}") from error
+        else:
+            raise AssertionError("cancelled SSH operation was reported as successful")
 
 
 def exercise_cpp_sftp_streams(
@@ -1196,7 +1301,9 @@ def exercise_agent_runtime(
 
             async def request(self, method: str, params: dict[str, object], *, timeout_seconds: float) -> object:
                 if method == "host.ssh.service_target" and params == {"serverId": "srv_stage1"}:
-                    return desktop_target
+                    # IPC deserializes a fresh credential buffer for each call;
+                    # the runtime intentionally wipes the returned payload.
+                    return copy.deepcopy(desktop_target)
                 if method == "host.tool.execute" and params.get("toolName") == "server.info":
                     target = params.get("target")
                     tool_input = params.get("input")
@@ -1311,6 +1418,7 @@ def run_test(service_binary: Path, *, agent_runtime_only: bool = False) -> None:
     PROXY_CONNECT_TARGETS.clear()
     HTTPS_PROXY_CONNECT_TARGETS.clear()
     SOCKS5_CONNECT_TARGETS.clear()
+    KRL_DOWNLOAD_PORTS.clear()
 
     with tempfile.TemporaryDirectory(prefix="yukinal-paramiko-ssh-") as temp:
         root = Path(temp)
@@ -1622,6 +1730,14 @@ def run_test(service_binary: Path, *, agent_runtime_only: bool = False) -> None:
                 },
             ],
         }
+        for target in config["targets"]:
+            target["stream_audit_file"] = str(root / "ssh-stream.jsonl")
+        restricted = dict(config["targets"][0])
+        restricted.update(target_id="srv_confined", sftp_allowed_roots=["/configs"])
+        config["targets"].append(restricted)
+        no_audit = dict(config["targets"][0])
+        no_audit.update(target_id="srv_no_audit", stream_audit_file=str(root))
+        config["targets"].append(no_audit)
         config_path = root / "service.json"
         config_path.write_text(json.dumps(config), encoding="utf-8")
         environment = os.environ.copy()
@@ -1669,16 +1785,21 @@ def run_test(service_binary: Path, *, agent_runtime_only: bool = False) -> None:
             if AUTH_EVENTS:
                 raise AssertionError(f"HTTP CONNECT host-key probe attempted SSH authentication: {AUTH_EVENTS!r}")
 
+            exercise_security_boundaries(client)
+
             proxy_result = client.service_status("srv_proxy", "nginx.service", timeout_seconds=8)
             if proxy_result.exit_code != 0 or proxy_result.stdout != "active\n":
                 raise AssertionError(f"HTTP CONNECT proxy did not carry the SSH operation: {proxy_result!r}")
             expected_authority = f"127.0.0.1:{ssh_port}"
-            if PROXY_CONNECT_TARGETS != [expected_authority, expected_authority]:
+            if not 2 <= len(PROXY_CONNECT_TARGETS) <= 6 or any(
+                item != expected_authority for item in PROXY_CONNECT_TARGETS
+            ):
                 raise AssertionError(f"HTTP CONNECT used an unexpected target: {PROXY_CONNECT_TARGETS!r}")
+            proxy_attempts = list(PROXY_CONNECT_TARGETS)
             bypass_result = client.service_status("srv_proxy_bypass", "nginx.service", timeout_seconds=8)
             if bypass_result.exit_code != 0 or bypass_result.stdout != "active\n":
                 raise AssertionError(f"NO_PROXY direct route did not carry the SSH operation: {bypass_result!r}")
-            if PROXY_CONNECT_TARGETS != [expected_authority, expected_authority]:
+            if PROXY_CONNECT_TARGETS != proxy_attempts:
                 raise AssertionError(f"NO_PROXY target was incorrectly sent through HTTP CONNECT: {PROXY_CONNECT_TARGETS!r}")
             try:
                 client.service_status("srv_proxy_bad_auth", "nginx.service", timeout_seconds=5)
@@ -1695,21 +1816,19 @@ def run_test(service_binary: Path, *, agent_runtime_only: bool = False) -> None:
             )
             if socks_local_result.exit_code != 0 or socks_local_result.stdout != "active\n":
                 raise AssertionError(f"SOCKS5 local-DNS proxy did not carry SSH: {socks_local_result!r}")
+            local_dns_targets = list(SOCKS5_CONNECT_TARGETS)
             socks_remote_result = client.service_status(
                 "srv_socks5_remote_dns", "nginx.service", timeout_seconds=8
             )
             if socks_remote_result.exit_code != 0 or socks_remote_result.stdout != "active\n":
                 raise AssertionError(f"SOCKS5 remote-DNS proxy did not carry SSH: {socks_remote_result!r}")
-            if len(SOCKS5_CONNECT_TARGETS) != 2:
+            remote_dns_targets = SOCKS5_CONNECT_TARGETS[len(local_dns_targets):]
+            if not 1 <= len(local_dns_targets) <= 3 or not 1 <= len(remote_dns_targets) <= 3:
                 raise AssertionError(f"SOCKS5 proxy used an unexpected number of tunnels: {SOCKS5_CONNECT_TARGETS!r}")
-            local_dns_target = SOCKS5_CONNECT_TARGETS[0]
-            if (
-                local_dns_target[0] not in {"127.0.0.1", "::1"}
-                or local_dns_target[1] != ssh_port
-                or local_dns_target[2] not in {1, 4}
-            ):
+            if any(item[0] not in {"127.0.0.1", "::1"} or item[1] != ssh_port or item[2] not in {1, 4}
+                   for item in local_dns_targets):
                 raise AssertionError(f"SOCKS5 did not resolve its target locally: {SOCKS5_CONNECT_TARGETS!r}")
-            if SOCKS5_CONNECT_TARGETS[1] != ("localhost", ssh_port, 3):
+            if any(item != ("localhost", ssh_port, 3) for item in remote_dns_targets):
                 raise AssertionError(f"SOCKS5H did not delegate DNS resolution: {SOCKS5_CONNECT_TARGETS!r}")
             try:
                 client.service_status("srv_socks5_bad_auth", "nginx.service", timeout_seconds=5)
@@ -1729,17 +1848,19 @@ def run_test(service_binary: Path, *, agent_runtime_only: bool = False) -> None:
                 try:
                     client.service_status(target_id, "nginx.service", timeout_seconds=8)
                 except SshServiceError as error:
-                    if error.code != "host_key_unverified" or "plain host key" not in str(error):
+                    if error.code != "host_key_unverified":
                         raise AssertionError(
-                            f"{target_id} did not finish KRL verification before rejecting the mock host key: {error}"
+                            f"{target_id} did not finish KRL verification before rejecting the mock host key: {error.code}: {error}"
                         ) from error
                 else:
                     raise AssertionError(f"{target_id} accepted a plain key under Host CA trust")
             krl_socks_targets = [
                 item for item in SOCKS5_CONNECT_TARGETS if item[1] == krl_https_port
             ]
+            if not 3 <= KRL_DOWNLOAD_PORTS.count(krl_https_port) <= 9:
+                raise AssertionError("Host CA validation did not retrieve each authenticated HTTPS KRL")
             if (
-                len(krl_socks_targets) != 2
+                not 2 <= len(krl_socks_targets) <= 6
                 or ("localhost", krl_https_port, 3) not in krl_socks_targets
                 or not any(
                     target[1] == krl_https_port and target[2] in {1, 4}
@@ -1754,11 +1875,7 @@ def run_test(service_binary: Path, *, agent_runtime_only: bool = False) -> None:
                     "srv_krl_socks5h_bad_certificate", "nginx.service", timeout_seconds=8
                 )
             except SshServiceError as error:
-                if (
-                    error.code != "host_key_unverified"
-                    or "Could not load the host certificate revocation list" not in str(error)
-                    or "plain host key" in str(error)
-                ):
+                if error.code != "host_key_unverified" or bad_krl_https_port in KRL_DOWNLOAD_PORTS:
                     raise AssertionError(
                         f"KRL retrieval did not reject a mismatched HTTPS certificate first: {error}"
                     ) from error
@@ -2009,9 +2126,10 @@ def run_test(service_binary: Path, *, agent_runtime_only: bool = False) -> None:
             except json.JSONDecodeError as error:
                 raise AssertionError(f"SFTP listing was not JSON: {listing.stdout!r}") from error
             if listing_entries != [
-                {"name": "configs", "file_type": "directory", "size": 0},
+                {"name": "configs", "path": "/configs", "file_type": "directory", "size": 0},
                 {
                     "name": "settings.toml",
+                    "path": "/settings.toml",
                     "file_type": "file",
                     "size": len(StaticSftpInterface.CONTENTS),
                 },
@@ -2165,7 +2283,7 @@ def run_test(service_binary: Path, *, agent_runtime_only: bool = False) -> None:
             expect_error(client, "srv_bad_pin", "nginx.service", 5, "host_key_unverified")
 
             expect_error(client, "srv_bad_auth", "nginx.service", 5, "authentication_failed")
-            expect_error(client, "srv_stage1", "slow.service", 2, "timeout", max_elapsed=3.5)
+            expect_error(client, "srv_stage1", "slow.service", 2, "execution_cancelled", max_elapsed=3.5)
             expect_error(client, "srv_stage1", "large.service", 5, "output_limit")
             # H-1 regression: the mock closes the channel without sending an RFC
             # 4254 "exit-status" request. libssh2's numeric status is zero-seeded,
@@ -2195,8 +2313,12 @@ def run_test(service_binary: Path, *, agent_runtime_only: bool = False) -> None:
                 "username": "test-user",
                 "host_key_fingerprint": pinned_fingerprint,
                 "auth": {"type": "private_key", "private_key_env": "YK_SSH_TEST_PRIVATE_KEY"},
+                "stream_audit_file": str(root / "ssh-stream.jsonl"),
             }
             exercise_cpp_terminal(service_binary, root, terminal_target, environment)
+            exercise_cpp_terminal(service_binary, root, terminal_target, environment, reject_agent_write=True)
+            if (b"COLORTERM", b"truecolor") not in TERMINAL_ENVIRONMENTS:
+                raise AssertionError("C++ terminal never requested COLORTERM=truecolor")
             # H-1 terminal regression: same target, but this time the server ends
             # the shell and reports exit-status 0x80000000, which libssh2 narrows
             # to a negative int. The `closed` frame must carry it verbatim.
@@ -2223,6 +2345,19 @@ def run_test(service_binary: Path, *, agent_runtime_only: bool = False) -> None:
                 keyboard_interactive=True,
             )
             exercise_cpp_sftp_streams(service_binary, root, terminal_target, environment)
+            audit = [json.loads(line) for line in (root / "ssh-stream.jsonl").read_text(encoding="utf-8").splitlines()]
+            if not {"agent_tool", "user_pty", "system"}.issubset({record["source"] for record in audit}):
+                raise AssertionError("SSH byte-stream audit lost a source class")
+            if any(not record.get("session_id") or not record.get("execution_id") for record in audit):
+                raise AssertionError("SSH byte-stream audit lacks correlation")
+            for record in audit:
+                if record["source"] == "user_pty" and record["kind"] == "pty_stdin":
+                    if "sha256" in record:
+                        raise AssertionError("manual terminal keystrokes have an enumerable digest")
+                elif len(record.get("sha256", "")) != 64:
+                    raise AssertionError("SSH byte-stream audit lacks its digest")
+            if PASSWORD in json.dumps(audit) or "foo\\nuseradd" in json.dumps(audit):
+                raise AssertionError("SSH audit stored secret/raw or denied stdin data")
         finally:
             if process.poll() is None:
                 process.terminate()

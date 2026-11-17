@@ -185,12 +185,16 @@ class FakeDesktopSshProcess:
     async def stop(self) -> None:
         self.stopped = True
 
+    def bind_client(self, client: object) -> None:
+        self.client = client
+
 
 class FakeDesktopSshClient:
     calls: list[tuple[str, tuple[Any, ...]]] = []
 
-    def __init__(self, _token: str, *, base_url: str) -> None:
+    def __init__(self, _token: str, *, base_url: str, execution_deadline_ms: int | None = None) -> None:
         self.base_url = base_url
+        self.execution_deadline_ms = execution_deadline_ms
 
     def _result(self, operation: str, *arguments: Any) -> Any:
         self.calls.append((operation, arguments))
@@ -1109,7 +1113,7 @@ class SshToolTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(result.value, {"service": "nginx.service", "restarted": True})
         fallback.assert_awaited_once_with(host, "systemd.restart", arguments, context)
 
-    async def test_filesystem_write_uses_cpp_after_plan_check_and_replays_exact_success(self) -> None:
+    async def test_filesystem_write_uses_cpp_after_plan_check_and_rejects_ticket_replay(self) -> None:
         import os
         import tempfile
 
@@ -1151,11 +1155,12 @@ class SshToolTests(unittest.IsolatedAsyncioTestCase):
             patch("yukinal_agent.ssh_tools.SshServiceClient", FakeDesktopSshClient),
         ):
             first = await registry.execute("filesystem.write", arguments, context, call_id="call-write-1")
-            second = await registry.execute("filesystem.write", arguments, context, call_id="call-write-1")
+            with self.assertRaises(ToolCallError) as replay:
+                await registry.execute("filesystem.write", arguments, context, call_id="call-write-1")
 
         expected = {"path": "/etc/app.conf", "bytesWritten": len(arguments["content"].encode())}
         self.assertEqual(first.value, expected)
-        self.assertEqual(second.value, expected)
+        self.assertEqual(replay.exception.code, "approval_required")
         self.assertEqual(
             FakeDesktopSshClient.calls,
             [("sftp_write", ("srv_stage1", "/etc/app.conf", b"hello=world\n"))],
@@ -1221,7 +1226,8 @@ class SshToolTests(unittest.IsolatedAsyncioTestCase):
             patch("yukinal_agent.ssh_tools.SshServiceClient", FakeDesktopSshClient),
         ):
             first = await registry.execute("filesystem.backup", arguments, context, call_id="call-backup-1")
-            second = await registry.execute("filesystem.backup", arguments, context, call_id="call-backup-1")
+            with self.assertRaises(ToolCallError) as replay:
+                await registry.execute("filesystem.backup", arguments, context, call_id="call-backup-1")
 
         backup_path = (
             f"/etc/.yukinal-backup-{hashlib.sha256(arguments['path'].encode()).hexdigest()[:16]}-"
@@ -1234,7 +1240,7 @@ class SshToolTests(unittest.IsolatedAsyncioTestCase):
             "bytesBackedUp": 7,
         }
         self.assertEqual(first.value, expected)
-        self.assertEqual(second.value, expected)
+        self.assertEqual(replay.exception.code, "approval_required")
         self.assertEqual(
             FakeDesktopSshClient.calls,
             [
@@ -1307,7 +1313,8 @@ class SshToolTests(unittest.IsolatedAsyncioTestCase):
             patch("yukinal_agent.ssh_tools.SshServiceClient", FakeDesktopSshClient),
         ):
             first = await registry.execute("filesystem.restore", arguments, context, call_id="call-restore-1")
-            second = await registry.execute("filesystem.restore", arguments, context, call_id="call-restore-1")
+            with self.assertRaises(ToolCallError) as replay:
+                await registry.execute("filesystem.restore", arguments, context, call_id="call-restore-1")
 
         restored_revision = hashlib.sha256(b"old config").hexdigest()
         expected = {
@@ -1318,7 +1325,7 @@ class SshToolTests(unittest.IsolatedAsyncioTestCase):
             "bytesAfter": len(b"old config"),
         }
         self.assertEqual(first.value, expected)
-        self.assertEqual(second.value, expected)
+        self.assertEqual(replay.exception.code, "approval_required")
         self.assertEqual(
             FakeDesktopSshClient.calls,
             [
@@ -1407,9 +1414,10 @@ class SshToolTests(unittest.IsolatedAsyncioTestCase):
             first = await registry.execute(
                 "filesystem.backup.cleanup", arguments, context, call_id="call-cleanup-1"
             )
-            second = await registry.execute(
-                "filesystem.backup.cleanup", arguments, context, call_id="call-cleanup-1"
-            )
+            with self.assertRaises(ToolCallError) as replay:
+                await registry.execute(
+                    "filesystem.backup.cleanup", arguments, context, call_id="call-cleanup-1"
+                )
 
         expected = {
             "path": arguments["path"],
@@ -1418,7 +1426,7 @@ class SshToolTests(unittest.IsolatedAsyncioTestCase):
             "bytesDeleted": 7,
         }
         self.assertEqual(first.value, expected)
-        self.assertEqual(second.value, expected)
+        self.assertEqual(replay.exception.code, "approval_required")
         self.assertEqual(
             FakeDesktopSshClient.calls,
             [

@@ -300,6 +300,7 @@ class PythonSidecarTests(unittest.TestCase):
                     approval_ref: str | None,
                     *,
                     approved: bool,
+                    approval_expires_at_ms: int | None = None,
                 ) -> ModelAgentResult:
                     self.resumes.append((checkpoint_id, fingerprint, approval_ref, approved))
                     return ModelAgentResult("task-ui", "succeeded", "approved", (), (), 1, 10)
@@ -402,6 +403,7 @@ class PythonSidecarTests(unittest.TestCase):
                     approval_ref: str | None,
                     *,
                     approved: bool,
+                    approval_expires_at_ms: int | None = None,
                 ) -> ModelAgentResult:
                     self.resumes.append((checkpoint_id, fingerprint, approval_ref, approved))
                     return ModelAgentResult("task-ui", "succeeded", "approved", (), (), 1, 10)
@@ -498,6 +500,7 @@ class PythonSidecarTests(unittest.TestCase):
                     approval_ref: str | None,
                     *,
                     approved: bool,
+                    approval_expires_at_ms: int | None = None,
                     rejection_code: str = "approval_rejected",
                 ) -> ModelAgentResult:
                     self.resumes.append((checkpoint_id, fingerprint, approval_ref, approved, rejection_code))

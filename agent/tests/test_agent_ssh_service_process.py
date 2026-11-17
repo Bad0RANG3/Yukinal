@@ -53,11 +53,12 @@ class SshServiceProcessTests(unittest.IsolatedAsyncioTestCase):
                 assert service is not None
 
                 child = _ChildProcess()
+                child_environments = []
                 with (
                     patch(
                         "yukinal_agent.ssh_service_process.asyncio.create_subprocess_exec",
                         new_callable=AsyncMock,
-                        return_value=child,
+                        side_effect=lambda *args, **kwargs: (child_environments.append(dict(kwargs["env"])), child)[1],
                     ) as spawn,
                     patch(
                         "yukinal_agent.ssh_service_process._health_check",
@@ -66,7 +67,8 @@ class SshServiceProcessTests(unittest.IsolatedAsyncioTestCase):
                     ),
                 ):
                     await service.start()
-                    child_environment = spawn.await_args.kwargs["env"]
+                    child_environment = child_environments[-1]
+                    self.assertFalse(any(name in spawn.await_args.kwargs["env"] for name in service._secret_env))
                     self.assertEqual(child_environment["YK_SSH_KEY_0"], "private-key-material")
                     self.assertEqual(child_environment["YK_PROXY_CREDENTIAL"], "proxy-user:proxy-password")
                     self.assertNotIn("SSH_AUTH_SOCK", child_environment)
@@ -93,11 +95,12 @@ class SshServiceProcessTests(unittest.IsolatedAsyncioTestCase):
                 self.assertIsNotNone(service)
                 assert service is not None
                 child = _ChildProcess()
+                child_environments = []
                 with (
                     patch(
                         "yukinal_agent.ssh_service_process.asyncio.create_subprocess_exec",
                         new_callable=AsyncMock,
-                        return_value=child,
+                        side_effect=lambda *args, **kwargs: (child_environments.append(dict(kwargs["env"])), child)[1],
                     ) as spawn,
                     patch(
                         "yukinal_agent.ssh_service_process._health_check",
@@ -106,7 +109,8 @@ class SshServiceProcessTests(unittest.IsolatedAsyncioTestCase):
                     ),
                 ):
                     await service.start()
-                    child_environment = spawn.await_args.kwargs["env"]
+                    child_environment = child_environments[-1]
+                    self.assertFalse(any(name in spawn.await_args.kwargs["env"] for name in service._secret_env))
                     self.assertEqual(child_environment["SSH_AUTH_SOCK"], "/tmp/yukinal-agent.sock")
                     self.assertNotIn("UNRELATED_SECRET", child_environment)
                     await service.stop()
@@ -127,7 +131,7 @@ class SshServiceProcessTests(unittest.IsolatedAsyncioTestCase):
                 binary,
                 {"target": target, "credentials": {"SSH_AUTH_SOCK": "/tmp/agent.sock"}},
             )
-            self.assertEqual(service._secret_values, {"SSH_AUTH_SOCK": "/tmp/agent.sock"})
+            self.assertEqual(service._secret_values, {"SSH_AUTH_SOCK": bytearray(b"/tmp/agent.sock")})
             await service.stop()
 
             with self.assertRaises(SshServiceProcessError):
@@ -175,11 +179,11 @@ class SshServiceProcessTests(unittest.IsolatedAsyncioTestCase):
             binary = Path(temporary) / "service.exe"
             binary.write_text("service", encoding="utf-8")
             service, _, _ = SshServiceProcess.for_desktop_target(
-                binary, {"target": target, "credentials": credentials}
+                binary, {"target": target, "credentials": dict(credentials)}
             )
             configured_target = json.loads(service._config.read_text(encoding="utf-8"))["targets"][0]
             self.assertEqual(configured_target["auth"]["public_key_file"], "C:/keys/id-cert.pub")
-            self.assertEqual(service._secret_values, credentials)
+            self.assertEqual(service._secret_values, {key: bytearray(value, "utf-8") for key, value in credentials.items()})
             await service.stop()
 
     async def test_desktop_target_forwards_http_proxy_credentials_to_cpp_child(self) -> None:
@@ -215,9 +219,9 @@ class SshServiceProcessTests(unittest.IsolatedAsyncioTestCase):
             binary = Path(temporary) / "service.exe"
             binary.write_text("service", encoding="utf-8")
             service, _, _ = SshServiceProcess.for_desktop_target(
-                binary, {"target": target, "credentials": credentials}
+                binary, {"target": target, "credentials": dict(credentials)}
             )
-            self.assertEqual(service._secret_values, credentials)
+            self.assertEqual(service._secret_values, {key: bytearray(value, "utf-8") for key, value in credentials.items()})
             configured_target = json.loads(service._config.read_text(encoding="utf-8"))["targets"][0]
             self.assertEqual(configured_target["proxy"], target["proxy"])
             await service.stop()
@@ -226,14 +230,14 @@ class SshServiceProcessTests(unittest.IsolatedAsyncioTestCase):
             invalid_target["proxy"] = {**target["proxy"], "auth_env": "PATH"}
             with self.assertRaises(SshServiceProcessError):
                 SshServiceProcess.for_desktop_target(
-                    binary, {"target": invalid_target, "credentials": credentials}
+                    binary, {"target": invalid_target, "credentials": dict(credentials)}
                 )
 
             invalid_target = dict(target)
             invalid_target["proxy"] = {**target["proxy"], "no_proxy": ["10.0.0.0/33"]}
             with self.assertRaises(SshServiceProcessError):
                 SshServiceProcess.for_desktop_target(
-                    binary, {"target": invalid_target, "credentials": credentials}
+                    binary, {"target": invalid_target, "credentials": dict(credentials)}
                 )
 
     async def test_desktop_ca_target_forwards_socks5h_url_to_cpp_child(self) -> None:
@@ -265,7 +269,7 @@ class SshServiceProcessTests(unittest.IsolatedAsyncioTestCase):
             binary = Path(temporary) / "service.exe"
             binary.write_text("service", encoding="utf-8")
             service, _, _ = SshServiceProcess.for_desktop_target(
-                binary, {"target": target, "credentials": credentials}
+                binary, {"target": target, "credentials": dict(credentials)}
             )
             configured_target = json.loads(service._config.read_text(encoding="utf-8"))["targets"][0]
             self.assertEqual(
@@ -275,7 +279,7 @@ class SshServiceProcessTests(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(configured_target["proxy"], target["proxy"])
             config_text = service._config.read_text(encoding="utf-8")
             self.assertNotIn("proxy-password", config_text)
-            self.assertEqual(service._secret_values, credentials)
+            self.assertEqual(service._secret_values, {key: bytearray(value, "utf-8") for key, value in credentials.items()})
             await service.stop()
 
             invalid_target = {
@@ -284,7 +288,7 @@ class SshServiceProcessTests(unittest.IsolatedAsyncioTestCase):
             }
             with self.assertRaises(SshServiceProcessError):
                 SshServiceProcess.for_desktop_target(
-                    binary, {"target": invalid_target, "credentials": credentials}
+                    binary, {"target": invalid_target, "credentials": dict(credentials)}
                 )
 
             for invalid_entry in (
@@ -299,7 +303,7 @@ class SshServiceProcessTests(unittest.IsolatedAsyncioTestCase):
                 }
                 with self.assertRaises(SshServiceProcessError):
                     SshServiceProcess.for_desktop_target(
-                        binary, {"target": invalid_target, "credentials": credentials}
+                        binary, {"target": invalid_target, "credentials": dict(credentials)}
                     )
 
             invalid_target = {
@@ -308,7 +312,7 @@ class SshServiceProcessTests(unittest.IsolatedAsyncioTestCase):
             }
             with self.assertRaises(SshServiceProcessError):
                 SshServiceProcess.for_desktop_target(
-                    binary, {"target": invalid_target, "credentials": credentials}
+                    binary, {"target": invalid_target, "credentials": dict(credentials)}
                 )
 
     async def test_desktop_target_accepts_and_forwards_server_exec_denylist(self) -> None:

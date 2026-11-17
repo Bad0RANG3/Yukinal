@@ -1,4 +1,5 @@
 #include "yukinal/desktop_host/desktop_target.hpp"
+#include "scoped_secret_cleanup.hpp"
 
 #include "yukinal/desktop_host/content_revision.hpp"
 #include "yukinal/desktop_host/credential_store.hpp"
@@ -33,7 +34,7 @@ bool valid_text(const std::string& value, std::size_t max_bytes) {
   });
 }
 
-std::string credential_secret(const CredentialStore& credentials, const std::string& reference,
+Secret credential_secret(const CredentialStore& credentials, const std::string& reference,
                               const char* label) {
   CredentialReference parsed;
   try {
@@ -43,13 +44,20 @@ std::string credential_secret(const CredentialStore& credentials, const std::str
                              " reference is invalid");
   }
   Secret secret = credentials.get(parsed);
-  std::string value(reinterpret_cast<const char*>(secret.data()), secret.size());
-  if (value.empty() || value.size() > 1024 * 1024 ||
-      value.find('\0') != std::string::npos) {
+  if (secret.size() == 0 || secret.size() > 1024 * 1024 ||
+      std::find(secret.bytes().begin(), secret.bytes().end(), 0) != secret.bytes().end()) {
     throw std::runtime_error(std::string("the selected server ") + label +
                              " is unavailable");
   }
-  return value;
+  return secret;
+}
+
+void store_secret(nlohmann::json& destination, const Secret& secret) {
+  // Construct directly in the guarded JSON string. No temporary std::string
+  // (including a short-string buffer) is left holding a password after a move.
+  destination = std::string{};
+  destination.get_ref<nlohmann::json::string_t&>().assign(
+      reinterpret_cast<const char*>(secret.data()), secret.size());
 }
 
 std::optional<std::string> optional_text(const nlohmann::json& object, const char* key) {
@@ -117,7 +125,7 @@ std::string certificate_path(const nlohmann::json& identity) {
 struct ProxyRoute {
   bool configured = false;
   nlohmann::json proxy;
-  std::optional<std::string> credential;
+  std::optional<Secret> credential;
 };
 
 ProxyRoute resolve_proxy_route(const DesktopNetworkProxyConfig& config,
@@ -289,7 +297,7 @@ nlohmann::json resolve_ssh_service_target(const DesktopDatabase& database,
   const auto host = record->value("host", std::string());
   const auto port = record->value("port", 0);
   const auto username = record->value("username", std::string());
-  if (!valid_text(host, 253) || port < 1 || port > 65535) {
+  if (!valid_text(host, 253) || host.front() == '-' || port < 1 || port > 65535) {
     throw std::runtime_error("the stored server endpoint is invalid");
   }
   if (username.empty() || username.size() > 64 ||
@@ -318,19 +326,20 @@ nlohmann::json resolve_ssh_service_target(const DesktopDatabase& database,
   }
 
   nlohmann::json credentials_out = nlohmann::json::object();
+  ScopedSecretCleanup credentials_cleanup(credentials_out);
   nlohmann::json auth;
   if (method == "password") {
-    credentials_out["YK_SSH_PASSWORD"] =
-        credential_secret(credentials, *credential_ref, "password");
+    store_secret(credentials_out["YK_SSH_PASSWORD"],
+        credential_secret(credentials, *credential_ref, "password"));
     auth = {{"type", "password"}, {"password_env", "YK_SSH_PASSWORD"}};
   } else if (method == "privateKey" || method == "certificate") {
-    credentials_out["YK_SSH_PRIVATE_KEY"] =
-        credential_secret(credentials, *credential_ref, "private key");
+    store_secret(credentials_out["YK_SSH_PRIVATE_KEY"],
+        credential_secret(credentials, *credential_ref, "private key"));
     auth = {{"type", "private_key"}, {"private_key_env", "YK_SSH_PRIVATE_KEY"}};
     if (const auto passphrase_ref = optional_text(*identity, "passphraseRef");
         passphrase_ref.has_value()) {
-      credentials_out["YK_SSH_PASSPHRASE"] =
-          credential_secret(credentials, *passphrase_ref, "private-key passphrase");
+      store_secret(credentials_out["YK_SSH_PASSPHRASE"],
+          credential_secret(credentials, *passphrase_ref, "private-key passphrase"));
       auth["passphrase_env"] = "YK_SSH_PASSPHRASE";
     }
     if (method == "certificate") {
@@ -355,6 +364,9 @@ nlohmann::json resolve_ssh_service_target(const DesktopDatabase& database,
       {"host", host},
       {"port", port},
       {"username", username},
+      {"truecolor", record->value("truecolor", true)},
+      {"sftp_allowed_roots", record->value("sftpAllowedRoots", nlohmann::json::array({"."}))},
+      {"stream_audit_file", std::filesystem::absolute(database.data_directory() / "audit" / "ssh-stream.jsonl").string()},
       {"auth", std::move(auth)},
   };
   const auto trust_source =
@@ -367,13 +379,16 @@ nlohmann::json resolve_ssh_service_target(const DesktopDatabase& database,
   if (proxy.configured) {
     nlohmann::json proxy_json = proxy.proxy;
     if (proxy.credential.has_value()) {
-      credentials_out["YK_SSH_PROXY_CREDENTIAL"] = *proxy.credential;
+      store_secret(credentials_out["YK_SSH_PROXY_CREDENTIAL"], *proxy.credential);
       proxy_json["auth_env"] = "YK_SSH_PROXY_CREDENTIAL";
     }
     target["proxy"] = std::move(proxy_json);
   }
 
-  return {{"target", std::move(target)}, {"credentials", std::move(credentials_out)}};
+  nlohmann::json result = nlohmann::json::object();
+  result["target"] = std::move(target);
+  result["credentials"] = std::move(credentials_out);
+  return result;
 }
 
 nlohmann::json resolve_ssh_service_probe_target(const DesktopDatabase& database,
@@ -388,7 +403,7 @@ nlohmann::json resolve_ssh_service_probe_target(const DesktopDatabase& database,
   }
   const auto host = record->value("host", std::string());
   const auto port = record->value("port", 0);
-  if (!valid_text(host, 253) || port < 1 || port > 65535) {
+  if (!valid_text(host, 253) || host.front() == '-' || port < 1 || port > 65535) {
     throw std::runtime_error("the stored server endpoint is invalid");
   }
   nlohmann::json target = {
@@ -400,16 +415,20 @@ nlohmann::json resolve_ssh_service_probe_target(const DesktopDatabase& database,
       {"auth", {{"type", "probe"}}},
   };
   nlohmann::json credentials_out = nlohmann::json::object();
+  ScopedSecretCleanup credentials_cleanup(credentials_out);
   const auto proxy = resolve_proxy_route(database.network_proxy_config(), credentials);
   if (proxy.configured) {
     nlohmann::json proxy_json = proxy.proxy;
     if (proxy.credential.has_value()) {
-      credentials_out["YK_SSH_PROXY_CREDENTIAL"] = *proxy.credential;
+      store_secret(credentials_out["YK_SSH_PROXY_CREDENTIAL"], *proxy.credential);
       proxy_json["auth_env"] = "YK_SSH_PROXY_CREDENTIAL";
     }
     target["proxy"] = std::move(proxy_json);
   }
-  return {{"target", std::move(target)}, {"credentials", std::move(credentials_out)}};
+  nlohmann::json result = nlohmann::json::object();
+  result["target"] = std::move(target);
+  result["credentials"] = std::move(credentials_out);
+  return result;
 }
 
 bool supports_ssh_service_target(const DesktopDatabase& database,
@@ -443,7 +462,7 @@ bool supports_ssh_service_target(const DesktopDatabase& database,
   if (host_ca_algorithm.has_value()) return supports_host_ca_algorithm(*host_ca_algorithm);
   const auto host = record->value("host", std::string());
   const auto port = record->value("port", 0);
-  if (!valid_text(host, 253) || port < 1 || port > 65535) return false;
+  if (!valid_text(host, 253) || host.front() == '-' || port < 1 || port > 65535) return false;
   return HostTrustStore::load(std::filesystem::path(database.data_directory()) / "known_hosts")
       .pinned_fingerprint(host, static_cast<std::uint16_t>(port))
       .has_value();
