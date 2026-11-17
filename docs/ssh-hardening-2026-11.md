@@ -49,3 +49,5 @@ Windows 本地完整 `pnpm check` 已通过（2026-11-18，Python 3.11.17、MSVC
 跨平台复核另补充 POSIX 文件打开失败时的描述符清理测试，SSH 凭据边界专项 11/11 通过；使用可移植的线程停止/回收逻辑兼容当前 macOS 发布工具链。
 
 本地没有 Docker，未将 mock 结果计作真实 OpenSSH 验收。Ubuntu CI 启用了 OpenSSH 容器测试，覆盖 `ls --color`、`git status`/`git diff`、256/truecolor、COLORTERM、窗口尺寸和安全拒绝用例；Windows、macOS Intel CI 同样运行完整门禁。远端 CI 的实测结果以该提交的 GitHub Actions 记录为准。
+
+首次 CI 还发现构建依赖 picomatch 的新公告 GHSA-fc5q-39xc-vjpf，上游尚未发布修复。后续提交保留官方 4.0.7 的名称、版本和许可证，加入透明的本地安全补丁；原始版本的攻击用例会超时，补丁版本在独立进程期限内完成。普通构建 glob、实际依赖解析和前端测试通过，`pnpm audit` 保持启用。注册表审计不覆盖本地补丁内容，因此另将安全回归纳入必跑门禁，来源、兼容性收紧和移除条件见 [picomatch 补丁记录](../vendor/picomatch/PATCHES.md)。

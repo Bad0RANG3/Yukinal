@@ -6,6 +6,7 @@ settings:
 
 overrides:
   source-map-js: 1.2.2
+  picomatch: file:vendor/picomatch
 
 importers:
 
@@ -546,6 +547,7 @@ packages:
 
   fdir@6.5.0:
     resolution: {integrity: sha512-tIbYtZbucOs0BRGqPJkshJUYdL+SDH7dVM8gjy+ERp3WAUjLEFJE+02kanyHtwjWOnwrKYBiwAmM0p4kLJAnXg==}
+    version: 6.5.0
     engines: {node: '>=12.0.0'}
     peerDependencies:
       picomatch: ^3 || ^4
@@ -644,8 +646,8 @@ packages:
   picocolors@1.1.1:
     resolution: {integrity: sha512-xceH2snhtb5M9liqDsmEw56le376mTZkEX/jEb/RxNFyegNul7eNslCXP9FDj/Lcu0X8KEyMceP2ntpaHrDEVA==}
 
-  picomatch@4.0.7:
-    resolution: {integrity: sha512-qcJu88Q2IWqJsDD529JKMdwGm/dvInW4HvQnRwiH9JtihJvzGOscDtHE3x1pBKeUOTysQ8kVmLnJ2kJu7yhcGA==}
+  picomatch@file:vendor/picomatch:
+    resolution: {directory: vendor/picomatch, type: directory}
     engines: {node: '>=12'}
 
   postcss@8.5.31:
@@ -1011,9 +1013,9 @@ snapshots:
       '@esbuild/win32-ia32': 0.28.2
       '@esbuild/win32-x64': 0.28.2
 
-  fdir@6.5.0(picomatch@4.0.7):
+  fdir@6.5.0(picomatch@file:vendor/picomatch):
     optionalDependencies:
-      picomatch: 4.0.7
+      picomatch: file:vendor/picomatch
 
   fsevents@2.3.3:
     optional: true
@@ -1074,7 +1076,7 @@ snapshots:
 
   picocolors@1.1.1: {}
 
-  picomatch@4.0.7: {}
+  picomatch@file:vendor/picomatch: {}
 
   postcss@8.5.31:
     dependencies:
@@ -1116,8 +1118,8 @@ snapshots:
 
   tinyglobby@0.2.17:
     dependencies:
-      fdir: 6.5.0(picomatch@4.0.7)
-      picomatch: 4.0.7
+      fdir: 6.5.0(picomatch@file:vendor/picomatch)
+      picomatch: file:vendor/picomatch
 
   tsx@4.23.13:
     dependencies:
@@ -1153,7 +1155,7 @@ snapshots:
   vite@8.2.4(@types/node@26.4.1)(esbuild@0.28.2)(jiti@2.7.0)(tsx@4.23.13)(yaml@2.9.0):
     dependencies:
       lightningcss: 1.33.0
-      picomatch: 4.0.7
+      picomatch: file:vendor/picomatch
       postcss: 8.5.31
       rolldown: 1.2.15
       tinyglobby: 0.2.17

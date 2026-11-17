@@ -29,7 +29,9 @@ const RULES = [
   { pattern: /§\s*\d/, label: "章节引用 §NN", why: "引用的是未发布的文档", allow: PUBLIC_STANDARD },
   { pattern: /\bspec\s+§|\bspec\b\s*[:：]\s*\d/, label: "spec 指针", why: "同上", allow: PUBLIC_STANDARD },
   { pattern: /\bS\d{2}\b/, label: "内部阶段号 SNN", why: "私有计划的编号，写成组件/能力名" },
-  { pattern: /(?:MODULES\.md|AGENTS\.md)/, label: "私有文档名", why: "这些文件不在仓库里" },
+  // AGENTS.md now ships in the public repository as the SSH review contract.
+  // MODULES.md remains private and must not be referenced by published content.
+  { pattern: /MODULES\.md/, label: "私有文档名", why: "这个文件不在仓库里" },
   { pattern: /\.private\/[^\s)》，、]*\.(?:md|txt|pdf)/, label: "指向 .private 的链接", why: "读者打不开" },
   { pattern: /最高层级约束|规范原文|AI-Native SSH - Remote Development/, label: "私有规范措辞", why: "对外文档不指向内部规范" },
   { pattern: /\bOrbit\b/, label: "曾用名", why: "已废弃，只在私有计划里保留" },

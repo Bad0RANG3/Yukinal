@@ -13,3 +13,6 @@ minimumReleaseAgeExclude:
 
 overrides:
   source-map-js: 1.2.2
+  # No published fix for GHSA-fc5q-39xc-vjpf yet. This is the original 4.0.7
+  # runtime plus the reviewed security backport; see vendor/picomatch/PATCHES.md.
+  picomatch: file:vendor/picomatch

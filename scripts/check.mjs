@@ -613,6 +613,7 @@ async function main() {
   const steps = [
     { name: "publication hygiene", command: process.execPath, args: ["scripts/check-publication.mjs"], required: true },
     { name: "secret scan", command: process.execPath, args: ["scripts/check-secrets.mjs"], required: true },
+    { name: "picomatch security backport tests", command: process.execPath, args: ["--test", "scripts/lib/picomatch-security.test.mjs"], required: true },
     { name: "cross-platform command runner tests", command: process.execPath, args: ["--test", "scripts/lib/commands.test.mjs"], required: true },
     // The packaging integrity contract: a staged payload either matches its
     // manifest and checksum listing, or verification fails loudly.
