@@ -71,8 +71,7 @@ test("a corpus source crosses the sync run response and the completed event", ()
   assert.equal(knowledge?.scope === "knowledge" ? knowledge.chunkId : undefined, "nginx/timeout.md#chunk-0000");
 });
 
-test("only the knowledge scope carries section and chunkId", () => {
-  const sources = agentFixture("context_knowledge_sources") as Array<Record<string, unknown>>;
+test("only the knowledge scope carries section and chunkId", () => {  const sources = agentFixture("context_knowledge_sources") as Array<Record<string, unknown>>;
   const knowledge = sources.find((source) => source.scope === "knowledge")!;
   assert.deepEqual(AgentContextSourceSchema.parse(knowledge), knowledge);
   assert.equal(AgentKnowledgeSourceSchema.safeParse({ ...knowledge, scope: "global" }).success, false);
@@ -85,4 +84,40 @@ test("only the knowledge scope carries section and chunkId", () => {
   assert.equal(IPC_SCHEMAS.agent_memory_save.params.safeParse({ scope: "knowledge", title: "t", content: "c" }).success, false);
   assert.equal(IPC_SCHEMAS.agent_memory_list.params.safeParse({ scope: "knowledge" }).success, false);
   assert.equal(AgentContextSourceSchema.safeParse({ id: "mem-1", scope: "global", title: "t", updatedAt: "2026-11-25" }).success, true);
+});
+
+/**
+ * `memoryRetrieval` exists so a silently disabled lookup cannot look like "no relevant
+ * memory": the mode names what ran, and `projected`/`degraded` name the two ways the
+ * lookup is not the plain hybrid one.
+ */
+test("the retrieval report distinguishes projection, degradation and no context", () => {
+  const base = { totalTurns: 1, includedTurns: 1, compactedTurns: 0, inputBytes: 10, maxInputBytes: 100 };
+  const projected = AgentContextUsageSchema.parse({
+    ...base,
+    memoryRetrieval: {
+      mode: "hybrid", queryChars: 214, usedChars: 52, projected: true, degraded: false,
+    },
+  });
+  assert.equal(projected.memoryRetrieval?.mode, "hybrid");
+  assert.equal(projected.memoryRetrieval?.projected, true);
+
+  const degraded = AgentContextUsageSchema.parse({
+    ...base,
+    memoryRetrieval: {
+      mode: "recent-low-confidence", queryChars: 40, usedChars: 40, projected: false,
+      degraded: true, reason: "DatabaseError",
+    },
+  });
+  assert.equal(degraded.memoryRetrieval?.reason, "DatabaseError");
+
+  assert.equal(AgentContextUsageSchema.safeParse({
+    ...base, memoryRetrieval: { mode: "disabled", queryChars: 1, usedChars: 0, projected: false, degraded: false },
+  }).success, false);
+  assert.equal(AgentContextUsageSchema.safeParse({
+    ...base, memoryRetrieval: { mode: "none", queryChars: 1, usedChars: 0, projected: false, degraded: false, items: [] },
+  }).success, false, "the report is strict; a positive field cannot be smuggled in");
+  assert.equal(AgentContextUsageSchema.safeParse({
+    ...base, memoryRetrieval: { mode: "hybrid", queryChars: 1, usedChars: 0, projected: false, degraded: true, reason: " " },
+  }).success, false);
 });

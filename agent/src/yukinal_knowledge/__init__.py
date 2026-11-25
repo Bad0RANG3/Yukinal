@@ -26,6 +26,8 @@ from .engine import (
     document_metrics,
     feature_vector,
     normalize_text,
+    project_query,
+    query_token_weights,
     search_chunks,
     tokenize,
 )
@@ -74,6 +76,8 @@ __all__ = [
     "evaluate",
     "feature_vector",
     "normalize_text",
+    "project_query",
+    "query_token_weights",
     "read_questions",
     "search_chunks",
     "strip_unsafe_text",

@@ -102,11 +102,39 @@ class SustainedGoalTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_review_cannot_forge_evidence_or_execute_a_tool(self):
         forged = AIMessage(content=json.dumps({"state": "completed", "remaining": [], "evidenceIds": ["invented"], "reason": ""}))
-        for bad in [forged, operation(5), AIMessage(content="not JSON")]:
+        for bad, code in [(forged, "goal_review_invalid_evidence"), (operation(5), "goal_review_failed"), (AIMessage(content="not JSON"), "goal_review_failed")]:
             with self.subTest(bad=bad.content):
                 result, _ = await self.run_goal([operation(), AIMessage(content="done"), bad])
-                self.assertEqual(result.error_code, "goal_review_failed")
+                # Citing a call that did not succeed is a different failure from
+                # replying with something that is not a review at all: only the
+                # latter gets a repair attempt.
+                self.assertEqual(result.error_code, code)
                 self.assertEqual(result.tool_calls, 1)
+
+    async def test_unparsable_review_gets_one_bounded_repair_attempt(self):
+        def repaired(messages):
+            # The repair turn carries the review payload earlier in the turn plus
+            # the rejected reply and the correction request.
+            data = next(json.loads(str(message.content)) for message in messages
+                        if '"evidence"' in str(message.content))
+            return AIMessage(content=json.dumps({"state": "completed", "remaining": [],
+                "evidenceIds": [item["id"] for item in data["evidence"] if item["status"] == "succeeded"], "reason": ""}))
+        result, model = await self.run_goal([
+            operation(), AIMessage(content="done"),
+            AIMessage(content='```json\n{"state":"completed","remaining":[],"evidenceIds":["read-0"]}\n```'),
+            repaired,
+        ])
+        self.assertEqual((result.status, result.error_code), ("succeeded", None))
+        self.assertEqual(result.tool_calls, 1)
+        repair = model.seen_messages[-1]
+        self.assertTrue(any("could not be parsed" in str(message.content) for message in repair))
+
+    async def test_forged_evidence_is_not_repaired(self):
+        forged = AIMessage(content=json.dumps({"state": "completed", "remaining": [], "evidenceIds": ["invented"], "reason": ""}))
+        result, model = await self.run_goal([operation(), AIMessage(content="done"), forged])
+        self.assertEqual((result.status, result.error_code), ("failed", "goal_review_invalid_evidence"))
+        # No second reviewer request: inventing an id is not a formatting accident.
+        self.assertEqual(len(model.seen_messages), 3)
 
     async def test_shared_budget_is_not_reset_by_a_continuation(self):
         result, _ = await self.run_goal([operation(), AIMessage(content="next"), review("continue", remaining=["remaining test"]), operation(1)],

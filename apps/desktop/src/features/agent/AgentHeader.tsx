@@ -10,7 +10,7 @@ import type { ReactNode, RefObject } from "react";
 import type { AgentContextUsage, AgentStage, AgentTokenUsage } from "@yukinal/shared";
 
 import { Icon } from "../../components/Icon.js";
-import { runStateLabel } from "./transcript.js";
+import { memoryRetrievalLabel, runStateLabel } from "./transcript.js";
 import { agentStageLabel } from "./stage-labels.js";
 import { REASONING_LABELS } from "./reasoning.js";
 import { AgentUsageDetails } from "./AgentUsageDetails.js";
@@ -144,6 +144,7 @@ export function AgentRunStatus({ running, runState, stage = null, tokenUsage, co
           {tokenUsage?.reasoningTokens !== undefined ? <div><dt>已上报推理用量</dt><dd>{tokenUsage.reasoningTokens.toLocaleString()} tokens · {tokenUsage.reasoningReportedRequests ?? 0} 次请求</dd></div> : null}
           {tokenUsage?.cacheReadTokens !== undefined ? <div><dt>已上报缓存命中</dt><dd>{tokenUsage.cacheReadTokens.toLocaleString()} tokens · {tokenUsage.cacheReportedRequests ?? 0} 次请求</dd></div> : null}
           {contextUsage?.memorySources?.length ? <div><dt>使用记忆</dt><dd>{contextUsage.memorySources.map((source) => source.title).join("、")}</dd></div> : null}
+          {contextUsage?.memoryRetrieval ? <div><dt>记忆检索</dt><dd>{memoryRetrievalLabel(contextUsage.memoryRetrieval)}</dd></div> : null}
         </dl>
         <p className="agent-context-note">KiB 为文本大小；token 用量由模型上报。</p>
     </AgentUsageDetails> : null}

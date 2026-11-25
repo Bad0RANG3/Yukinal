@@ -274,12 +274,7 @@ def tokenize(value: str) -> tuple[str, ...]:
     return tuple(_expand_tokens(tokens, value))
 
 
-def query_token_weights(value: str) -> dict[str, float]:
-    """Return safe, unique query facets in stable input order.
-
-    Queries above :data:`_QUERY_TOKEN_LIMIT` raise instead of silently
-    ignoring trailing terms in lexical, vector, and hybrid retrieval.
-    """
+def _weighted_tokens(value: str) -> dict[str, float]:
     weighted: dict[str, float] = {}
     for token in tokenize(value):
         if not token or _QUERY_SAFE.fullmatch(token) is None or token in _FTS_OPERATORS:
@@ -289,9 +284,55 @@ def query_token_weights(value: str) -> dict[str, float]:
             weighted[token] = max(weighted[token], weight)
             continue
         weighted[token] = weight
+    return weighted
+
+
+def query_token_weights(value: str) -> dict[str, float]:
+    """Return safe, unique query facets in stable input order.
+
+    Queries above :data:`_QUERY_TOKEN_LIMIT` raise instead of silently
+    ignoring trailing terms in lexical, vector, and hybrid retrieval.
+    """
+    weighted = _weighted_tokens(value)
     if len(weighted) > _QUERY_TOKEN_LIMIT:
         raise QueryTokenLimitError(len(weighted), _QUERY_TOKEN_LIMIT)
     return weighted
+
+
+def project_query(value: str) -> str:
+    """Return the longest leading slice of ``value`` that fits the query budget.
+
+    Long instructions ("survey every service, then rotate the certificates…") are
+    ordinary input, not invalid input. Retrieval needs a *query*, so the caller
+    projects the instruction down to what the index can rank instead of dropping
+    retrieval entirely. The slice keeps contiguous text, so phrase matching still
+    sees real substrings. The token budget grows with prefix length for any
+    realistic instruction, so a bisection finds the boundary in a handful of
+    passes and the returned prefix is re-validated by construction.
+    """
+    text = value.strip()
+    if not text:
+        return ""
+    try:
+        query_token_weights(text)
+        return text
+    except QueryTokenLimitError:
+        pass
+    low, high, best = 0, len(text), ""
+    while low < high:
+        middle = (low + high + 1) // 2
+        candidate = text[:middle]
+        if len(_weighted_tokens(candidate)) > _QUERY_TOKEN_LIMIT:
+            high = middle - 1
+            continue
+        best = candidate
+        low = middle
+    if not best:
+        return ""
+    boundary = max(best.rfind(character) for character in "。！？；\n.!?;")
+    if boundary >= len(best) // 3:
+        best = best[: boundary + 1]
+    return best.strip()
 
 
 def _trimmed_span(text: str, start: int, end: int) -> tuple[int, int] | None:

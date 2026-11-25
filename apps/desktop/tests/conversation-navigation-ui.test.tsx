@@ -71,6 +71,10 @@ test("tool purposes clarify the action while real tool identity and failure limi
   assert.equal(toolPurpose({ purpose: " " }), undefined);
   assert.match(agentFailureLabel("tool_call_limit_exceeded"), /达到工具调用次数上限/);
   assert.match(agentFailureLabel("tool_repetition_detected"), /已停止重复调用/);
+  assert.match(agentFailureLabel("outcome_unknown"), /结果.*未知/);
+  assert.match(agentFailureLabel("outcome_unknown"), /不要直接重试/);
+  assert.match(agentFailureLabel("checkpoint_write_failed"), /运行记录无法写入/);
+  assert.match(agentFailureLabel("task_timeout"), /总时长预算/);
   assert.equal(agentFailureLabel("unrecognized error"), "unrecognized error");
 });
 

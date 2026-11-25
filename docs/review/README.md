@@ -1,12 +1,14 @@
-# 审查报告索引（三轮）
+# 审查报告索引（四轮）
 
-本目录是 2026-10-18 对 Yukinal（`D:\yukinal`）做**三轮系统性审查 + 优化修复**的原始报告。
-全部报告**未被跟踪**（`git status` 显示 `?? docs/review/`），是审查过程证据，不是仓库文档；
+本目录是 2026-10-18 起对 Yukinal（`D:\yukinal`）做系统性审查 + 优化修复的原始报告。
+第一至第三轮（r1/r2/r3）的报告是审查过程证据；第四轮（r4）是面向 Agent 工程能力的**专门审计**，
+四轮报告**均已纳入版本控制**（`git ls-files docs/review` 可查）。
 对外交付的汇总结论请见 [`docs/review-report.md`](../review-report.md) 与 [`docs/review-fixes.md`](../review-fixes.md)。
 
 ## 基线
 
-- `HEAD = 736f06a58d07e595fa79ac620d8ce116779bfe4c`（分支 `codex/ui-layout-direction`）
+- R1–R3：`HEAD = 736f06a58d07e595fa79ac620d8ce116779bfe4c`（分支 `codex/ui-layout-direction`）
+- R4：`HEAD = f630442`（`Add curated knowledge RAG, memory library retrieval and v4 evaluation`），工作树干净
 - 平台 Windows 11 / MSVC VS2022 Community 14.44.35207 / CMake `NMake Makefiles`
 - 审查期间工作区多有并行修复，各报告**自带「读取版本」声明**；凡涉及「门禁覆盖」的结论都以报告声明的哈希为准。
 
@@ -41,11 +43,39 @@ R3 推翻或修正了 R1 的四处断言，这些修正**已并入**最终交付
 3. `desktop` H-2「sidecar 多一个字段就把 UI 打崩」→ **推翻现状性**，真实风险是「将来加字段即崩」。
 4. `desktop` C-1 的定性 → 修正为**宿主接线缺口**（服务层已实现且有测试）。
 
+## 第四轮：Agent 工程能力专项审计
+
+| 报告 | 焦点 | 计数 |
+| --- | --- | --- |
+| [`r4-long-run-memory-checkpoint.md`](r4-long-run-memory-checkpoint.md) | 长任务（goal loop / 预算）、记忆（显式记忆 + curated RAG）、检查点（持久化 / 恢复 / 审批跨重启），以及这三块对外文档声明的真实性 | 成立 22（Critical 5 / High 9 / Medium 8） |
+
+R4 的取证方式与前三轮不同：不放信任何文档声明，每条结论都要么给出源码链，要么给出可复现探针输出。
+它的主要发现是**主路径未接通**而不是「功能缺失」：`turn:<digest>` 复用键从不写入、严格 msgpack 从未生效、
+记忆检索在 35 个汉字以上必然静默关闭、检查点明文落盘且 Windows 无权限隔离。
+同时它给出一份对照表，纠正 `docs/security.md`、`agent/README.md`、
+`docs/agent-live-acceptance-20261027.md` 三处与代码不符的对外声明。
+
+### R4-FIX：同日的修复处置
+
+R4 收尾后紧接着做了修复，处置记录写在报告**第七节**（第一节判定表保留审计当时的结论，未追改历史）。摘要：
+
+- **已修 11 条**：C-1（显式注入 `JsonPlusSerializer(allowed_msgpack_modules=None)`）、C-2（`_prepare_resume_key` 直接写 `turn:<digest>`）、
+  C-3（`_checkpoint_matches` 只绑 system prompt 与本轮 user message）、C-4（`project_query` 按 64-token 预算投影 + `memoryRetrieval` 可观测）、
+  C-5（Windows 当前用户独占 DACL，删掉 `os.name != "nt"` 跳过分支）、H-4（复核解析失败一次有界修复重试 + 区分格式/证据错误码）、
+  H-6（根因是 `CompiledStateGraph` 没有 `adelete_thread`；改为从 saver 取，丢弃成功后复用同一 thread id）、
+  H-7（`_aborted_result` + effect 计数 + `outcome_unknown`，全 abort 有日志）、M-3/M-4（`context.memoryRetrieval` 契约 + UI 文案）、M-5（`_budget_binding` 剔除推断值）。
+- **量化后判定不修 1 条**：M-1 —— 去掉 `coverage > 0` 门控只能多召回 1.5% 的哈希碰撞噪声（80 000 对实测），语义召回需换 embedding 模型。
+- **既定设计、留证不改 2 条**：H-5（跨重启续跑靠「重发 + 重新批准」，已实证恰好执行一次）、M-7（有历史即关闭自动批准）。
+- **路线图 7 条**：H-1、H-2、H-8、H-9、M-2、M-6、M-8。H-3 补了事实口径修正（`maxAttempts` 在宿主侧限制 investigation 重跑次数）。
+- 修复期间新增两个回归文件：`agent/tests/test_checkpoint_reuse.py`（13 例）与 `agent/tests/test_checkpoint_write_failure.py`（5 例）；
+  `agent` 全量 **504 tests OK (skipped=5)**，`@yukinal/shared` **151 tests pass**，`pnpm check` 见报告第七节。
+
 ## 阅读顺序建议
 
 1. 先读 [`docs/review-report.md`](../review-report.md) 与 [`docs/review-fixes.md`](../review-fixes.md) 拿结论；
 2. 需要细节再按上表进入对应报告；
-3. 对任何单条结论存疑时，先读 [`r3-verification.md`](r3-verification.md) —— 它给出了每条争议项的 file:line 正证据与最小复现命令。
+3. 对任何单条结论存疑时，先读 [`r3-verification.md`](r3-verification.md) —— 它给出了每条争议项的 file:line 正证据与最小复现命令；
+4. 关注 Agent 运行、记忆与恢复能力时，读 [`r4-long-run-memory-checkpoint.md`](r4-long-run-memory-checkpoint.md) —— 它是当前唯一覆盖「长任务 / 记忆 / 检查点」三块的实证报告。
 
 ## 这些报告**不能**作为「已修复」的证据
 

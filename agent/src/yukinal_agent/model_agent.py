@@ -3,7 +3,9 @@ from __future__ import annotations
 import asyncio
 import hashlib
 import json
+import logging
 import re
+import sqlite3
 import time
 import uuid
 from dataclasses import asdict, dataclass
@@ -23,7 +25,7 @@ from .response_policy import RESPONSE_STYLE
 from .model_metrics import accumulate_usage, request_metrics
 from .model_context import model_messages
 from .untrusted_output import untrusted_tool_content
-from .goal_loop import GOAL_GUIDE, REVIEW_GUIDE, parse_review, review_payload, successful_evidence
+from .goal_loop import GOAL_GUIDE, REVIEW_GUIDE, parse_review_report, review_payload, successful_evidence
 from .operations_policy import build_system_prompt
 from .shell_policy import prepare_model_tool_arguments
 
@@ -35,6 +37,24 @@ from .shell_policy import prepare_model_tool_arguments
 # provider boundary uses `__`, and the mapping is applied in both directions so a
 # trace never shows a name the registry does not know.
 _PROVIDER_TOOL_NAME_PATTERN = re.compile(r"^[A-Za-z0-9_-]{1,64}$")
+
+logger = logging.getLogger(__name__)
+
+# Checkpoint writes are the only durable record that a tool's effect already
+# happened. A failure there is therefore not a plain run failure: the target may
+# have changed and no snapshot describes it, so the operator has to be told the
+# outcome is unknown instead of being invited to resend the request.
+#
+# The run-level *state* deliberately stays inside the four values the sidecar and
+# the host already know (`succeeded`/`failed`/`timed_out`/`cancelled`): the host
+# drops any `agent.completed` whose state is not one of completed/failed/cancelled
+# (`native/desktop_host/src/ipc_router.cpp:6251`) and the shared run-result schema
+# only names those. The unknownness therefore travels in the error *code*, which is
+# exactly how the tool vocabulary already spells it (`status: "failed"` +
+# `executionState: "result_unknown"`).
+_CHECKPOINT_WRITE_ERRORS = (sqlite3.Error, OSError)
+_CHECKPOINT_WRITE_CODE = "checkpoint_write_failed"
+_OUTCOME_UNKNOWN_CODE = "outcome_unknown"
 
 
 # Private model guidance: never add it to user messages, public events or metadata.
@@ -222,6 +242,11 @@ class ModelDrivenAgent:
         self._review_model = model.bind(max_tokens=min(1536, self._budget.max_model_output_tokens)) if goal_loop else None
         self._request_timing: dict[str, Any] = {}
         self._approval_checkpoints: set[str] = set()
+        # How many effectful tool calls already landed on a target in this process.
+        # If the run then dies before its checkpoint is durable, the failure is not
+        # a clean one: the effect happened and no snapshot describes it, so the
+        # operator must be told the outcome is unknown rather than that it failed.
+        self._tool_effects_committed = 0
         tool_specs = tuple(spec for spec in registry.list() if tool_names is None or spec.name in tool_names)
         provider_to_internal: dict[str, str] = {}
         for spec in tool_specs:
@@ -265,9 +290,11 @@ class ModelDrivenAgent:
             "execute_tool", self._route_tool,
             {"execute": "execute_tool", "model": "model", "review": "goal_review", "finish": END},
         )
-        self._graph = graph.compile(
-            checkpointer=checkpointer if checkpointer is not None else InMemorySaver()
-        )
+        # Keep the saver itself: `CompiledStateGraph` exposes no `adelete_thread`, so
+        # the finished-thread discard below has to reach the saver directly or it
+        # silently never runs.
+        self._checkpointer = checkpointer if checkpointer is not None else InMemorySaver()
+        self._graph = graph.compile(checkpointer=self._checkpointer)
 
     def _proposed_call_is_effectful(self, call: dict[str, Any]) -> bool:
         """Whether a not-yet-executed model call would change the target.
@@ -385,7 +412,12 @@ class ModelDrivenAgent:
             "run_id": run_id,
             "trace_id": trace_id,
             "checkpoint_binding": checkpoint_binding,
-            "budget_binding": asdict(self._budget),
+            # Only *explicit* limits belong to the binding. `max_model_output_tokens`
+            # is inferred per turn from the prompt, task markers and reasoning
+            # effort (`inference_policy.select_inference`), so two sends of the same
+            # turn can legitimately disagree on it; binding it would refuse a resume
+            # that is otherwise identical. It caps spend, not authorization.
+            "budget_binding": _budget_binding(self._budget),
             "calls": [],
             "call_index": 0,
             "model_rounds": 0,
@@ -412,6 +444,9 @@ class ModelDrivenAgent:
             "confirm_refusals": 0,
         }
         resume_key = checkpoint_key if isinstance(checkpoint_key, str) and checkpoint_key else ""
+        # A run starts with a clean effect counter: what matters below is whether
+        # *this* attempt changed a target before it lost its durable record.
+        self._tool_effects_committed = 0
         if resume_key:
             # A stable locator: the same conversation turn in the same window maps to
             # the same thread across a process restart, so a pending approval is handed
@@ -438,16 +473,25 @@ class ModelDrivenAgent:
                         # A finished turn is not a resumable one: its answer already
                         # reached the user. Sending the same request again is a new
                         # request, so the old thread is discarded, not replayed.
-                        discard = getattr(self._graph, "adelete_thread", None)
+                        #
+                        # Reuse the same id when the discard succeeded. Minting a
+                        # fresh `uuid` thread here (as this used to) left every
+                        # repeat of a turn behind as an orphaned snapshot holding
+                        # the prompt and tool output: the reset path only knows the
+                        # turn-derived ids, so nothing could ever collect it.
+                        discarded = False
+                        discard = getattr(self._checkpointer, "adelete_thread", None)
                         if resume_key and discard is not None:
                             try:
                                 await discard(checkpoint_id)
+                                discarded = True
                             except Exception:
                                 # Discarding a finished thread is housekeeping. It must
                                 # never turn a repeat request into a failed run.
-                                pass
-                        checkpoint_id = f"agent-{uuid.uuid4().hex}"
-                        config = self._graph_config(checkpoint_id)
+                                discarded = False
+                        if not discarded:
+                            checkpoint_id = f"agent-{uuid.uuid4().hex}"
+                            config = self._graph_config(checkpoint_id)
                         state = await self._graph.ainvoke(initial, config=config)
                     elif saved_state.get("status") == "awaiting_approval":
                         # The paused graph is precisely what the operator is being
@@ -460,9 +504,15 @@ class ModelDrivenAgent:
                 else:
                     state = await self._graph.ainvoke(initial, config=config)
         except TimeoutError:
-            return _failed_result(task_id, "task_timeout", status="timed_out")
-        except Exception:
-            return _failed_result(task_id, "agent_workflow_failed")
+            return self._aborted_result(task_id, "task_timeout", status="timed_out", reason="the run exceeded its total time budget")
+        except _CHECKPOINT_WRITE_ERRORS as error:
+            # The saver could not persist this step, so the durable record of what
+            # already happened is missing. Reporting a plain failure here invited an
+            # operator (or the model) to resend the request and repeat the effect,
+            # which is exactly the wrong move when the target may already be changed.
+            return self._aborted_result(task_id, _CHECKPOINT_WRITE_CODE, reason=str(error))
+        except Exception as error:
+            return self._aborted_result(task_id, "agent_workflow_failed", reason=str(error))
         if state.get("status") == "awaiting_approval":
             self._approval_checkpoints.add(checkpoint_id)
         return self._result_from_state(
@@ -550,11 +600,32 @@ class ModelDrivenAgent:
                                   "goal_review_pending": False, "goal_reviewed_calls": state["tool_call_count"],
                                   "_review_response": response}
         reason = response.response_metadata.get("finish_reason") or response.response_metadata.get("stop_reason")
-        review = parse_review(text, state["tool_results"]) if not response.tool_calls and not response.invalid_tool_calls and reason not in {"length", "max_tokens", "max_output_tokens", "content_filter", "refusal", "safety"} and response.response_metadata.get("status") != "incomplete" else None
+        review, failure = parse_review_report(text, state["tool_results"]) if not response.tool_calls and not response.invalid_tool_calls and reason not in {"length", "max_tokens", "max_output_tokens", "content_filter", "refusal", "safety"} and response.response_metadata.get("status") != "incomplete" else (None, "format")
         if state["output_bytes"] + size > self._budget.max_output_bytes:
             return {**update, "status": "failed", "error_code": "output_budget_exceeded"}
+        if review is None and failure == "format":
+            # One repair attempt, bounded and audited. A review that merely failed
+            # to serialize (fenced JSON, a renamed field) is not evidence that the
+            # work is unfinished, and killing the run for it made a whole sustained
+            # goal depend on the reviewer's formatting luck. Evidence forgery is
+            # *not* retried: see parse_review_report.
+            repair_messages = [SystemMessage(content=REVIEW_GUIDE), HumanMessage(content=review_payload(str(prompt), state["answer"], state["tool_results"])),
+                               AIMessage(content=text[:16 * 1024]),
+                               HumanMessage(content="Your previous reply could not be parsed. Return ONLY the JSON object described above, with exactly the fields state, remaining, evidenceIds and reason. No prose, no code fence, no extra fields.")]
+            try:
+                retry, retry_streamed = await asyncio.wait_for(self._stream_model({**state, "messages": repair_messages}, model=self._review_model, public=False), timeout=min(90.0, self._budget.max_total_seconds))
+            except Exception:
+                return {**update, "status": "failed", "error_code": "goal_review_failed"}
+            retry_text = _message_text(retry.content)
+            retry_size = len(retry_text.encode("utf-8"))
+            update = {**update, "model_rounds": next_round + 1, "streamed_bytes": retry_streamed,
+                      "output_bytes": state["output_bytes"] + size + retry_size, "_review_response": retry}
+            if state["output_bytes"] + size + retry_size > self._budget.max_output_bytes:
+                return {**update, "status": "failed", "error_code": "output_budget_exceeded"}
+            review, failure = parse_review_report(retry_text, state["tool_results"])
         if review is None:
-            return {**update, "status": "failed", "error_code": "goal_review_failed"}
+            return {**update, "status": "failed",
+                    "error_code": "goal_review_invalid_evidence" if failure == "evidence" else "goal_review_failed"}
         if review["state"] == "completed":
             if not state.get("answer", "").strip():
                 return {**update, "messages": [*state["messages"], SystemMessage(content=
@@ -810,9 +881,11 @@ class ModelDrivenAgent:
                 await self._graph.aupdate_state(config, update, as_node="execute_tool")
                 resumed_state = await self._graph.ainvoke(None, config=config)
         except TimeoutError:
-            return _failed_result(str(state.get("task_id", "approval")), "task_timeout", status="timed_out")
-        except Exception:
-            return _failed_result("approval", "agent_workflow_failed")
+            return self._aborted_result(str(state.get("task_id", "approval")), "task_timeout", status="timed_out", reason="the resume exceeded its total time budget")
+        except _CHECKPOINT_WRITE_ERRORS as error:
+            return self._aborted_result("approval", _CHECKPOINT_WRITE_CODE, reason=str(error))
+        except Exception as error:
+            return self._aborted_result("approval", "agent_workflow_failed", reason=str(error))
 
         still_pending = resumed_state.get("status") == "awaiting_approval"
         if not still_pending:
@@ -822,6 +895,43 @@ class ModelDrivenAgent:
             task_id=str(resumed_state.get("task_id", "approval")),
             checkpoint_id=checkpoint_id if still_pending else None,
         )
+
+    def _aborted_result(
+        self,
+        task_id: str,
+        error_code: str,
+        *,
+        status: str = "failed",
+        reason: str = "",
+    ) -> ModelAgentResult:
+        """Report a run that ended outside the graph without hiding what landed.
+
+        `except Exception: return _failed_result(...)` used to swallow every
+        non-timeout failure, including a checkpoint that never reached disk, and it
+        never logged anything. That dropped the one fact the operator needs: whether
+        an effectful call already succeeded.
+
+        The run state is left alone on purpose — the host drops an `agent.completed`
+        whose state is outside completed/failed/cancelled, and the shared result
+        schema only names those. Only the error code changes, which is the field the
+        failure map, the recovery prompt and the desktop label all read.
+        """
+        effects = self._tool_effects_committed
+        if effects and status != "succeeded":
+            # An effectful call already landed and no durable record says which.
+            # `failed` reads as "nothing happened" and `task_timeout` invites a
+            # resend; both are false here, and both are what the operator would act
+            # on. `outcome_unknown` is the code every consumer already treats as
+            # "do not retry, re-read the target first".
+            error_code = _OUTCOME_UNKNOWN_CODE
+        logger.warning(
+            "agent run aborted: code=%s status=%s effects=%d reason=%s",
+            error_code,
+            status,
+            effects,
+            (reason or "-")[:400],
+        )
+        return _failed_result(task_id, error_code, status=status)
 
     @staticmethod
     def _result_from_state(
@@ -1672,6 +1782,11 @@ class ModelDrivenAgent:
             duration_ms=result.duration_ms,
             approval_wait_ms=_approval_wait_ms(started_at, result.duration_ms),
         )
+        if spec is not None and spec.risk_level != "read":
+            # This effect is on the target now. Remember it before anything else can
+            # fail, so a checkpoint write that never lands is reported as an unknown
+            # outcome instead of a failure that invites a resend.
+            self._tool_effects_committed += 1
         output_size = result.output_bytes
         item = {
             "call_id": call_id,
@@ -1826,6 +1941,18 @@ def _effective_risk(spec: Any, calls: Any, call_id: Any) -> str:
     return declared
 
 
+def _budget_binding(budget: AgentBudget) -> dict[str, Any]:
+    # A restored checkpoint may continue only under the same *declared* limits.
+    # Inferred, per-turn values (`max_model_output_tokens`) are excluded on purpose:
+    # they are derived from prompt text and routing markers, so identical turns can
+    # carry different values between sends. Including them turned an ordinary resume
+    # into `checkpoint_context_mismatch` and left the operator with a paused run that
+    # could never be answered.
+    binding = asdict(budget)
+    binding.pop("max_model_output_tokens", None)
+    return binding
+
+
 def _checkpoint_matches(saved: _AgentState, initial: _AgentState, *, resume_key: str = "") -> bool:
     # These decide what the paused graph is allowed to do next, so a mismatch must
     # fail closed. `run_id` and `trace_id` are deliberately absent: they identify an
@@ -1844,22 +1971,36 @@ def _checkpoint_matches(saved: _AgentState, initial: _AgentState, *, resume_key:
         binding_fields = ("task_id", *binding_fields)
     if any(saved.get(field) != initial.get(field) for field in binding_fields):
         return False
-    saved_messages = saved.get("messages", [])
-    initial_messages = initial.get("messages", [])
-    if len(saved_messages) < 2 or len(initial_messages) < 2:
+    saved_messages = list(saved.get("messages", []))
+    initial_messages = list(initial.get("messages", []))
+    if not saved_messages or not initial_messages:
         return False
-    # A *restore* after a restart prepends the archived conversation projection
-    # (system, history…, human). The resumed turn then begins with those exact
-    # messages, so a length-aware prefix check accepts it without weakening the
-    # binding: transcript content cannot become authorization, and every
-    # authorizing field is already compared above.
-    if len(saved_messages) > len(initial_messages):
-        saved_messages = saved_messages[:len(initial_messages)]
-    return all(
-        type(saved_message) is type(initial_message)
-        and saved_message.content == initial_message.content
-        for saved_message, initial_message in zip(saved_messages, initial_messages)
+    # Compare the *turn*, not the transcript.
+    #
+    # A resume re-projects the archived conversation into `history`, so the prefix
+    # in front of this turn is rebuilt from the store on every attempt: a paused
+    # turn reappears as a folded "historicalIncompleteTurn" record, retrieved
+    # memories are re-ordered, compaction changes the summarised anchors. None of
+    # that is authorization — every authorizing field was compared above — so a
+    # whole-prefix equality check would reject exactly the resumes it exists to
+    # allow (and did: a resumed pause used to fail with `checkpoint_context_mismatch`
+    # whenever the previous attempt had been archived).
+    #
+    # What must still be identical is the frame this graph was started under: the
+    # system prompt (persona + goal guide + renderer guide, which embeds the turn's
+    # own request) and this turn's user message. The model never appends a
+    # `HumanMessage`, so the last one in the saved state *is* the turn's prompt.
+    saved_system, initial_system = saved_messages[0], initial_messages[0]
+    if type(saved_system) is not type(initial_system) or saved_system.content != initial_system.content:
+        return False
+    initial_prompt = initial_messages[-1]
+    saved_prompt = next(
+        (message for message in reversed(saved_messages) if isinstance(message, HumanMessage)),
+        None,
     )
+    if saved_prompt is None:
+        return False
+    return type(saved_prompt) is type(initial_prompt) and saved_prompt.content == initial_prompt.content
 
 
 def _failed_result(task_id: str, error_code: str, *, status: str = "failed") -> ModelAgentResult:

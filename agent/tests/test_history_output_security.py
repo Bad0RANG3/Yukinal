@@ -1,7 +1,9 @@
 from __future__ import annotations
 
 import json
+import sqlite3
 import unittest
+from unittest import mock
 
 from langchain_core.messages import AIMessage, HumanMessage, ToolMessage, messages_to_dict
 
@@ -124,7 +126,7 @@ class HistoryOutputSecurityTests(unittest.TestCase):
         finally:
             store.close()
 
-    def test_oversized_query_degrades_to_recent_scoped_memory(self) -> None:
+    def test_oversized_query_is_projected_instead_of_dropping_retrieval(self) -> None:
         store = ConversationStore()
         try:
             store.save_memory(
@@ -134,13 +136,39 @@ class HistoryOutputSecurityTests(unittest.TestCase):
                 content="needle00 keep the restart window at ten minutes",
             )
             query = " ".join(f"needle{index:02d}" for index in range(70))
-            with self.assertLogs("yukinal_agent.conversation_store", level="WARNING") as logs:
-                messages, sources = store.memory_context(None, query)
+            report: dict[str, object] = {}
+            messages, sources = store.memory_context(None, query, report=report)
             self.assertEqual([source["title"] for source in sources], ["Operational default"])
             self.assertIn("ten minutes", messages[0].content)
             payload = _retrieval_payload(messages[0])
-            self.assertEqual(payload["retrieval"]["mode"], "recent-low-confidence")
-            self.assertIn("QueryTokenLimitError", logs.output[0])
+            # The leading intent still ranks, so the turn keeps real retrieval
+            # instead of silently degrading every realistic long instruction.
+            self.assertEqual(payload["retrieval"]["mode"], "hybrid")
+            self.assertTrue(report["projected"])
+            self.assertFalse(report["degraded"])
+            self.assertEqual(report["mode"], "hybrid")
+            self.assertLess(report["usedChars"], len(query))
+        finally:
+            store.close()
+
+    def test_index_failure_degrades_and_reports_the_reason(self) -> None:
+        store = ConversationStore()
+        try:
+            store.save_memory(
+                scope="global",
+                server_id=None,
+                title="Operational default",
+                content="keep the restart window at ten minutes",
+            )
+            report: dict[str, object] = {}
+            with mock.patch.object(store, "_search_knowledge", side_effect=sqlite3.DatabaseError("damaged")):
+                with self.assertLogs("yukinal_agent.conversation_store", level="WARNING") as logs:
+                    messages, sources = store.memory_context(None, "restart window", report=report)
+            self.assertEqual([source["title"] for source in sources], ["Operational default"])
+            self.assertTrue(report["degraded"])
+            self.assertEqual(report["reason"], "DatabaseError")
+            self.assertEqual(_retrieval_payload(messages[0])["retrieval"]["mode"], "recent-low-confidence")
+            self.assertIn("degraded to recent explicit memories", logs.output[0])
         finally:
             store.close()
 

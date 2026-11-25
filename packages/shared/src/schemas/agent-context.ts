@@ -53,6 +53,25 @@ export const AgentKnowledgeSourceSchema = z.strictObject({
 
 export const AgentContextSourceSchema = z.union([AgentMemorySourceSchema, AgentKnowledgeSourceSchema]);
 
+/**
+ * What the memory/knowledge retrieval actually did for this turn.
+ *
+ * The agent projects a long instruction down to a searchable query instead of
+ * failing the lookup, and it degrades to recent explicit memories when the index is
+ * unusable. Both are legitimate, but neither may be silent: without this the UI can
+ * only show *which* sources were used, never that retrieval was projected or
+ * degraded — so "no relevant memory" and "retrieval switched off" look identical.
+ */
+export const AgentMemoryRetrievalSchema = z.strictObject({
+  mode: z.enum(["none", "hybrid", "recent-low-confidence"]),
+  queryChars: z.number().int().nonnegative(),
+  usedChars: z.number().int().nonnegative(),
+  projected: z.boolean(),
+  degraded: z.boolean(),
+  /** Exception class name when `degraded` is true; never a message with data in it. */
+  reason: z.string().trim().min(1).max(200).optional(),
+});
+
 export const AgentContextUsageSchema = z.strictObject({
   totalTurns: z.number().int().nonnegative(),
   includedTurns: z.number().int().nonnegative(),
@@ -60,6 +79,7 @@ export const AgentContextUsageSchema = z.strictObject({
   inputBytes: z.number().int().nonnegative(),
   maxInputBytes: z.number().int().positive(),
   memorySources: z.array(AgentContextSourceSchema).max(12).optional(),
+  memoryRetrieval: AgentMemoryRetrievalSchema.optional(),
 });
 
 export const AgentMemorySchema = z.strictObject({

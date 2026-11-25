@@ -24,7 +24,7 @@ Agent 工具调用须经权限引擎和宿主复核：目标由本地解析，�
 
 SSH、Provider 与 MCP secret 交给操作系统凭据库；配置和数据库只保存必要的引用与任务元数据。跨机器复制数据库不能代替重新绑定系统凭据。主机指纹首次连接必须由用户通过可信渠道核验；指纹变化应拒绝连接并提示核查。
 
-Python sidecar 在 `YUKINAL_DATA_DIR/agent-state/langgraph-checkpoints.sqlite` 保存 LangGraph 恢复状态，其中可能包含提示词、模型消息和工具结果。POSIX 上状态目录权限为 `0700`、数据库为 `0600`；Windows 使用每用户应用数据目录的 ACL。检查点启用严格 msgpack 反序列化，但 SQLite 文件本身未加密，因此本地备份和磁盘访问也应按敏感数据保护。该存储恢复同一运行的图状态，不等同于桌面任务和计划生命周期的完整恢复。
+Python sidecar 在 `YUKINAL_DATA_DIR/agent-state/langgraph-checkpoints.sqlite` 保存 LangGraph 恢复状态，其中可能包含提示词、模型消息和工具结果。POSIX 上状态目录权限为 `0700`、数据库为 `0600`；Windows 由 sidecar 自己为 `agent-state` 目录与库文件设置**仅当前用户**的受保护 DACL（`SetNamedSecurityInfoW`，每次打开时重设），不再依赖应用数据目录的继承 ACL。检查点启用严格 msgpack 反序列化——由 sidecar 显式向 saver 注入 `JsonPlusSerializer(allowed_msgpack_modules=None)` 实现，因为 langgraph 只在导入 `langgraph.checkpoint.serde._msgpack` 时读一次 `LANGGRAPH_STRICT_MSGPACK`，任何在已导入 langgraph 之后设置的环境变量都不生效。SQLite 文件本身未加密，因此本地备份和磁盘访问也应按敏感数据保护。该存储恢复同一运行的图状态，不等同于桌面任务和计划生命周期的完整恢复。
 
 值守运行使用独立会话，操作事件只携带运行绑定、阶段、工具名称与用量，不携带正文、参数或审批内容。只读 `watch.status` 要求当前上下文与宿主目标为同一服务器，通过 `host.context.fetch` 读取最多 20 条已保存计划的状态、时间和摘要，不返回会话正文或发起远端探测；结果仍是可能过时的不可信参考数据。前台本轮明确要求不用工具时，程序关闭工具和团队派发入口，并阻止旧目标自动续跑。
 

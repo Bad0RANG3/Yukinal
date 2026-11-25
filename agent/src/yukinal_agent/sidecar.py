@@ -1201,18 +1201,15 @@ class PythonSidecar:
         session_id = request["sessionId"]
         if self._conversations.latest_resume_key(session_id, run_id):
             return
-        digest = _turn_digest(request)
-        turn_key = f"turn:{digest}"
-        for row in self._conversations.checkpoint_bindings(session_id):
-            existing = self._conversations.latest_resume_key(session_id, row["runId"])
-            if existing == turn_key:
-                # An earlier attempt at exactly this request in this window: continue it.
-                self._conversations.record_resume_key(
-                    session_id, run_id, existing
-                )
-                return
+        # Every turn is recorded under its digest, *including* the first attempt.
+        # Recording only the `runid:` fallback here is what used to make a repeat of
+        # the same request open a second thread instead of continuing the paused one:
+        # the comparison below could never see a `turn:` key that this method had
+        # never written. The key is a pure function of the request, so a repeat in the
+        # same window resolves to the same thread and a pending approval is handed
+        # back; a different window has a different session id inside the digest.
         self._conversations.record_resume_key(
-            session_id, run_id, f"runid:{hashlib.sha256(run_id.encode('utf-8')).hexdigest()[:32]}"
+            session_id, run_id, f"turn:{_turn_digest(request)}"
         )
 
     async def _execute_session_run(
@@ -1246,8 +1243,11 @@ class PythonSidecar:
             memory_budget = min(16 * 1024, available_bytes // 8)
             context = self._conversations.context(request["sessionId"], request.get("targetId"), exclude_run=run_id,
                                                   max_bytes=available_bytes - memory_budget, query_text=request["promptText"])
-            memories, sources = self._conversations.memory_context(request.get("targetId"), request["promptText"], max_bytes=memory_budget)
-            context_usage = {**context.usage, "memorySources": sources}
+            memory_retrieval: dict[str, Any] = {}
+            memories, sources = self._conversations.memory_context(
+                request.get("targetId"), request["promptText"], max_bytes=memory_budget, report=memory_retrieval,
+            )
+            context_usage = {**context.usage, "memorySources": sources, "memoryRetrieval": memory_retrieval}
             context_usage["inputBytes"] = message_bytes([*memories, *context.messages]) if memories or context.messages else 0
             context_usage["maxInputBytes"] = max(1, available_bytes)
             self._record_run_event(run_id, {"type": "context.loaded", "context": context_usage})

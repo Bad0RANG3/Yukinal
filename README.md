@@ -132,9 +132,12 @@ desktop path.
 | Bounded SFTP list/stat/read/write/backup, guarded atomic replace | ✅ Implemented |
 | C++ desktop host: window, IPC router, SQLite, credentials, approvals | ✅ Implemented |
 | Python Agent: LangGraph loop, Tool Registry, policy, redacted audit | ✅ Implemented · partially accepted; multi-target long-duration coverage remains open — see [live record](./docs/agent-live-acceptance-20261027.md) |
+| Long-horizon goal loop: admission, mid-run review, stall handling | ⚠️ Partial · admission is a prompt regex (misses plain long requests and accepts some one-liners), `goal` mode has **no** tool-call or model-round cap by default (only wall-clock and output bytes), and an unparsable review gets one bounded repair attempt |
 | MCP clients (stdio + Streamable HTTP) with approval-required defaults | ✅ Implemented |
 | Model factory: OpenAI-compatible, Anthropic, Gemini | ✅ Implemented |
 | Local RAG knowledge index with explicit-memory hybrid retrieval | ✅ Implemented · curated-corpus scope; no neural embeddings or ANN index |
+| Memory scope and writes | ⚠️ Partial · scopes are `global`/`server` only (no tenant/user dimension); writes only through the `agent.memory.save` RPC (no model-facing memory tool); no expiry or conflict resolution |
+| Checkpoint recovery (`turn:<digest>` lookup, pending approval across restart) | ✅ Implemented · strict msgpack injected explicitly; Windows directory and database carry an owner-only DACL; `budget_binding` excludes the per-turn inferred output budget |
 | Durable approvals with per-call fingerprint binding and expiry | ✅ Implemented · a pending approval survives a restart and is handed back when the same request is repeated in the same window |
 | Control plane: tenants, nodes, tasks, approvals, policy, audit | ✅ Implemented (SQLite-verified) |
 | Durable task/plan recovery | ✅ Save, restart recovery, and `plan.step_result` settlement verified; multi-target long-duration coverage remains open |

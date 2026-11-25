@@ -94,7 +94,7 @@ best-effort：决定本身是 RPC 的结果，不能因为审计 sink 失败而�
 
 ## 已记录、未修复
 
-### 5. 端到端恢复 —— 已修复（规则：同窗口继续，不同窗口重开）
+### 5. 端到端恢复 —— 修过两次，第二次才真正接通
 
 `ModelDrivenAgent` 的 checkpoint 恢复能力本身是真的，但桌面链路曾走不到：UI 重发必然
 生成新 `runId`，thread id 又由 `runId` 派生，旧 checkpoint 永不被查询。
@@ -102,7 +102,7 @@ best-effort：决定本身是 RPC 的结果，不能因为审计 sink 失败而�
 实测（修复前）：审批卡片出现时杀掉 host，重启后在同一会话重发同一句话——新 runId
 `run_84fcada5`、新 thread `agent-0b9e8fcd`、模型重跑一轮、指纹整体改变。
 
-**修复**：把"定位"与"校验"拆成两件事。
+**第一次修复（2026-10-27）**：把"定位"与"校验"拆成两件事。
 
 - `ExecutionContext` 之外新增 `checkpoint_key`：一个按**会话轮次**稳定的定位键。
   thread id 变为 `hash("turn", tenant, user, checkpoint_key)`。
@@ -124,6 +124,31 @@ best-effort：决定本身是 RPC 的结果，不能因为审计 sink 失败而�
 
 回归：`test_agent_live_acceptance_fixes::PendingApprovalSurvivesARestartInTheSameWindow`
 三个用例（重启后交回同一审批且只执行一次 / 已结束轮次不重放 / 不同窗口重开）。
+
+**第二次修复（R4 审计，2026-11-25）**：上面那段结论当时并不成立，`turn:<digest>` 是死代码。
+
+`_prepare_resume_key` 构造了 `turn_key` 却只在遍历已有键时**比对**它，唯一的写入点是
+末尾的 `runid:<hash(run_id)[:32]>` 分支。也就是说同一个请求每重发一次就拿到一个新
+`runid:` 键 → 新线程 → **第二次暂停**，而不是续上第一次的挂起审批。上面三个回归用例
+没有发现它，因为它们在 `_run` 的 kwargs 里手工传了 `checkpoint_key="turn:stablekey"`，
+绕过了侧车的键推导。
+
+- `_prepare_resume_key` 现在直接写 `turn:<digest>`（仍在同会话内按 run 记录一次，
+  同一 run 已记录则不覆盖），`runid:` 回退分支删除。
+- `_checkpoint_matches` 改为按"本轮"比对：system prompt 与本轮 user message 必须一致，
+  历史前缀不参与。全前缀比较会把**本该允许**的恢复判成 `checkpoint_context_mismatch`
+  ——被暂停的轮次在下一轮的历史里被折叠成一条 `historicalIncompleteTurn` 记录，前缀
+  形状必然变化。
+- `budget_binding` 不再包含 `max_model_output_tokens`：它由
+  `inference_policy.select_inference` 按提示文本/标记逐轮推断，绑进快照会让同一轮的
+  重发自己跟自己不符。
+- 侧车每条 run 结果带 `context.memoryRetrieval`（`mode`/`projected`/`degraded`/`reason`/
+  `usedChars`），恢复失败不再只以"记忆好像没用上"的形式表现。
+
+回归：`test_agent_live_acceptance_fixes` 新增真实侧车路径的用例（不再手工注入
+`checkpoint_key`）；`test_sustained_goal_loop`、`test_agent_model_loop`、
+`test_agent_capability_gates` 仍全绿，`GATE 5-persistence-recovery` 打印
+`sameCheckpoint: true` 与 `executedOnce: true`。
 
 ### 5b. 自动批准下可以连改（修复过程中发现）
 

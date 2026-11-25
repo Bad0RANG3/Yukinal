@@ -39,6 +39,7 @@ export interface AgentContextUsage {
   inputBytes: number;
   maxInputBytes: number;
   memorySources?: AgentContextSource[];
+  memoryRetrieval?: AgentMemoryRetrieval;
 }
 
 export interface AgentMemorySource {
@@ -47,6 +48,22 @@ export interface AgentMemorySource {
   serverId?: string;
   title: string;
   updatedAt: string;
+}
+
+/**
+ * What retrieval did for this turn: `hybrid` ranked matches, `recent-low-confidence`
+ * injected recent explicit memories because nothing matched, `none` with no context
+ * at all. `projected` says the instruction was cut down to a searchable query and
+ * `degraded` says the index itself failed, so the UI can tell "nothing relevant" from
+ * "retrieval was switched off".
+ */
+export interface AgentMemoryRetrieval {
+  mode: "none" | "hybrid" | "recent-low-confidence";
+  queryChars: number;
+  usedChars: number;
+  projected: boolean;
+  degraded: boolean;
+  reason?: string;
 }
 
 /**

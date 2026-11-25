@@ -100,26 +100,40 @@ def review_payload(prompt: str, answer: str, results: list[dict[str, Any]]) -> s
     return json.dumps({"originalGoal": prompt, "proposedAnswer": answer, "evidence": evidence}, ensure_ascii=False)
 
 
-def parse_review(text: str, results: list[dict[str, Any]]) -> dict[str, Any] | None:
+def parse_review_report(text: str, results: list[dict[str, Any]]) -> tuple[dict[str, Any] | None, str]:
+    """Parse a completion review and say why it was unusable.
+
+    A ``format`` failure is a serialization accident — a fenced block, a renamed
+    field, one item too long — and one repair attempt is worth making, because
+    the review itself may have been correct. An ``evidence`` failure is not: a
+    review that cites calls which did not succeed is asserting completion with
+    facts it does not have, and asking again only invites it to guess a
+    different id.
+    """
     if len(text.encode("utf-8")) > 16 * 1024:
-        return None
+        return None, "format"
     try:
         value = json.loads(text)
     except (TypeError, ValueError):
-        return None
+        return None, "format"
     if not isinstance(value, dict) or set(value) != {"state", "remaining", "evidenceIds", "reason"}:
-        return None
+        return None, "format"
     if value["state"] not in {"continue", "completed", "blocked"} or not isinstance(value["reason"], str) or len(value["reason"]) > 1500:
-        return None
+        return None, "format"
     for key, maximum, width in (("remaining", 20, 512), ("evidenceIds", 100, 256)):
         if not isinstance(value[key], list) or len(value[key]) > maximum or any(not isinstance(x, str) or not x.strip() or len(x) > width for x in value[key]):
-            return None
+            return None, "format"
     if not set(value["evidenceIds"]).issubset(successful_evidence(results)):
-        return None
+        return None, "evidence"
     if value["state"] == "completed" and (value["remaining"] or not value["evidenceIds"]):
-        return None
+        return None, "evidence"
     if value["state"] == "continue" and not value["remaining"]:
-        return None
+        return None, "format"
     if value["state"] == "blocked" and not value["reason"].strip():
-        return None
-    return value
+        return None, "format"
+    return value, ""
+
+
+def parse_review(text: str, results: list[dict[str, Any]]) -> dict[str, Any] | None:
+    review, _ = parse_review_report(text, results)
+    return review

@@ -330,7 +330,7 @@ class RuntimeKnowledgeIntegrationTests(unittest.TestCase):
             sorted(fixture_by_scope["global"]),
         )
 
-    def test_oversized_query_degrades_the_turn_but_keeps_the_corpus_open(self) -> None:
+    def test_oversized_query_is_projected_so_the_turn_keeps_real_retrieval(self) -> None:
         _write_document(
             self.corpus / "public.md",
             "Public corpus",
@@ -346,12 +346,43 @@ class RuntimeKnowledgeIntegrationTests(unittest.TestCase):
                 title="Explicit fallback",
                 content="explicit fallback marker",
             )
-            oversized = " ".join(f"qx{index:03d}" for index in range(1, 66))
-            with self.assertLogs("yukinal_agent.conversation_store", level="WARNING") as logs:
-                messages, sources = store.memory_context(None, oversized)
+            oversized = "public corpus needle " + " ".join(f"qx{index:03d}" for index in range(1, 66))
+            report: dict[str, object] = {}
+            messages, sources = store.memory_context(None, oversized, report=report)
+            self.assertIn("Public corpus", [source["title"] for source in sources])
+            payload = _retrieval_payload(messages[0])
+            self.assertEqual(payload["retrieval"]["mode"], "hybrid")  # type: ignore[index]
+            self.assertTrue(report["projected"])
+            self.assertFalse(report["degraded"])
+            self.assertTrue(store.corpus_enabled)
+        finally:
+            store.close()
+
+    def test_damaged_index_degrades_the_turn_but_keeps_the_corpus_open(self) -> None:
+        _write_document(
+            self.corpus / "public.md",
+            "Public corpus",
+            "# Public corpus\n\n## Scope {#scope}\n\npublic corpus needle",
+        )
+        self._index()
+        store = self._open()
+        try:
+            self.assertTrue(store.corpus_enabled)
+            store.save_memory(
+                scope="global",
+                server_id=None,
+                title="Explicit fallback",
+                content="explicit fallback marker",
+            )
+            report: dict[str, object] = {}
+            with mock.patch.object(store, "_search_knowledge", side_effect=sqlite3.DatabaseError("damaged")):
+                with self.assertLogs("yukinal_agent.conversation_store", level="WARNING") as logs:
+                    messages, sources = store.memory_context(None, "public corpus needle", report=report)
             self.assertEqual([source["title"] for source in sources], ["Explicit fallback"])
             payload = _retrieval_payload(messages[0])
             self.assertEqual(payload["retrieval"]["mode"], "recent-low-confidence")  # type: ignore[index]
+            self.assertTrue(report["degraded"])
+            self.assertEqual(report["reason"], "DatabaseError")
             self.assertTrue(store.corpus_enabled)
         finally:
             store.close()

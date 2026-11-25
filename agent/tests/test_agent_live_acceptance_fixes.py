@@ -302,7 +302,11 @@ class PendingApprovalSurvivesARestartInTheSameWindow(unittest.IsolatedAsyncioTes
                 )
                 second = await again.run(**self._kwargs("run-b"))
                 self.assertEqual(second.status, "awaiting_approval")
-                self.assertNotEqual(second.checkpoint_id, paused.checkpoint_id)
+                # A finished turn is not replayed: the repeat proposes the write again
+                # instead of returning the finished answer. The thread id is *reused*
+                # on purpose — the finished snapshot was discarded first, and minting
+                # a fresh uuid id here is what used to leak one snapshot per repeat.
+                self.assertEqual(second.checkpoint_id, paused.checkpoint_id)
             self.assertEqual(executions, [{"value": "x"}])
 
     async def test_a_different_window_starts_fresh(self) -> None:

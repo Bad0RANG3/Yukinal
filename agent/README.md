@@ -13,12 +13,18 @@ broader write-capable desktop tools remain future work.
 
 **Restoring a pending approval works across a restart, within one window.**
 The checkpoint thread is located by a per-turn `checkpoint_key` the sidecar stores
-on the conversation turn (`runid:<hash>`, or `turn:<digest>` when the same request
-is repeated), not by the attempt's `runId`. A repeat in the same window therefore
-hands the paused graph back; a different window has a different session id, so its
-digest differs and it starts fresh. `checkpoint_binding` remains the verifier:
-scope, target, allowed tools, budget or goal mode changing still fails closed. A
-finished turn is never replayed — repeating it starts a new request.
+on the conversation turn. That key is `turn:<digest>` — a digest of
+`(session, target, mode, permissionMode, policyId, toolAccess, planBinding,
+promptText, taskId)` — and it is written for **every** admitted turn, so repeating
+the same request resolves to the same thread and hands the paused graph back. A
+different window has a different session id, so its digest differs and it starts
+fresh. `checkpoint_binding` remains the verifier: scope, target, allowed tools,
+budget or goal mode changing still fails closed. Comparing a restored snapshot
+checks the turn, not the archive: the system prompt and this turn's user message
+must match, while the replayed history prefix may legitimately differ because it
+is re-projected from the store (a paused turn becomes a collapsed incomplete-turn
+record, memory reorders, compaction moves anchors). A finished turn is never
+replayed — repeating it starts a new request.
 
 Only in `permissionMode=auto` does the turn after a real change become a
 **read-only confirmation turn**, because nobody saw the first result; a second

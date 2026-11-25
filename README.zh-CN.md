@@ -124,9 +124,12 @@ Token 用量在按钮旁展开，不挤动状态行；模型与设置菜单受�
 | 有界 SFTP 列举/元数据/读取/写入/备份、守卫式原子替换 | ✅ 已实现 |
 | C++ 桌面宿主：窗口、IPC 路由、SQLite、凭据、审批 | ✅ 已实现 |
 | Python Agent：LangGraph 循环、Tool Registry、策略、脱敏审计 | ✅ 已实现 · 部分验收通过；真实多目标长时覆盖仍待补齐，见[实机记录](./docs/agent-live-acceptance-20261027.md) |
+| 长任务（goal 循环）：准入判定、中途复核、进度停滞收束 | ⚠️ 部分实现 · 准入靠提示词正则（双向误判），`goal` 模式默认**无**工具调用/模型轮次上限（只有总时长与输出字节）；逐轮复核解析失败会先做一次有界修复重试 |
 | MCP 客户端（stdio + Streamable HTTP），默认需要审批 | ✅ 已实现 |
 | 模型工厂：OpenAI 兼容、Anthropic、Gemini | ✅ 已实现 |
 | 本地 RAG 知识索引与显式记忆 hybrid 检索 | ✅ 已实现 · 适用于小型 curated 语料；无神经 embedding 或 ANN 索引 |
+| 记忆作用域与写入 | ⚠️ 部分实现 · 作用域只有 `global`/`server`，无 tenant/user 维度；写入只有 `agent.memory.save` RPC（模型没有记忆写入工具），无过期或冲突消解 |
+| 检查点恢复（`turn:<digest>` 定位、跨重启续挂起审批） | ✅ 已实现 · 显式注入严格 msgpack 反序列化；Windows 目录与库文件按当前用户独占 DACL；`budget_binding` 不含逐轮推断的输出预算 |
 | 持久审批：逐次调用指纹绑定与有效期 | ✅ 已实现 |
 | 控制平面：租户、节点、任务、审批、策略、审计 | ✅ 已实现（SQLite 验证） |
 | 任务/计划持久恢复 | ✅ 已验证保存、桌面重启恢复及 `plan.step_result` 步骤结算；真实多目标长时覆盖仍待补齐 |

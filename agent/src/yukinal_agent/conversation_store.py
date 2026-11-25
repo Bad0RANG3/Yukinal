@@ -30,6 +30,7 @@ from yukinal_knowledge import (
     chunk_markdown,
     feature_vector,
     normalize_text,
+    project_query,
     search_chunks,
     tokenize,
 )
@@ -721,33 +722,57 @@ class ConversationStore:
                 self._connection.execute("DELETE FROM knowledge_documents WHERE memory_id = ?", (memory_id,))
         return deleted
 
-    def memory_context(self, server_id: str | None, query: str, *, max_bytes: int = 16 * 1024) -> tuple[list[Any], list[dict[str, Any]]]:
+    def memory_context(
+        self,
+        server_id: str | None,
+        query: str,
+        *,
+        max_bytes: int = 16 * 1024,
+        report: dict[str, Any] | None = None,
+    ) -> tuple[list[Any], list[dict[str, Any]]]:
+        # Retrieval runs on a *projected* query, never on the raw instruction.
+        # An ordinary long instruction is 35+ CJK characters, which tokenizes to
+        # more than the index's 64-facet query limit; passing it through would
+        # raise `QueryTokenLimitError` on every realistic sustained task and the
+        # turn would silently fall back to "four least-recently-irrelevant
+        # memories" forever. Projecting keeps the leading intent, which is what
+        # the first sentence of an instruction carries.
+        if report is not None:
+            report.clear()
+            report.update({"mode": "none", "queryChars": len(query), "usedChars": 0,
+                           "projected": False, "degraded": False})
         if max_bytes < 512:
             return [], []
         query = query[:4000]
-        query_tokens = tokenize(query)
+        projected = project_query(query)
+        query_tokens = tokenize(projected)
+        if report is not None:
+            report["usedChars"] = len(projected)
+            report["projected"] = len(projected) < len(query)
         ranked: list[SearchResult] = []
         if query_tokens:
             try:
                 ranked = self._dedupe_by_document([
-                    *self._search_knowledge(server_id, query, limit=8),
-                    *self._search_corpus(server_id, query),
+                    *self._search_knowledge(server_id, projected, limit=8),
+                    *self._search_corpus(server_id, projected),
                 ])
             except (KnowledgeError, OSError, ValueError, sqlite3.Error) as error:
-                # Retrieval is optional context. A query outside the searchable
-                # token budget, or a damaged optional index, must not fail the
-                # whole agent turn; the scoped explicit-memory fallback below is
-                # still usable and remains visibly low confidence.
+                # Retrieval is optional context. A damaged optional index must not
+                # fail the whole agent turn, but the degradation is *reported*, not
+                # hidden: `memoryRetrieval` reaches the run event and the UI.
                 logger.warning(
                     "Knowledge retrieval degraded to recent explicit memories (%s)",
                     error.__class__.__name__,
                 )
+                if report is not None:
+                    report["degraded"] = True
+                    report["reason"] = error.__class__.__name__
         fallback = False
         if not ranked:
             # A short follow-up may contain searchable terms that do not appear
-            # in saved memory, and an oversized query cannot be ranked. Include
-            # only recent explicit memories from the same scope, marked as
-            # low-confidence advice because they did not match the query.
+            # in saved memory. Include only recent explicit memories from the same
+            # scope, marked as low-confidence advice because they did not match the
+            # query.
             records = self._knowledge_records(server_id, limit=256)
             seen: set[str] = set()
             ranked = []
@@ -759,6 +784,10 @@ class ConversationStore:
                 if len(ranked) >= 4:
                     break
             fallback = bool(ranked)
+        if report is not None and not report.get("degraded"):
+            report["mode"] = ("none" if not ranked else
+                              "recent-low-confidence" if fallback else "hybrid")
+        retrieval_mode = "recent-low-confidence" if fallback else "hybrid"
         sources: list[dict[str, Any]] = []
         items: list[dict[str, Any]] = []
         source_ids: set[str] = set()
@@ -801,7 +830,7 @@ class ConversationStore:
             candidate = [*accepted, item]
             envelope = untrusted_tool_content({
                 "retrieval": {
-                    "mode": "recent-low-confidence" if fallback else "hybrid",
+                    "mode": retrieval_mode,
                     "boundedScan": True,
                     "items": candidate,
                 }
@@ -820,6 +849,8 @@ class ConversationStore:
             accepted.append(item)
             messages = proposed
         if not messages:
+            if report is not None:
+                report["mode"] = "none"
             return [], []
         included = {item["sourceId"] for item in accepted}
         sources = [source for source in sources if source["id"] in included]

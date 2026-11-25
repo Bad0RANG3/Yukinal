@@ -7,6 +7,7 @@
  */
 
 import type {
+  AgentMemoryRetrieval,
   AgentPromptPart,
   AgentParticipant,
   ApprovalRequest,
@@ -248,6 +249,29 @@ export function runStateLabel(state: string | null): string | null {
   return state ? RUN_STATE_LABEL[state] ?? state : null;
 }
 
+/**
+ * What the memory lookup did this turn, in one line.
+ *
+ * "检索到 X 条" and "检索没有命中、退回了最近几条" are different statements, and
+ * "索引坏了" is a third. Collapsing them into a sources list makes an ordinary
+ * lookup indistinguishable from a silently disabled one.
+ */
+export function memoryRetrievalLabel(retrieval: AgentMemoryRetrieval): string {
+  const mode = retrieval.mode === "hybrid"
+    ? "知识库混合检索"
+    : retrieval.mode === "recent-low-confidence"
+      ? "无命中，已退回最近记忆（低置信）"
+      : "未注入记忆上下文";
+  const parts = [mode];
+  if (retrieval.projected) {
+    parts.push(`指令已裁剪为 ${retrieval.usedChars}/${retrieval.queryChars} 字符用于检索`);
+  }
+  if (retrieval.degraded) {
+    parts.push(`索引不可用（${retrieval.reason ?? "unknown"}）`);
+  }
+  return parts.join("；");
+}
+
 export function agentFailureLabel(error: string): string {
   return ({
     tool_call_limit_exceeded: "本次运行已达到工具调用次数上限。已完成的操作仍保留，可从当前状态继续。",
@@ -256,6 +280,11 @@ export function agentFailureLabel(error: string): string {
     goal_review_failed: "验收检查未返回有效结果，本次任务未标记完成。已完成的操作仍保留。",
     goal_blocked: "任务遇到需要处理的阻塞，尚未完成。请查看上方具体说明。",
     goal_no_progress: "任务连续没有新进展，已停止空转。已完成的操作仍保留。",
+    task_timeout:
+      "本次运行已用完总时长预算。已完成的工具调用仍然有效；若要继续，请先确认目标当前状态再重新发起。",
+    outcome_unknown:
+      "已提交的变更可能已经生效，但运行记录没有落盘，因此结果是未知的。继续之前请先用只读方式核对实际状态，不要直接重试。",
+    checkpoint_write_failed: "运行记录无法写入本地存储，本次运行已停止；若已有变更提交到目标，其状态未知。",
   } as Record<string, string>)[error] ?? error;
 }
 
