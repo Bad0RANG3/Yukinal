@@ -1,0 +1,17 @@
+[
+  {
+    "id": "mem_6bba6f1aa2734f938335c0f41b03b613",
+    "scope": "global",
+    "title": "Explicit memory",
+    "updatedAt": "2026-11-25T11:02:42.889998+00:00"
+  },
+  {
+    "id": "nginx/timeout.md",
+    "scope": "knowledge",
+    "serverId": "srv_alpha",
+    "title": "Nginx timeout guide",
+    "updatedAt": "2026-11-25",
+    "section": "Nginx timeout guide › Triage",
+    "chunkId": "nginx/timeout.md#chunk-0000"
+  }
+]

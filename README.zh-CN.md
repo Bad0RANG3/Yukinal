@@ -126,6 +126,7 @@ Token 用量在按钮旁展开，不挤动状态行；模型与设置菜单受�
 | Python Agent：LangGraph 循环、Tool Registry、策略、脱敏审计 | ✅ 已实现 · 部分验收通过；真实多目标长时覆盖仍待补齐，见[实机记录](./docs/agent-live-acceptance-20261027.md) |
 | MCP 客户端（stdio + Streamable HTTP），默认需要审批 | ✅ 已实现 |
 | 模型工厂：OpenAI 兼容、Anthropic、Gemini | ✅ 已实现 |
+| 本地 RAG 知识索引与显式记忆 hybrid 检索 | ✅ 已实现 · 适用于小型 curated 语料；无神经 embedding 或 ANN 索引 |
 | 持久审批：逐次调用指纹绑定与有效期 | ✅ 已实现 |
 | 控制平面：租户、节点、任务、审批、策略、审计 | ✅ 已实现（SQLite 验证） |
 | 任务/计划持久恢复 | ✅ 已验证保存、桌面重启恢复及 `plan.step_result` 步骤结算；真实多目标长时覆盖仍待补齐 |
@@ -259,6 +260,8 @@ SSH 服务需单独启动。
 | [文档索引](./docs/README.md) | 全部项目文档的导航 |
 | [产品定义](./docs/product.md) | 目标用户、场景与功能取舍 |
 | [安全与数据边界](./docs/security.md) | Agent 能做什么、何时需要批准 |
+| [RAG 知识索引](./docs/rag-knowledge-index.md) | 本地语料的架构、CLI、评估与安全边界 |
+| [RAG 示例语料](./examples/rag/README.md) | 用仓库夹具完成索引与评估的完整示例 |
 | [重写方案](./docs/rewrite-cpp-python.md) | C++/Python 重写阶段与接口 |
 | [C++ 接管与 Rust 移除计划](./docs/rust-removal-plan.md) | 从零实现 C++ 宿主能力的指导 |
 | [C++ 桌面宿主迁移](./docs/native-desktop-host.md) | 桌面宿主架构 |

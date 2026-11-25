@@ -12,6 +12,7 @@
 | 布局与控件 | [桌面窗口与工作区](./desktop-window-direction.md)、[界面表达与皮肤约定](./ui-design-system.md) |
 | 用户路径与功能范围 | [产品定义](./product.md) |
 | Agent 权限与方法 | [安全与数据边界](./security.md)、[运维 Agent 处理流程](./ops-agent-procedure.md) |
+| RAG 知识索引与离线 CLI | [RAG 知识索引](./rag-knowledge-index.md)、[示例语料与评估](../examples/rag/README.md) |
 | Agent 实机验收与缺陷 | [实机验收记录 2026-10-27](./agent-live-acceptance-20261027.md) |
 | 长任务、推理和上下文 | [AI 运行与对话体验](./ai-runtime-performance.md) |
 | 图形与检测扩展 | [AI 绘图协议](./ai-visual-protocol.md)、[服务器检测工具包](./server-toolkit.md) |
@@ -26,6 +27,7 @@
 | --- | --- |
 | C++ 宿主与重写 | [原生宿主](./native-desktop-host.md)、[重写方案](./rewrite-cpp-python.md) |
 | 施工与命令清单 | [目标架构](./architecture-and-build-plan.md)、[剩余目标交接](./handover.md)、[桌面施工交接](./cpp-desktop-handoff.md) |
+| RAG 知识索引接手 | [RAG 知识索引交接](./rag-knowledge-handoff.md) |
 | 迁移历史 | [C++ 接管与 Rust 移除](./rust-removal-plan.md) |
 | 早期验收 | [SSH + Agent 验收交接](./acceptance-handoff.md)、[旧发布记录](./release-history-20261020.md) |
 

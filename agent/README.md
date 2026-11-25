@@ -136,6 +136,38 @@ the desktop autoconfiguration path, the Python sidecar resolves the selected
 that call. `target_id` is not part of the model-visible input schema. The
 desktop host forwards the C++ service credentials only to the Python sidecar.
 
+## Local RAG knowledge index
+
+The `agent` package installs a `yukinal-knowledge` command for a local,
+curated-corpus RAG index. It stores Markdown or text chunks in a dedicated
+SQLite database, supports BM25-style lexical search, deterministic
+signed-feature-hash vectors, and reciprocal-rank-fusion hybrid search. The
+vectors are not neural embeddings, and the implementation scans candidate
+chunks in Python rather than providing a production-scale ANN service.
+
+```powershell
+agent/.venv/Scripts/yukinal-knowledge.exe index --source examples/rag/corpus --db var/knowledge/knowledge.sqlite
+agent/.venv/Scripts/yukinal-knowledge.exe search "nginx 504 long request" --db var/knowledge/knowledge.sqlite --mode hybrid --format json
+agent/.venv/Scripts/yukinal-knowledge.exe eval --db var/knowledge/knowledge.sqlite --questions examples/rag/eval/questions.jsonl --modes lexical,vector,hybrid --threshold 0.9
+```
+
+On macOS or Linux, use `agent/.venv/bin/yukinal-knowledge`. `doctor`, `stats`,
+`search`, and `eval` open the database read-only; `index` and `delete` are the
+write commands. Documents are capped at 96 KiB and 128 chunks per document;
+oversized input fails instead of being silently truncated. ACL and environment
+fields are retrieval metadata, not authentication. A search without a principal
+returns only `public` documents, and an optional `--principal` is self-asserted
+input rather than a host-verified identity. Corpus results entering the desktop
+Agent are bounded untrusted references and cannot authorize a mutation.
+
+Explicit saved memories live in the conversation database and use FTS5
+candidates plus local hybrid reranking. The standalone corpus is a different
+SQLite database: the sidecar opens it read-only from `YUKINAL_KNOWLEDGE_DB`, or
+from `<data-dir>/knowledge/knowledge.sqlite` only when that file already exists.
+Invalid or missing corpus configuration leaves explicit memory working and
+disables corpus retrieval. Desktop direct import stores Markdown/TXT memories
+without ACL metadata; use the CLI for ACL-bearing documents.
+
 Desktop development uses this runtime by default. Create the environment from the
 repository root and install the runtime dependencies:
 

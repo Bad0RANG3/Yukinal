@@ -1,0 +1,36 @@
+{
+  "runId": "run_20261125",
+  "started": true,
+  "result": {
+    "runId": "run_20261125",
+    "state": "completed",
+    "text": "Raise proxy_read_timeout, then restart nginx and re-check upstream latency.",
+    "steps": 3,
+    "toolCalls": 2,
+    "traceId": "trc_20261125",
+    "context": {
+      "totalTurns": 2,
+      "includedTurns": 2,
+      "compactedTurns": 0,
+      "inputBytes": 4096,
+      "maxInputBytes": 65536,
+      "memorySources": [
+        {
+          "id": "mem_6bba6f1aa2734f938335c0f41b03b613",
+          "scope": "global",
+          "title": "Explicit memory",
+          "updatedAt": "2026-11-25T11:02:42.889998+00:00"
+        },
+        {
+          "id": "nginx/timeout.md",
+          "scope": "knowledge",
+          "serverId": "srv_alpha",
+          "title": "Nginx timeout guide",
+          "updatedAt": "2026-11-25",
+          "section": "Nginx timeout guide › Triage",
+          "chunkId": "nginx/timeout.md#chunk-0000"
+        }
+      ]
+    }
+  }
+}

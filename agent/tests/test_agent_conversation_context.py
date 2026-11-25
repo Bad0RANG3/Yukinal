@@ -57,6 +57,11 @@ def request(run_id: str, *, session: str = "session-1", server: str | None = Non
             **({"focusServerId": server} if server else {})}
 
 
+def _unique_token_query(count: int) -> str:
+    """Return a query with exactly ``count`` distinct searchable tokens under the IPC byte cap."""
+    return " ".join(chr(0x4E00 + index) for index in range(count))
+
+
 class ConversationTests(unittest.IsolatedAsyncioTestCase):
     async def test_conversation_only_request_cannot_execute_even_a_read_tool(self) -> None:
         store = ConversationStore()
@@ -542,6 +547,23 @@ class ConversationTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn("error", denied)
         bad_scope = await sidecar.rpc("agent.memory.save", {"scope": "server", "title": "Missing scope", "content": "No server"})
         self.assertEqual(bad_scope["error"]["code"], RPC_INVALID_PARAMS)
+        store.close()
+
+    async def test_memory_list_maps_an_oversized_query_to_invalid_params(self) -> None:
+        store = ConversationStore()
+        sidecar = LocalSidecar(ScriptedModel([]), store)
+        store.save_memory(scope="global", server_id=None, title="Explicit fallback", content="explicit fallback marker")
+        oversized = _unique_token_query(65)
+        accepted = _unique_token_query(64)
+        self.assertLessEqual(len(oversized), 200)
+        for response in (
+            await sidecar.rpc("agent.memory.list", {"query": oversized}),
+            sidecar.handle({"jsonrpc": "2.0", "id": 3, "method": "agent.memory.list", "params": {"query": oversized}}),
+        ):
+            self.assertEqual(response["error"]["code"], RPC_INVALID_PARAMS)
+            self.assertEqual(response["error"]["message"], "query has 65 unique searchable tokens; limit is 64")
+        listed = await sidecar.rpc("agent.memory.list", {"query": accepted})
+        self.assertEqual(listed["result"], {"memories": []})
         store.close()
 
     async def test_incomplete_tool_turn_is_reference_data_and_raw_fields_are_retained(self) -> None:

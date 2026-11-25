@@ -18,6 +18,7 @@ from urllib.request import HTTPRedirectHandler, ProxyHandler, Request, build_ope
 
 from langchain_core.messages import HumanMessage
 
+from yukinal_knowledge import KnowledgeError
 from yukinal_ssh import SshServiceClient
 
 from .audit import JsonlAuditSink
@@ -1073,9 +1074,13 @@ class PythonSidecar:
 
     def _memory_list(self, params: object) -> dict[str, Any]:
         parsed = _parse_memory_params(params, "list")
-        return {"memories": self._conversations.list_memories(
-            server_id=parsed.get("serverId"), scope=parsed.get("scope"), query=parsed.get("query", ""), limit=parsed.get("limit", 100),
-        )}
+        try:
+            memories = self._conversations.list_memories(
+                server_id=parsed.get("serverId"), scope=parsed.get("scope"), query=parsed.get("query", ""), limit=parsed.get("limit", 100),
+            )
+        except ValueError as error:
+            raise _RpcFault(RPC_INVALID_PARAMS, str(error)) from None
+        return {"memories": memories}
 
     def _memory_save(self, params: object) -> dict[str, Any]:
         parsed = _parse_memory_params(params, "save")
@@ -2567,6 +2572,36 @@ async def _serve_runtime(sidecar: PythonSidecar, data_dir: str, tool_count: int)
             await service.stop()
 
 
+def _knowledge_database_path(data_dir: str | Path) -> Path | None:
+    explicit = os.environ.get("YUKINAL_KNOWLEDGE_DB", "").strip()
+    if explicit:
+        return Path(explicit).expanduser()
+    candidate = Path(data_dir).expanduser() / "knowledge" / "knowledge.sqlite"
+    return candidate if candidate.exists() or candidate.is_symlink() else None
+
+
+def _conversation_store(
+    data_dir: str | Path,
+    *,
+    knowledge_database: Path | None = None,
+) -> ConversationStore | None:
+    if not str(data_dir).strip():
+        return None
+    database = Path(data_dir).expanduser() / "agent-state" / "conversations.sqlite"
+    knowledge_path = knowledge_database if knowledge_database is not None else _knowledge_database_path(data_dir)
+    if knowledge_path is None:
+        return ConversationStore(database)
+    try:
+        return ConversationStore(database, knowledge_database=knowledge_path)
+    except KnowledgeError:
+        print(
+            "Knowledge index is unavailable or invalid; corpus retrieval is disabled",
+            file=sys.stderr,
+            flush=True,
+        )
+        return ConversationStore(database)
+
+
 def main() -> None:
     """Entry point for the Python Agent Node Sidecar."""
     data_dir = os.environ.get("YUKINAL_DATA_DIR", "").strip()
@@ -2591,7 +2626,7 @@ def main() -> None:
         registry,
         managed_ssh_service_binary=managed_ssh_service_binary,
         provider_store=provider_store,
-        conversation_store=ConversationStore(Path(data_dir) / "agent-state" / "conversations.sqlite") if data_dir else None,
+        conversation_store=_conversation_store(data_dir),
     )
     try:
         asyncio.run(_serve_runtime(sidecar, data_dir, len(registry.list())))

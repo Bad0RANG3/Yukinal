@@ -21,7 +21,7 @@ import { useWorkpageOperations } from "../src/features/workpages/useWorkpageOper
 // Effects/focus/layout/real remote behavior are deliberately outside these assertions.
 const styles = registerHooks({ load: (url, context, nextLoad) => url.endsWith(".css")
   ? { format: "module", source: "", shortCircuit: true } : nextLoad(url, context) });
-const { MemoryLibrary } = await import("../src/features/agent/MemoryLibrary.js");
+const { MemoryLibrary, prepareMemoryDraft } = await import("../src/features/agent/MemoryLibrary.js");
 const { ServerOverview, recentServerActivityQueryOptions, startSnapshotDisplayClock } = await import("../src/features/overview/ServerOverview.js");
 const { RuntimeSettings, RuntimeLogs } = await import("../src/features/settings/RuntimeSettings.js");
 const { LogsPane } = await import("../src/features/logs/LogsPane.js");
@@ -184,6 +184,78 @@ test("memory deletion and context reset confirm inline instead of blocking the w
   // No confirmation group is rendered until the user asks for one: the panel must not
   // look like it is already in a destructive flow.
   assert.doesNotMatch(markup, /确认删除记忆|确认重置上下文/);
+});
+
+test("memory knowledge import is bounded, file-backed, and never prompts for a local path", () => {
+  client.setQueryData(["agent-memories", "global", null, ""], []);
+  const markup = render(<MemoryLibrary onClose={() => {}} />);
+
+  assert.match(markup, />导入知识<\/button>/);
+  assert.match(markup, /data-memory-import/);
+  const picker = /<input(?:(?!>).)*data-memory-import-input(?:(?!>).)*>/.exec(markup)?.[0] ?? "";
+  assert.ok(picker, "the import button must own a hidden file picker");
+  assert.match(picker, /type="file"/);
+  assert.match(picker, /accept="\.md,\.markdown,\.txt"/);
+  assert.match(picker, /\bmultiple(?:="")?/);
+  assert.match(picker, /\bhidden(?:="")?/);
+
+  assert.equal(prepareMemoryDraft("notes.md", "x".repeat(12_001)), null);
+  assert.equal(prepareMemoryDraft("notes.md", " \n\t "), null);
+  assert.equal(prepareMemoryDraft("notes.txt", "x".repeat(12_000))?.content.length, 12_000);
+  assert.equal(prepareMemoryDraft("notes.md", "# Heading\n\nbody")?.title, "Heading");
+  assert.equal(prepareMemoryDraft("notes.txt", "body")?.title, "notes");
+  assert.equal(prepareMemoryDraft("C:\\private\\notes.md", "body")?.title, "notes");
+  assert.equal(prepareMemoryDraft("notes.md", `# ${"T".repeat(201)}\n\nbody`)?.title, "T".repeat(200));
+  assert.equal(prepareMemoryDraft("notes.md", `# ${"😀".repeat(201)}\n\nbody`)?.title, "😀".repeat(100));
+
+  const source = readFileSync(new URL("../src/features/agent/MemoryLibrary.tsx", import.meta.url), "utf8");
+  assert.match(source, /await file\.text\(\)/);
+  assert.match(source, /IPC_COMMANDS\.agentMemorySave/);
+  assert.match(source, /导入完成：成功/);
+  assert.match(source, /yukinal-knowledge CLI/);
+  assert.doesNotMatch(source, /window\.confirm\s*\(/);
+  assert.doesNotMatch(source, /FileReader|webkitRelativePath|local_path_pick|file\.path|console\.(?:log|info|warn|error)/);
+});
+
+test("memory knowledge import rejects front matter instead of widening document scope", () => {
+  assert.equal(prepareMemoryDraft("C:\\private\\notes.md",
+    "\uFEFF---\r\n# Hidden heading\r\ntitle: Hidden\r\n---\r\n\r\n# Real heading\r\n\r\nBody\r\n"), null);
+  assert.equal(prepareMemoryDraft("guide.markdown",
+    "+++\ntitle = \"Hidden\"\nacl = [\"team-ops\"]\n+++\n# Body\nContent"), null);
+  assert.deepEqual(prepareMemoryDraft("notes.txt", "\uFEFFfirst line\r\n#Not a heading\r\n---\r\nlast line\r\n"), {
+    title: "notes",
+    content: "first line\r\n#Not a heading\r\n---\r\nlast line",
+  });
+
+  assert.equal(prepareMemoryDraft("notes.md", "---\ntitle: Unclosed\n# Body"), null);
+  assert.equal(prepareMemoryDraft("notes.md", "+++\ntitle = \"Unclosed\"\n# Body"), null);
+  assert.equal(prepareMemoryDraft("notes.md", "---\ntitle: Mixed\n+++\n# Body"), null);
+  assert.equal(prepareMemoryDraft("notes.md", "---\ntitle: Empty\n---\r\n \r\n"), null);
+  assert.equal(prepareMemoryDraft("notes.md", " ---\ntitle: indented\n---\nBody")?.title, "notes");
+});
+
+test("memory knowledge headings skip fenced code and accept only ATX H1 outside fences", () => {
+  const fenced = [
+    "````markdown",
+    "# Not a heading",
+    "```",
+    "# Still fenced",
+    "````",
+    "~~~",
+    "# Tilde fenced",
+    "~~~",
+    "#Not a heading",
+    "    # Indented code",
+    "## Second level",
+    "# Actual heading #",
+    "Body",
+  ].join("\n");
+  const draft = prepareMemoryDraft("notes.md", fenced);
+  assert.equal(draft?.title, "Actual heading");
+  assert.equal(draft?.content, fenced);
+
+  assert.equal(prepareMemoryDraft("notes.md", "x".repeat(12_000))?.content.length, 12_000);
+  assert.equal(prepareMemoryDraft("notes.md", "x".repeat(12_001)), null);
 });
 
 test("hidden overview activity observers make no request, activation fetches once, hiding stops invalidation fetches", async () => {

@@ -19,19 +19,47 @@ export const AgentPersonaSchema = z.strictObject({
   systemPrompt: z.string().trim().min(1).max(20_000),
 });
 
+/**
+ * One explicit memory as `context.memorySources` reports it.
+ *
+ * Scope stays `global | server` on purpose: explicit memories are the only thing the
+ * save/list/delete API accepts, and `AgentMemorySchema` below reuses this shape.
+ */
+export const AgentMemorySourceSchema = z.strictObject({
+  id: IdentifierSchema,
+  scope: z.enum(["global", "server"]),
+  serverId: SERVER_ID_SCHEMA.optional(),
+  title: z.string().trim().min(1).max(200),
+  updatedAt: z.string().min(1).max(80),
+});
+
+/**
+ * One curated-corpus passage reported beside explicit memories.
+ *
+ * `agent/src/yukinal_agent/conversation_store.py` (`memory_context`) emits these with
+ * `scope: "knowledge"` plus the passage's `section` and `chunkId`. The scope is a
+ * literal so a corpus passage can never pass as, or be promoted into, an explicit
+ * memory — the two are different databases with different lifecycles.
+ */
+export const AgentKnowledgeSourceSchema = z.strictObject({
+  id: IdentifierSchema,
+  scope: z.literal("knowledge"),
+  serverId: SERVER_ID_SCHEMA.optional(),
+  title: z.string().trim().min(1).max(200),
+  updatedAt: z.string().min(1).max(80),
+  section: z.string().trim().min(1).max(2_000),
+  chunkId: z.string().trim().min(1).max(512),
+});
+
+export const AgentContextSourceSchema = z.union([AgentMemorySourceSchema, AgentKnowledgeSourceSchema]);
+
 export const AgentContextUsageSchema = z.strictObject({
   totalTurns: z.number().int().nonnegative(),
   includedTurns: z.number().int().nonnegative(),
   compactedTurns: z.number().int().nonnegative(),
   inputBytes: z.number().int().nonnegative(),
   maxInputBytes: z.number().int().positive(),
-  memorySources: z.array(z.strictObject({
-    id: IdentifierSchema,
-    scope: z.enum(["global", "server"]),
-    serverId: SERVER_ID_SCHEMA.optional(),
-    title: z.string().trim().min(1).max(200),
-    updatedAt: z.string().min(1).max(80),
-  })).max(12).optional(),
+  memorySources: z.array(AgentContextSourceSchema).max(12).optional(),
 });
 
 export const AgentMemorySchema = z.strictObject({

@@ -24,6 +24,14 @@ nlohmann::json server_exec_denylist_decision_for_test(const std::string& config_
 
 }  // namespace yukinal::desktop_host::denylist_detail
 
+namespace yukinal::desktop_host::sidecar_launch_detail {
+
+// Linked from `ipc_router.cpp` so this test exercises the real forwarded-env
+// list instead of copying it into the test.
+nlohmann::json forwarded_environment_for_test();
+
+}  // namespace yukinal::desktop_host::sidecar_launch_detail
+
 namespace {
 
 void check(bool condition, const char* message) {
@@ -248,6 +256,21 @@ void check_server_exec_denylist_loader() {
   check(unreadable_decision.at("loaded") == false &&
             unreadable_decision.at("denied") == false,
         "an unloadable config must report loaded=false, which the host denies on");
+}
+
+void check_sidecar_environment_forwarding() {
+  using yukinal::desktop_host::sidecar_launch_detail::forwarded_environment_for_test;
+
+  const std::string knowledge_db = "C:\\Yukinal Test Data\\knowledge.sqlite";
+  set_environment_value("YUKINAL_KNOWLEDGE_DB", knowledge_db);
+  const auto forwarded = forwarded_environment_for_test();
+  check(forwarded.value("YUKINAL_KNOWLEDGE_DB", "") == knowledge_db,
+        "the desktop host must forward YUKINAL_KNOWLEDGE_DB to the sidecar");
+
+  set_environment_value("YUKINAL_KNOWLEDGE_DB", "");
+  const auto absent = forwarded_environment_for_test();
+  check(!absent.contains("YUKINAL_KNOWLEDGE_DB"),
+        "an empty knowledge database path must not be forwarded as an explicit capability");
 }
 
 }  // namespace
@@ -581,6 +604,7 @@ int main() {
   // Operator policy: the `server.exec` command blacklist loader must never let an
   // unreadable configured policy look like an empty one.
   check_server_exec_denylist_loader();
+  check_sidecar_environment_forwarding();
 
   return 0;
 }

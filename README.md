@@ -134,6 +134,7 @@ desktop path.
 | Python Agent: LangGraph loop, Tool Registry, policy, redacted audit | ✅ Implemented · partially accepted; multi-target long-duration coverage remains open — see [live record](./docs/agent-live-acceptance-20261027.md) |
 | MCP clients (stdio + Streamable HTTP) with approval-required defaults | ✅ Implemented |
 | Model factory: OpenAI-compatible, Anthropic, Gemini | ✅ Implemented |
+| Local RAG knowledge index with explicit-memory hybrid retrieval | ✅ Implemented · curated-corpus scope; no neural embeddings or ANN index |
 | Durable approvals with per-call fingerprint binding and expiry | ✅ Implemented · a pending approval survives a restart and is handed back when the same request is repeated in the same window |
 | Control plane: tenants, nodes, tasks, approvals, policy, audit | ✅ Implemented (SQLite-verified) |
 | Durable task/plan recovery | ✅ Save, restart recovery, and `plan.step_result` settlement verified; multi-target long-duration coverage remains open |
@@ -285,6 +286,8 @@ The full boundary is documented in [security and data boundaries](./docs/securit
 | [Documentation index](./docs/README.md) | The map of all project docs |
 | [Product definition](./docs/product.md) | Users, scenarios, and feature trade-offs |
 | [Security & data boundaries](./docs/security.md) | What the Agent may do and when it needs approval |
+| [RAG knowledge index](./docs/rag-knowledge-index.md) | Architecture, CLI, evaluation, and security limits of local corpus retrieval |
+| [Example RAG corpus](./examples/rag/README.md) | Indexing and evaluation walkthrough with the checked-in fixtures |
 | [Rewrite plan & current status](./docs/rewrite-cpp-python.md) | The C++/Python rewrite stage and interfaces |
 | [C++ takeover & Rust removal plan](./docs/rust-removal-plan.md) | From-scratch C++ host capability guidance |
 | [C++ desktop host migration](./docs/native-desktop-host.md) | Desktop host architecture |

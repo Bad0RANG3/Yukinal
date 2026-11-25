@@ -2,6 +2,8 @@
 .memory-library { width: min(620px, calc(100% - 40px)); max-height: min(740px, 90vh); flex-direction: column; gap: 12px; padding: 20px; background: #282828; color: var(--text); border: 1px solid var(--line); border-radius: 8px; min-height: 0; }
 .memory-library[open] { display: flex; }
 .memory-library header, .memory-library footer, .memory-toolbar, .memory-actions { display: flex; justify-content: space-between; align-items: center; gap: 12px; }
+.memory-toolbar { flex-wrap: wrap; }
+.memory-toolbar-actions { display: flex; align-items: center; justify-content: flex-end; flex-wrap: wrap; gap: 8px; }
 .memory-library h2 { margin: 0; font-size: 16px; }
 .memory-toolbar [role="group"] { display: flex; gap: 4px; }
 .memory-toolbar [aria-pressed] { padding: 5px 8px; border: 0; background: transparent; color: var(--muted); }

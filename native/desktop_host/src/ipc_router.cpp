@@ -1148,6 +1148,18 @@ std::optional<std::string> read_environment(const char* name) {
 #endif
 }
 
+// These are the only desktop process values forwarded to the Python sidecar.
+// Keep the list explicit: the sidecar receives a minimal process environment,
+// and every entry here is an intentional local capability handoff.
+constexpr const char* kForwardedSidecarEnvironment[] = {
+    "YUKINAL_SSH_API_TOKEN",
+    "YUKINAL_SSH_API_URL",
+    "YUKINAL_SSH_SERVICE_AUTOCONFIG",
+    "YUKINAL_SSH_SERVICE_BINARY",
+    "YUKINAL_SSH_SERVICE_CONFIG",
+    "YUKINAL_KNOWLEDGE_DB",
+};
+
 /* ── Investigation host RPC (Agent → host) ──────────────────────────────── */
 
 constexpr const char* kToolServerExec = "server.exec";
@@ -9609,6 +9621,20 @@ void IpcRouter::set_event_sink(
   event_sink_ = std::move(sink);
 }
 
+namespace sidecar_launch_detail {
+
+nlohmann::json forwarded_environment_for_test() {
+  nlohmann::json result = nlohmann::json::object();
+  for (const auto* name : kForwardedSidecarEnvironment) {
+    if (const auto value = read_environment(name); value.has_value() && !value->empty()) {
+      result[name] = *value;
+    }
+  }
+  return result;
+}
+
+}  // namespace sidecar_launch_detail
+
 void IpcRouter::configure_sidecar() {
   SidecarLaunch launch;
   if (const auto entry = read_environment("YUKINAL_AGENT_ENTRY");
@@ -9625,9 +9651,7 @@ void IpcRouter::configure_sidecar() {
       source.has_value() && !source->empty()) {
     launch.environment.push_back({"PYTHONPATH", *source});
   }
-  for (const auto* name : {"YUKINAL_SSH_API_TOKEN", "YUKINAL_SSH_API_URL",
-                           "YUKINAL_SSH_SERVICE_AUTOCONFIG", "YUKINAL_SSH_SERVICE_BINARY",
-                           "YUKINAL_SSH_SERVICE_CONFIG"}) {
+  for (const auto* name : kForwardedSidecarEnvironment) {
     if (const auto value = read_environment(name); value.has_value() && !value->empty()) {
       launch.environment.push_back({name, *value});
     }

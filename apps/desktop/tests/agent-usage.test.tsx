@@ -27,3 +27,16 @@ test("diagnostics show actual effort and answer timing, while absent provider re
   assert.match(markup,/已上报缓存命中/);
   assert.doesNotMatch(render(null),/首段正文|推理用量|缓存命中/);
 });
+
+const contextUsage = {totalTurns:3,includedTurns:2,compactedTurns:0,inputBytes:2048,maxInputBytes:8192,
+  memorySources:[{id:"global/pref",scope:"global" as const,title:"全局偏好",updatedAt:"2026-11-20"},
+    {id:"nginx/timeout.md",scope:"knowledge" as const,serverId:"srv_alpha",title:"Nginx timeout guide",updatedAt:"2026-11-25",
+      section:"Nginx timeout guide › Triage",chunkId:"nginx/timeout.md#chunk-0000"}]};
+
+test("knowledge passages render beside explicit memories without exposing chunk ids", () => {
+  const markup = renderToStaticMarkup(<AgentRunStatus running={false} runState="completed" tokenUsage={usage} contextUsage={contextUsage} agentReady shell/>);
+  assert.match(markup,/使用记忆/);
+  assert.match(markup,/全局偏好/);
+  assert.match(markup,/Nginx timeout guide/);
+  assert.doesNotMatch(markup,/chunk-0000/);
+});

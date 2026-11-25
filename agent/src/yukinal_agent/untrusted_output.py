@@ -6,25 +6,13 @@ No remote bytes can close the boundary or introduce terminal controls.
 from __future__ import annotations
 
 import json
-import re
-import unicodedata
 from typing import Any
 
-START = "[[UNTRUSTED_REMOTE_OUTPUT]]"
-END = "[[/UNTRUSTED_REMOTE_OUTPUT]]"
-_ESCAPES = re.compile(
-    r"(?:\x1b\][^\x07\x1b]*(?:\x07|\x1b\\|$))"
-    r"|(?:\x1b[P^_X].*?(?:\x1b\\|$))"
-    r"|(?:\x1b\[[0-?]*[ -/]*[@-~])|(?:\x1b[ -/]*[@-Z\\-_])",
-    re.DOTALL,
-)
+from yukinal_knowledge.text_safety import UNTRUSTED_END as END
+from yukinal_knowledge.text_safety import UNTRUSTED_START as START
+from yukinal_knowledge.text_safety import clean_text
+
 _RESERVED = {"_untrustedStart", "_untrustedEnd"}
-
-
-def clean_text(value: str) -> str:
-    value = _ESCAPES.sub("", value)
-    value = "".join(ch for ch in value if ch in "\n\t" or unicodedata.category(ch) not in {"Cc", "Cf", "Cs"})
-    return value.replace(START, "[remote boundary text]").replace(END, "[/remote boundary text]")
 
 
 def clean_value(value: Any) -> Any:

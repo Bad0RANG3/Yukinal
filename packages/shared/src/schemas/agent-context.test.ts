@@ -1,8 +1,20 @@
 import assert from "node:assert/strict";
+import { readFileSync } from "node:fs";
 import test from "node:test";
 
 import { AgentRunRequestSchema } from "./permission.js";
-import { IPC_SCHEMAS } from "./ipc.js";
+import { EVENT_SCHEMAS, IPC_SCHEMAS } from "./ipc.js";
+import {
+  AgentContextSourceSchema,
+  AgentContextUsageSchema,
+  AgentKnowledgeSourceSchema,
+} from "./agent-context.js";
+
+const AGENT_FIXTURE_DIR = new URL("../../fixtures/agent/", import.meta.url);
+
+function agentFixture(name: string): unknown {
+  return JSON.parse(readFileSync(new URL(`${name}.json`, AGENT_FIXTURE_DIR), "utf8")) as unknown;
+}
 
 test("the active persona crosses both request gates separately from user text", () => {
   const request = {
@@ -32,4 +44,45 @@ test("restored messages keep speaker and model metadata without a persona prompt
   assert.equal(IPC_SCHEMAS.chat_message_append.params.safeParse({ ...message, id: undefined }).success, false);
   const { id, ...input } = message;
   assert.equal(IPC_SCHEMAS.chat_message_append.params.safeParse({ ...input, messageId: id }).success, true);
+});
+
+/**
+ * The payloads below were captured from the Python producer
+ * (`agent/src/yukinal_agent/conversation_store.py` `memory_context()`) against a real
+ * temporary corpus, not hand-written. `agent/tests/test_knowledge_runtime.py` re-runs the
+ * producer and asserts the knowledge entry still equals this fixture, so the two gates
+ * here cannot drift away from what the sidecar actually sends.
+ */
+test("a corpus source crosses the sync run response and the completed event", () => {
+  const response = IPC_SCHEMAS.agent_run_start.response.safeParse(agentFixture("run_start_knowledge_sync"));
+  assert.equal(response.success, true, "agent_run_start sync response must accept a knowledge source");
+
+  const event = EVENT_SCHEMAS["agent.completed"].safeParse(agentFixture("completed_knowledge_event"));
+  assert.equal(event.success, true, "agent.completed must accept the same corpus source");
+
+  const sources = agentFixture("context_knowledge_sources");
+  assert.ok(Array.isArray(sources));
+  const parsed = AgentContextUsageSchema.parse({
+    totalTurns: 2, includedTurns: 2, compactedTurns: 0, inputBytes: 4096, maxInputBytes: 65536,
+    memorySources: sources,
+  });
+  const knowledge = parsed.memorySources?.find((source) => source.scope === "knowledge");
+  assert.equal(knowledge?.title, "Nginx timeout guide");
+  assert.equal(knowledge?.scope === "knowledge" ? knowledge.chunkId : undefined, "nginx/timeout.md#chunk-0000");
+});
+
+test("only the knowledge scope carries section and chunkId", () => {
+  const sources = agentFixture("context_knowledge_sources") as Array<Record<string, unknown>>;
+  const knowledge = sources.find((source) => source.scope === "knowledge")!;
+  assert.deepEqual(AgentContextSourceSchema.parse(knowledge), knowledge);
+  assert.equal(AgentKnowledgeSourceSchema.safeParse({ ...knowledge, scope: "global" }).success, false);
+  assert.equal(AgentKnowledgeSourceSchema.safeParse({ ...knowledge, section: " " }).success, false);
+  assert.equal(AgentKnowledgeSourceSchema.safeParse({ ...knowledge, chunkId: "" }).success, false);
+  assert.equal(AgentKnowledgeSourceSchema.safeParse({ ...knowledge, text: "leaked body" }).success, false);
+
+  // The corpus scope cannot enter the explicit-memory API, and an explicit memory keeps
+  // its two scopes: the union is on the context report, not on memory save/list/delete.
+  assert.equal(IPC_SCHEMAS.agent_memory_save.params.safeParse({ scope: "knowledge", title: "t", content: "c" }).success, false);
+  assert.equal(IPC_SCHEMAS.agent_memory_list.params.safeParse({ scope: "knowledge" }).success, false);
+  assert.equal(AgentContextSourceSchema.safeParse({ id: "mem-1", scope: "global", title: "t", updatedAt: "2026-11-25" }).success, true);
 });

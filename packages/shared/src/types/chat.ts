@@ -38,7 +38,7 @@ export interface AgentContextUsage {
   compactedTurns: number;
   inputBytes: number;
   maxInputBytes: number;
-  memorySources?: AgentMemorySource[];
+  memorySources?: AgentContextSource[];
 }
 
 export interface AgentMemorySource {
@@ -48,6 +48,23 @@ export interface AgentMemorySource {
   title: string;
   updatedAt: string;
 }
+
+/**
+ * A curated-corpus passage. It is retrieval evidence, not a saved memory: the
+ * `knowledge` scope keeps it out of the explicit-memory API, and `section`/`chunkId`
+ * identify the passage that was actually encoded into the model context.
+ */
+export interface AgentKnowledgeSource {
+  id: string;
+  scope: "knowledge";
+  serverId?: string;
+  title: string;
+  updatedAt: string;
+  section: string;
+  chunkId: string;
+}
+
+export type AgentContextSource = AgentMemorySource | AgentKnowledgeSource;
 
 export interface AgentMemory extends AgentMemorySource {
   content: string;
