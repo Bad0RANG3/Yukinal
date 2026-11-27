@@ -1,8 +1,7 @@
 import type { AnimationEventHandler, RefObject } from "react";
-import type { AgentPermissionMode, AgentRunMode, Environment } from "@yukinal/shared";
+import type { AgentPermissionMode, AgentRunMode } from "@yukinal/shared";
 import { Icon } from "../../components/Icon.js";
 import { APPROVAL_ORDER, RUN_MODE_ORDER, approvalOptionSpec, runModeSpec } from "./run-mode.js";
-import { RUN_POLICY_ORDER, policyEnvironmentWarning, runPolicySpec, type RunPolicyChoice } from "./run-policy.js";
 
 export interface ConversationSettingsProps {
   id: string;
@@ -16,9 +15,6 @@ export interface ConversationSettingsProps {
   onRunModeChange: (mode: AgentRunMode) => void;
   permissionMode: AgentPermissionMode;
   onPermissionModeChange: (mode: AgentPermissionMode) => void;
-  runPolicy: RunPolicyChoice;
-  onRunPolicyChange: (policy: RunPolicyChoice) => void;
-  targetEnvironment: Environment;
   delivery: "async" | "sync";
   onDeliveryChange: (value: "async" | "sync") => void;
 }
@@ -28,8 +24,6 @@ export function ConversationSettings(props: ConversationSettingsProps) {
   const editable = props.open && !props.running;
   const mode = runModeSpec(props.runMode);
   const approval = approvalOptionSpec(props.permissionMode);
-  const policy = runPolicySpec(props.runPolicy);
-  const warning = policyEnvironmentWarning(props.runPolicy, props.targetEnvironment);
   const change = <T,>(callback: (value: T) => void, value: T) => { if (editable) callback(value); };
   return <div ref={props.panelRef} id={props.id}
     popover="manual" className={`agent-settings-panel anchored-popover${props.closing ? " is-closing" : ""}`}
@@ -55,27 +49,12 @@ export function ConversationSettings(props: ConversationSettingsProps) {
       </label>
       <p className="agent-settings-description" id={`${props.id}-approval`}>{approval.summary}</p>
     </section>
-    {warning ? <p className="agent-settings-warning" role="status">{warning}</p> : null}
-    <details className="agent-settings-advanced">
-      <summary><span>更多设置</span><span className="agent-settings-policy-label">{policy.label}</span><Icon name="chevronDown" size="xs" /></summary>
-      <div className="agent-settings-advanced-body">
-        <div className="agent-settings-field" role="group" aria-label="目标策略" aria-labelledby={`${props.id}-policy-title`} aria-describedby={`${props.id}-policy`}>
-          <span id={`${props.id}-policy-title`}>目标策略</span>
-          <ul className="agent-settings-options">
-            {RUN_POLICY_ORDER.map((value) => <li key={value ?? "environment"}>
-              <button type="button" className={`agent-settings-option${value === props.runPolicy ? " is-selected" : ""}`} aria-pressed={value === props.runPolicy} disabled>
-                <span className="agent-settings-option-label">{runPolicySpec(value).label}</span>
-              </button>
-            </li>)}
-          </ul>
-        </div>
-        <p className="agent-settings-warning" id={`${props.id}-policy`} role="status">当前 Agent Node 暂不支持策略选择；请求携带策略标识会被拒绝。运行由“运行方式”和“批准方式”约束。{warning ? ` ${warning}` : ""}</p>
-        <div className="agent-settings-delivery" role="group" aria-label="投递方式">
-          {([["async", "流式返回"], ["sync", "等待完成"]] as const).map(([value, label]) =>
-            <button key={value} type="button" className={`agent-settings-option${value === props.delivery ? " is-selected" : ""}`}
-              aria-pressed={value === props.delivery} disabled={!editable} onClick={() => change(props.onDeliveryChange, value)}>{label}</button>)}
-        </div>
+    <div className="agent-settings-extra">
+      <div className="agent-settings-delivery" role="group" aria-label="投递方式">
+        {([["async", "流式返回"], ["sync", "等待完成"]] as const).map(([value, label]) =>
+          <button key={value} type="button" className={`agent-settings-option${value === props.delivery ? " is-selected" : ""}`}
+            aria-pressed={value === props.delivery} disabled={!editable} onClick={() => change(props.onDeliveryChange, value)}>{label}</button>)}
       </div>
-    </details>
+    </div>
   </div>;
 }

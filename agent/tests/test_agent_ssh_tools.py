@@ -211,6 +211,13 @@ class FakeDesktopSshClient:
     def service_status(self, *arguments: Any) -> Any:
         return self._result("service_status", *arguments)
 
+    def read_probe(self, *arguments: Any) -> Any:
+        self.calls.append(("read_probe", arguments))
+        return SimpleNamespace(
+            target_id=arguments[0], operation="read_probe", exit_code=0,
+            stdout="PRESENT\n", stderr="", duration_ms=2, output_truncated=False,
+        )
+
     def disk_usage(self, *arguments: Any) -> Any:
         self.calls.append(("disk_usage", arguments))
         return SimpleNamespace(
@@ -512,6 +519,8 @@ class SshToolTests(unittest.IsolatedAsyncioTestCase):
             "filesystem.write", "filesystem.edit", "filesystem.backup", "filesystem.restore",
             "filesystem.backup.cleanup", "systemd.restart", "docker.restart", "package.install",
             "server.exec",
+            "system.swap", "filesystem.inodes", "filesystem.mounts", "system.time",
+            "filesystem.exists",
         })
         FakeDesktopSshProcess.instances.clear()
         FakeDesktopSshClient.calls.clear()
@@ -531,6 +540,12 @@ class SshToolTests(unittest.IsolatedAsyncioTestCase):
             ("filesystem.list", {"path": "/etc/nginx"}, "sftp_list", ("srv_stage1", "/etc/nginx")),
             ("server.processes", {}, "process_inventory", ("srv_stage1",)),
             ("server.ports", {}, "port_inventory", ("srv_stage1",)),
+            ("system.swap", {}, "read_probe", ("srv_stage1", "system.swap", None, 10)),
+            ("filesystem.inodes", {}, "read_probe", ("srv_stage1", "filesystem.inodes", None, 10)),
+            ("filesystem.mounts", {}, "read_probe", ("srv_stage1", "filesystem.mounts", None, 10)),
+            ("system.time", {}, "read_probe", ("srv_stage1", "system.time", None, 10)),
+            ("filesystem.exists", {"path": "/tmp/probe"}, "read_probe",
+             ("srv_stage1", "filesystem.exists", "/tmp/probe", 10)),
         ]
         context = ExecutionContext(
             task_id="task-ssh-1",
@@ -653,6 +668,9 @@ class SshToolTests(unittest.IsolatedAsyncioTestCase):
                         "usage_percent": 25,
                         "duration_ms": 3,
                     })
+                elif operation == "read_probe":
+                    self.assertEqual(result.value["tool"], tool_name)
+                    self.assertEqual(result.value["stdout"], "PRESENT\n")
                 else:
                     self.assertEqual(result.value["operation"], operation)
                     self.assertEqual(result.value["target_id"], "srv_stage1")

@@ -107,18 +107,14 @@ test("new terminal tabs have separate sessions and switching a fixed target reta
   assert.equal(useWorkpagesStore.getState().retainedTerminals.length, 3);
 });
 
-test("a team board is bound to its scope and opening it preserves existing terminal sessions", () => {
+test("the task board is a workbench surface, not a workpage, so opening a tool never displaces a terminal", () => {
   useWorkpagesStore.setState({ pages: [], retainedTerminals: [], recent: [], activeId: null, expandedId: null });
   const store = useWorkpagesStore.getState();
   store.openTool("terminal", { serverId: "srv_a" });
   const terminal = useWorkpagesStore.getState().retainedTerminals[0];
-  store.openTeamBoard("srv_a");
-  store.openTeamBoard("srv_a");
+  store.openTool("logs", { serverId: "srv_a" });
   assert.equal(useWorkpagesStore.getState().pages.length, 2);
-  assert.equal(useWorkpagesStore.getState().expandedId, "board:srv_a");
-  store.openTeamBoard(null);
-  assert.equal(useWorkpagesStore.getState().pages.at(-1)?.serverId, null);
-  store.close("board:all");
+  store.close(useWorkpagesStore.getState().pages.at(-1)!.id);
   assert.equal(useWorkpagesStore.getState().retainedTerminals[0], terminal);
   assert.equal(useWorkpagesStore.getState().retainedTerminals.length, 1);
 });

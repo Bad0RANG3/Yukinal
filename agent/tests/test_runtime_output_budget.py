@@ -46,9 +46,11 @@ class RuntimeOutputBudgetTests(unittest.IsolatedAsyncioTestCase):
         default = _run_budget(None)
         self.assertEqual((default.max_model_rounds, default.max_total_seconds), (8, 120))
         deployment = _run_budget({'maxSteps': 24, 'maxRunMs': 600000, 'maxAttempts': 1})
-        self.assertEqual((deployment.max_tool_calls, deployment.max_model_rounds, deployment.max_total_seconds), (24, 24, 600))
+        # A declared step count is a plan budget, not a call budget: each plan step
+        # costs a read, an evidence record and a citation, so calls scale with it.
+        self.assertEqual((deployment.max_tool_calls, deployment.max_model_rounds, deployment.max_total_seconds), (96, 24, 600))
         capped = _run_budget({'maxSteps': 10000, 'maxRunMs': 86400000, 'maxAttempts': 32})
-        self.assertEqual((capped.max_tool_calls, capped.max_model_rounds, capped.max_total_seconds), (64, 32, 900))
+        self.assertEqual((capped.max_tool_calls, capped.max_model_rounds, capped.max_total_seconds), (100, 32, 900))
 
     def test_goal_request_can_finish_setup_without_enlarging_readonly_budget(self):
         request = {'runId':'budget-run','sessionId':'budget-session','prompt':'deploy'}
@@ -57,7 +59,9 @@ class RuntimeOutputBudgetTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual((goal.max_tool_calls, goal.max_model_rounds, goal.max_total_seconds), (None, None, 600))
         self.assertEqual((readonly.max_model_rounds, readonly.max_total_seconds), (8, 120))
         explicit = _parse_run_request({**request, 'mode':'goal', 'taskBudget':{'maxSteps':2, 'maxRunMs':3000, 'maxAttempts':1}})['agentBudget']
-        self.assertEqual((explicit.max_model_rounds, explicit.max_total_seconds), (2, 3))
+        # A goal run's rounds follow its calls, because one plan step costs several
+        # turns; the wall clock is what bounds a deliberately tiny budget.
+        self.assertEqual((explicit.max_model_rounds, explicit.max_total_seconds), (8, 3))
 
     async def test_legacy_model_run_does_not_inherit_connection_probe_limit(self):
         sidecar = PythonSidecar(ToolRegistry(MemoryAuditSink()))

@@ -12,22 +12,25 @@ controlled AI Agent with a hardened, structured SSH service.
 [**English**](README.md) · [中文](README.zh-CN.md)
 
 [![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](./LICENSE)
-[![Version](https://img.shields.io/badge/interface-2.0.3-informational.svg)](./packages/shared/src/version.ts)
+[![Version](https://img.shields.io/badge/interface-2.1.0-informational.svg)](./packages/shared/src/version.ts)
 [![Platform](https://img.shields.io/badge/platform-Windows%20%7C%20macOS%20%7C%20Linux-6f42c1.svg)](#build-and-run)
 [![Python](https://img.shields.io/badge/python-3.11%2B-3776ab.svg)](./agent/README.md)
 [![Node](https://img.shields.io/badge/node-%3E%3D24-339933.svg)](package.json)
-[![Acceptance](https://img.shields.io/badge/Agent-partially%20verified-informational.svg)](./docs/release.md)
+[![Acceptance](https://img.shields.io/badge/Agent-live--verified-success.svg)](./docs/release.md)
 
 </div>
 
 ---
 
-> **Release: `2.0.3`.** This release includes the Agent acceptance fixes and
-> embeds Yukinal's Windows icon in the desktop host, including detached workpage
-> windows. Computer Use verified read-only plan settlement, task and plan recovery
-> after restart, and approval expiry without executing the pending command.
-> Multi-target long-duration load and installed-package GUI coverage remain open.
-> See the [release notes](./docs/releases/2.0.3.md) and
+> **Release: `2.1.0`.** This release closes the plan-settlement loop that the
+> previous release left open: the Agent can now record evidence, findings and a
+> decision brief, settle evidence, decision and verification steps across runs,
+> and stop in `waiting_user` when a brief needs your decision instead of failing
+> the task. The five approval-free fixed reads moved onto their own structured
+> `read_probe` route. A full run against a real server and a real provider —
+> evidence, plan, brief, your approval, an approved command, verification — now
+> reaches a completed plan and a completed task.
+> See the [release notes](./docs/releases/2.1.0.md) and
 > [delivery status](./docs/release.md) for evidence and package availability.
 > Windows NSIS, macOS DMG, and Debian Linux packages are built by CI. Packages
 > remain unsigned; the macOS application is not notarized.
@@ -131,21 +134,23 @@ desktop path.
 | Proxy routes (HTTP/HTTPS CONNECT, SOCKS5/SOCKS5H) and bypass rules | ✅ Implemented |
 | Bounded SFTP list/stat/read/write/backup, guarded atomic replace | ✅ Implemented |
 | C++ desktop host: window, IPC router, SQLite, credentials, approvals | ✅ Implemented |
-| Python Agent: LangGraph loop, Tool Registry, policy, redacted audit | ✅ Implemented · partially accepted; multi-target long-duration coverage remains open — see [live record](./docs/agent-live-acceptance-20261027.md) |
-| Long-horizon goal loop: admission, mid-run review, stall handling | ⚠️ Partial · admission is a prompt regex (misses plain long requests and accepts some one-liners), `goal` mode has **no** tool-call or model-round cap by default (only wall-clock and output bytes), and an unparsable review gets one bounded repair attempt |
+| Python Agent: LangGraph loop, Tool Registry, policy, redacted audit | ✅ Implemented · partially accepted; multi-target long-duration coverage remains open — see [release status](./docs/release.md) |
+| Long-horizon goal loop: admission, mid-run review, stall handling | ⚠️ Partial · admission trusts the host-declared `taskBudget` (`maxRunMs ≥ 10min` or `maxSteps ≥ 40`) and falls back to the prompt regex only when no budget is declared; `mode`/`toolAccess`/tool-less turns veto any budget; each admission records `sustainedGoal`/`source`/`declaredBudget` as an `agent.admitted` audit event. `goal` mode still has **no** tool-call or model-round cap by default (only wall-clock and output bytes), and an unparsable review gets one bounded repair attempt |
 | MCP clients (stdio + Streamable HTTP) with approval-required defaults | ✅ Implemented |
 | Model factory: OpenAI-compatible, Anthropic, Gemini | ✅ Implemented |
 | Local RAG knowledge index with explicit-memory hybrid retrieval | ✅ Implemented · curated-corpus scope; no neural embeddings or ANN index |
-| Memory scope and writes | ⚠️ Partial · scopes are `global`/`server` only (no tenant/user dimension); writes only through the `agent.memory.save` RPC (no model-facing memory tool); no expiry or conflict resolution |
+| Memory scope and writes | ⚠️ Partial · scopes are still `global`/`server` only (no tenant/user dimension); the model reaches memory through `memory.search` (read-only) and `memory.propose` (write, stored only after a per-call human approval, marked `origin=model`), with `agent.memory.*` RPC kept for the operator; `expiresAt` expiry (filtered in SQL, expired rows kept for audit) and `supersedes` version chains exist, without automatic deduplication or conflict resolution |
 | Checkpoint recovery (`turn:<digest>` lookup, pending approval across restart) | ✅ Implemented · strict msgpack injected explicitly; Windows directory and database carry an owner-only DACL; `budget_binding` excludes the per-turn inferred output budget |
 | Durable approvals with per-call fingerprint binding and expiry | ✅ Implemented · a pending approval survives a restart and is handed back when the same request is repeated in the same window |
 | Control plane: tenants, nodes, tasks, approvals, policy, audit | ✅ Implemented (SQLite-verified) |
-| Durable task/plan recovery | ✅ Save, restart recovery, and `plan.step_result` settlement verified; multi-target long-duration coverage remains open |
+| Durable task/plan recovery | ✅ Save, restart recovery, and `plan.step_result` settlement verified; 2.1.0 adds a full closed loop on a real target (evidence → brief → approval → execution → verification → completed plan); multi-target long-duration coverage remains open |
+| Decision briefs and host-side plan approval | ✅ Implemented · the Agent records evidence, findings and a brief, stops in `waiting_user`, and selecting an option approves the plan that the UI then resumes |
+| Approval-free fixed reads (`read_probe`) | ✅ Implemented · command text comes from the shared toolkit catalog compiled into C++; the model supplies no shell text |
 | Windows NSIS, macOS DMG, Debian Linux installers | Stable tag triggers three-platform build, smoke, and publication |
 | Code signing and macOS notarization | Not configured |
 | Platform-specific GUI, drag/drop, upgrade evidence | See release status; Agent acceptance is recorded separately |
 
-Full detail and evidence live in the [rewrite log](./docs/rewrite-cpp-python.md)
+Full detail and evidence live in the [architecture and build plan](./docs/architecture-and-build-plan.md)
 and [release status](./docs/release.md).
 
 ## Build and run
@@ -203,9 +208,18 @@ need human review.
 **5. Run the desktop**
 
 ```bash
-pnpm desktop:dev:cpp   # C++ WebView host + Vite (the real desktop)
-pnpm desktop:dev       # browser-only UI preview (no SQLite/SSH/PTY)
+pnpm dev           # one command: builds the C++ host and SSH worker, starts Vite, opens the desktop
+pnpm desktop:dev   # browser-only UI preview (no SQLite/SSH/PTY, no native build)
 ```
+
+`pnpm dev` builds the native targets itself, starts Vite (1420 by default,
+`YUKINAL_DESKTOP_DEV_PORT` to change it), and hands the SSH worker path and
+switch to the host, which in turn launches the Python sidecar. Remote calls
+belong to the processes this command manages, so an inherited
+`YUKINAL_SSH_API_TOKEN`, `YUKINAL_SSH_API_URL`, or
+`YUKINAL_SSH_SERVICE_CONFIG` is ignored with a one-line notice — the desktop
+needs neither a service config file nor a matching pair of tokens.
+`pnpm desktop:dev:cpp` is an alias of the same script for existing automation.
 
 The native development window stays connected to Vite: saving React or CSS files
 updates the open window automatically. Its AI header shows a development-only
@@ -227,33 +241,36 @@ pnpm package -- --verify
 
 ## Configuration
 
-Copy [`configs/ssh-service.example.json`](./configs/ssh-service.example.json),
-fill in an allow-listed target, add the host key to `known_hosts` (or pin its
-fingerprint / configure a host CA), and set `YUKINAL_SSH_API_TOKEN` to a random
-URL-safe value of 32–256 characters.
+The desktop needs no configuration file. Servers are added in the app (name,
+host, port, username, authentication); credentials are held by the host. The
+first connection must verify the host key: the app probes the target for the
+fingerprint it presents this time, and you compare it with the `SHA256:`
+fingerprint you see on the server before trusting it. Once trusted, a changed
+fingerprint refuses the connection instead of silently reconnecting. That step
+lives in the second screen of the getting-started guide.
 
 Each target declares **exactly one** trust source (`known_hosts_file`,
 `host_key_fingerprint`, or `host_certificate_authority`) and **exactly one**
 authentication source (a private-key file, a private-key environment reference,
 a password environment reference, or `{"type":"agent"}`). No password value is
-ever stored in the JSON.
+ever stored in the JSON — the credentials the app holds follow the same rule.
+
+### Without the desktop host
+
+Only when the C++ SSH service is used as a standalone HTTP service (scripts, CI,
+other clients) do you need
+[`configs/ssh-service.example.json`](./configs/ssh-service.example.json): fill in
+an allow-listed target, pick a trust source, and set `YUKINAL_SSH_API_TOKEN` to a
+random URL-safe value of 32–256 characters, then:
 
 ```powershell
 $env:YUKINAL_SSH_API_TOKEN = "<random URL-safe token>"
 native/build/Release/yukinal-ssh-service.exe --config path/to/ssh-service.json
 ```
 
-To drive the service from the UI, set the matching token/URL in a second shell
-and start the desktop:
-
-```powershell
-$env:YUKINAL_SSH_API_TOKEN = "<same token>"
-$env:YUKINAL_SSH_API_URL   = "http://127.0.0.1:8765"
-pnpm desktop:dev:cpp
-```
-
-The desktop host forwards the SSH token only to the Python Agent sidecar, and
-only when the service is configured. The C++ SSH service is started separately.
+That path exposes only the read-only `ssh.service_status` and `ssh.disk_usage`
+tools. The full tool set comes from the SSH core embedded in the desktop host,
+which uses no HTTP and needs no token.
 
 ## Common connection errors
 
@@ -291,9 +308,8 @@ The full boundary is documented in [security and data boundaries](./docs/securit
 | [Security & data boundaries](./docs/security.md) | What the Agent may do and when it needs approval |
 | [RAG knowledge index](./docs/rag-knowledge-index.md) | Architecture, CLI, evaluation, and security limits of local corpus retrieval |
 | [Example RAG corpus](./examples/rag/README.md) | Indexing and evaluation walkthrough with the checked-in fixtures |
-| [Rewrite plan & current status](./docs/rewrite-cpp-python.md) | The C++/Python rewrite stage and interfaces |
-| [C++ takeover & Rust removal plan](./docs/rust-removal-plan.md) | From-scratch C++ host capability guidance |
-| [C++ desktop host migration](./docs/native-desktop-host.md) | Desktop host architecture |
+| [C++ desktop host](./docs/native-desktop-host.md) | Desktop host architecture and IPC |
+| [SSH hardening](./docs/ssh-hardening-2026-11.md) | SSH/SFTP trust boundaries and regressions |
 | [Architecture & acceptance criteria](./docs/architecture-and-build-plan.md) | Goals and release acceptance conditions |
 | [Release status](./docs/release.md) | Install, build, test, and packaging status |
 | [Changelog](./docs/changelog.md) | Version history |

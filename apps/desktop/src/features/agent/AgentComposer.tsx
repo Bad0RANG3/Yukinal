@@ -30,7 +30,6 @@ import {
   type AgentPromptPart,
   type AgentRunMode,
   type AgentReasoningEffort,
-  type Environment,
 } from "@yukinal/shared";
 
 import { Icon } from "../../components/Icon.js";
@@ -63,7 +62,6 @@ import {
   type Submission,
 } from "./composer-triggers.js";
 import { approvalOptionSpec, runModeSpec } from "./run-mode.js";
-import { policyEnvironmentWarning, runPolicySpec, type RunPolicyChoice } from "./run-policy.js";
 
 /** 候选列表里的一项：命令与提及共用同一套渲染与键盘导航。 */
 type Suggestion =
@@ -88,9 +86,6 @@ export function AgentComposer({
   onRunModeChange,
   delivery,
   onDeliveryChange,
-  runPolicy,
-  onRunPolicyChange,
-  targetEnvironment,
   models,
   selectedModelKey,
   selectedModelLabel,
@@ -128,11 +123,6 @@ export function AgentComposer({
   onRunModeChange: (mode: AgentRunMode) => void;
   delivery: "async" | "sync";
   onDeliveryChange: (delivery: "async" | "sync") => void;
-  /** 这次运行按哪套策略判定；`null` = 按环境自动（请求里不带 policyId）。 */
-  runPolicy: RunPolicyChoice;
-  onRunPolicyChange: (policy: RunPolicyChoice) => void;
-  /** Environment this prompt will target if it is sent now. */
-  targetEnvironment: Environment;
   models: ReadonlyArray<{ key: string; label: string; providerLabel?: string }>;
   selectedModelKey: string | null;
   /** 当前选中模型的完整名称。 */
@@ -149,8 +139,6 @@ export function AgentComposer({
 }) {
   const modeSpec = runModeSpec(runMode);
   const approvalSpec = approvalOptionSpec(permissionMode);
-  const policySpec = runPolicySpec(runPolicy);
-  const policyWarning = policyEnvironmentWarning(runPolicy, targetEnvironment);
   const inputRef = useRef<HTMLTextAreaElement>(null);
   const fileInputRef = useRef<HTMLInputElement>(null);
   const [attachmentError, setAttachmentError] = useState<string | null>(null);
@@ -600,7 +588,6 @@ export function AgentComposer({
           running={running} onClose={closeSettings} onAnimationEnd={settingsPresence.onAnimationEnd}
           runMode={runMode} onRunModeChange={onRunModeChange}
           permissionMode={permissionMode} onPermissionModeChange={onPermissionModeChange}
-          runPolicy={runPolicy} onRunPolicyChange={onRunPolicyChange} targetEnvironment={targetEnvironment}
           delivery={delivery} onDeliveryChange={onDeliveryChange}
         /> : null}
 
@@ -621,7 +608,7 @@ export function AgentComposer({
               className={`agent-composer-tool agent-settings-trigger${menuOpen ? " is-open" : ""}${modeSpec.readOnly ? " is-readonly" : ""}`}
               aria-label={`对话设置：${modeSpec.label}，${approvalSpec.label}`} aria-expanded={menuOpen}
               aria-haspopup="dialog" aria-controls={settingsPresence.mounted ? settingsId : undefined}
-              title={`${modeSpec.label} · ${approvalSpec.label} · ${policyWarning ?? policySpec.label}`}
+              title={`${modeSpec.label} · ${approvalSpec.label}`}
               onClick={() => { setMenuOpen((current) => !current); setTrigger(null); }}>
               <Icon name="settings" size="sm" /><span className="agent-control-label">{modeSpec.label}</span>
             </button>

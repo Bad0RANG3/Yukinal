@@ -12,20 +12,22 @@
 [English](README.md) · [**中文**](README.zh-CN.md)
 
 [![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](./LICENSE)
-[![Version](https://img.shields.io/badge/interface-2.0.3-informational.svg)](./packages/shared/src/version.ts)
+[![Version](https://img.shields.io/badge/interface-2.1.0-informational.svg)](./packages/shared/src/version.ts)
 [![Platform](https://img.shields.io/badge/platform-Windows%20%7C%20macOS%20%7C%20Linux-6f42c1.svg)](#构建与运行)
 [![Python](https://img.shields.io/badge/python-3.11%2B-3776ab.svg)](./agent/README.md)
 [![Node](https://img.shields.io/badge/node-%3E%3D24-339933.svg)](package.json)
-[![Acceptance](https://img.shields.io/badge/Agent-部分验收通过-informational.svg)](./docs/release.md)
+[![Acceptance](https://img.shields.io/badge/Agent-实机验收通过-success.svg)](./docs/release.md)
 
 </div>
 
 ---
 
-> **发行版本：`2.0.3`。** 本版修复并嵌入 Windows 桌面宿主图标，主窗口和独立工作页
-> 共用 Yukinal 图标。Computer Use 已验证只读计划结算、重启后的任务/计划恢复，以及
-> 审批自然过期且命令未执行。真实多目标长时压力与安装包 GUI 尚未覆盖。详细证据和
-> 安装包状态见[发行说明](./docs/releases/2.0.3.md)与[交付与发布](./docs/release.md)。
+> **发行版本：`2.1.0`。** 本版把上一版遗留的计划结算链路补齐：Agent 现在可以记录
+> 证据、结论与决策摘要，可以跨 run 结算证据步、决策步与验证步，也可以在需要你拍板时
+> 停在 `waiting_user` 而不是把任务判失败。五个免审批固定读改走独立的 `read_probe`
+> 结构化通道。用真实服务器和真实 Provider 跑的一次完整流程（证据 → 计划 → 方案 →
+> 你批准 → 执行 → 验证）现在能走到计划完成、任务完成。详细证据和安装包状态见
+> [2.1.0 发行说明](./docs/releases/2.1.0.md)与[交付与发布](./docs/release.md)。
 > Windows NSIS、macOS DMG 与 Debian Linux 安装包由 CI 构建；安装包仍未签名，macOS
 > 应用未公证。
 
@@ -123,21 +125,23 @@ Token 用量在按钮旁展开，不挤动状态行；模型与设置菜单受�
 | 代理路由（HTTP/HTTPS CONNECT、SOCKS5/SOCKS5H）与 bypass 规则 | ✅ 已实现 |
 | 有界 SFTP 列举/元数据/读取/写入/备份、守卫式原子替换 | ✅ 已实现 |
 | C++ 桌面宿主：窗口、IPC 路由、SQLite、凭据、审批 | ✅ 已实现 |
-| Python Agent：LangGraph 循环、Tool Registry、策略、脱敏审计 | ✅ 已实现 · 部分验收通过；真实多目标长时覆盖仍待补齐，见[实机记录](./docs/agent-live-acceptance-20261027.md) |
-| 长任务（goal 循环）：准入判定、中途复核、进度停滞收束 | ⚠️ 部分实现 · 准入靠提示词正则（双向误判），`goal` 模式默认**无**工具调用/模型轮次上限（只有总时长与输出字节）；逐轮复核解析失败会先做一次有界修复重试 |
+| Python Agent：LangGraph 循环、Tool Registry、策略、脱敏审计 | ✅ 已实现 · 部分验收通过；真实多目标长时覆盖仍待补齐，见[交付与发布](./docs/release.md) |
+| 长任务（goal 循环）：准入判定、中途复核、进度停滞收束 | ⚠️ 部分实现 · 准入以 host 声明的 `taskBudget` 为权威（`maxRunMs ≥ 10min` 或 `maxSteps ≥ 40`），无预算时回退提示词正则；`mode`/`toolAccess`/无工具回合先于任何预算否决；每次准入把 `sustainedGoal`/`source`/`declaredBudget` 写成 `agent.admitted` 审计事件。`goal` 模式默认**无**工具调用/模型轮次上限（只有总时长与输出字节）；逐轮复核解析失败会先做一次有界修复重试 |
 | MCP 客户端（stdio + Streamable HTTP），默认需要审批 | ✅ 已实现 |
 | 模型工厂：OpenAI 兼容、Anthropic、Gemini | ✅ 已实现 |
 | 本地 RAG 知识索引与显式记忆 hybrid 检索 | ✅ 已实现 · 适用于小型 curated 语料；无神经 embedding 或 ANN 索引 |
-| 记忆作用域与写入 | ⚠️ 部分实现 · 作用域只有 `global`/`server`，无 tenant/user 维度；写入只有 `agent.memory.save` RPC（模型没有记忆写入工具），无过期或冲突消解 |
+| 记忆作用域与写入 | ⚠️ 部分实现 · 作用域仍是 `global`/`server`（无 tenant/user 维度）；模型可经 `memory.search`（只读）与 `memory.propose`（write，逐次人工审批后才入库，`origin=model`）参与，`agent.memory.*` RPC 仍是操作员通道；支持 `expiresAt` 过期（SQL 侧过滤，过期行保留供审计）与 `supersedes` 版本链；无自动去重与冲突消解 |
 | 检查点恢复（`turn:<digest>` 定位、跨重启续挂起审批） | ✅ 已实现 · 显式注入严格 msgpack 反序列化；Windows 目录与库文件按当前用户独占 DACL；`budget_binding` 不含逐轮推断的输出预算 |
 | 持久审批：逐次调用指纹绑定与有效期 | ✅ 已实现 |
 | 控制平面：租户、节点、任务、审批、策略、审计 | ✅ 已实现（SQLite 验证） |
-| 任务/计划持久恢复 | ✅ 已验证保存、桌面重启恢复及 `plan.step_result` 步骤结算；真实多目标长时覆盖仍待补齐 |
+| 任务/计划持久恢复 | ✅ 已验证保存、桌面重启恢复及 `plan.step_result` 步骤结算；2.1.0 另由真实目标上的完整闭环验证（证据 → 方案 → 审批 → 执行 → 验证 → 计划完成）；真实多目标长时覆盖仍待补齐 |
+| 决策摘要与计划审批 | ✅ 已实现 · Agent 可记录证据/结论/决策摘要，发布方案后停在等待用户，选择方案即批准计划并由界面续跑 |
+| 免审批固定读（`read_probe`） | ✅ 已实现 · 命令文本来自共享工具目录并编译进 C++，模型不提供 shell 文本 |
 | Windows NSIS、macOS DMG、Debian Linux 安装包 | 稳定标签触发三平台构建、冒烟与发布 |
 | 代码签名与 macOS 公证 | 未配置 |
 | 平台 GUI、拖放及升级证据 | 见交付状态；Agent 验收独立记录 |
 
-完整细节与证据见[重写方案](./docs/rewrite-cpp-python.md)与[交付与发布](./docs/release.md)。
+完整细节与证据见[架构与构建计划](./docs/architecture-and-build-plan.md)与[交付与发布](./docs/release.md)。
 
 ## 构建与运行
 
@@ -192,9 +196,17 @@ pnpm check
 **5. 运行桌面应用**
 
 ```bash
-pnpm desktop:dev:cpp   # C++ WebView 宿主 + Vite（真实桌面）
-pnpm desktop:dev       # 仅浏览器 UI 预览（无 SQLite/SSH/PTY）
+pnpm dev           # 一条命令：构建 C++ 宿主与 SSH 工作进程，起 Vite，拉起桌面
+pnpm desktop:dev   # 仅浏览器 UI 预览（无 SQLite/SSH/PTY，不构建原生代码）
 ```
+
+`pnpm dev` 会自己完成原生构建、启动 Vite（默认 1420，可用
+`YUKINAL_DESKTOP_DEV_PORT` 改端口）、把 SSH 工作进程的路径与开关交给宿主，
+宿主再拉起 Python 边车。远端调用始终由这条命令托管的进程承担，所以继承自
+shell 的 `YUKINAL_SSH_API_TOKEN`、`YUKINAL_SSH_API_URL`、
+`YUKINAL_SSH_SERVICE_CONFIG` 会被忽略并打印一行提示 —— 不需要为桌面准备
+服务配置文件，也不需要手动对齐两份 token。`pnpm desktop:dev:cpp` 是同一
+脚本的别名，保留给既有脚本调用。
 
 `pnpm package` 会暂存带校验清单的分发布局。release-candidate workflow 会生成
 Windows NSIS、macOS DMG 与 Debian Linux 安装包，并在托管 runner 上安装、启动、卸载和检查数据保留：
@@ -208,30 +220,31 @@ pnpm package -- --verify
 
 ## 配置
 
-复制 [`configs/ssh-service.example.json`](./configs/ssh-service.example.json)，
-填入白名单目标，把主机密钥加入 `known_hosts`（或 pin 指纹 / 配置 Host CA），
-并将 `YUKINAL_SSH_API_TOKEN` 设为 32–256 位随机 URL-safe 值。
+桌面不需要配置文件。服务器在应用里添加（名称、主机、端口、用户名、认证方式），
+凭据由宿主保管；首次连接必须先做一次指纹核验：应用向目标探针取回它这次出示的
+指纹，与你在服务器上看到的 `SHA256:` 指纹核对一致后确认信任。之后指纹一旦变化，
+连接会被直接拒绝，而不是悄悄重连。核验入口就在首次向导的第二步。
 
 每个目标声明**恰好一个**信任来源（`known_hosts_file`、
 `host_key_fingerprint` 或 `host_certificate_authority`）与**恰好一个**认证
 来源（私钥文件、私钥环境变量引用、密码环境变量引用，或
-`{"type":"agent"}`）。JSON 中永不存储密码明文。
+`{"type":"agent"}`）。JSON 中永不存储密码明文 —— 这条规则同样适用于应用
+保管的凭据。
+
+### 不带桌面宿主时
+
+只有要把 C++ SSH 服务当成独立 HTTP 服务用（脚本、CI、其他客户端）时，才需要
+[`configs/ssh-service.example.json`](./configs/ssh-service.example.json)：填入
+白名单目标、选定信任来源，并把 `YUKINAL_SSH_API_TOKEN` 设为 32–256 位随机
+URL-safe 值，然后：
 
 ```powershell
 $env:YUKINAL_SSH_API_TOKEN = "<随机 URL-safe token>"
 native/build/Release/yukinal-ssh-service.exe --config path/to/ssh-service.json
 ```
 
-要从 UI 驱动该服务，在第二个 shell 设置相同 token/URL 后启动桌面：
-
-```powershell
-$env:YUKINAL_SSH_API_TOKEN = "<同一个 token>"
-$env:YUKINAL_SSH_API_URL   = "http://127.0.0.1:8765"
-pnpm desktop:dev:cpp
-```
-
-桌面宿主只在服务已配置时，把 SSH token 转发给 Python Agent 边车。C++
-SSH 服务需单独启动。
+这条路径只提供 `ssh.service_status` 与 `ssh.disk_usage` 两条只读工具；完整工具集
+由桌面宿主内嵌的 SSH 核心提供，不经过 HTTP，也不需要 token。
 
 ## 常见连接错误
 
@@ -265,9 +278,8 @@ SSH 服务需单独启动。
 | [安全与数据边界](./docs/security.md) | Agent 能做什么、何时需要批准 |
 | [RAG 知识索引](./docs/rag-knowledge-index.md) | 本地语料的架构、CLI、评估与安全边界 |
 | [RAG 示例语料](./examples/rag/README.md) | 用仓库夹具完成索引与评估的完整示例 |
-| [重写方案](./docs/rewrite-cpp-python.md) | C++/Python 重写阶段与接口 |
-| [C++ 接管与 Rust 移除计划](./docs/rust-removal-plan.md) | 从零实现 C++ 宿主能力的指导 |
-| [C++ 桌面宿主迁移](./docs/native-desktop-host.md) | 桌面宿主架构 |
+| [原生桌面宿主](./docs/native-desktop-host.md) | 桌面宿主架构与 IPC |
+| [SSH 加固](./docs/ssh-hardening-2026-11.md) | SSH/SFTP 信任边界与回归 |
 | [目标架构与施工交接](./docs/architecture-and-build-plan.md) | 目标与发布验收条件 |
 | [交付与发布](./docs/release.md) | 安装、构建、测试与打包状态 |
 | [变更记录](./docs/changelog.md) | 版本历史 |

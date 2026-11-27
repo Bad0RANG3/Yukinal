@@ -22,8 +22,8 @@ from yukinal_knowledge import KnowledgeError
 from yukinal_ssh import SshServiceClient
 
 from .audit import JsonlAuditSink
-from .conversation_store import ConversationStore, message_bytes
-from .checkpoints import checkpoint_binding_key
+from .conversation_store import MEMORY_ORIGINS, ConversationStore, message_bytes
+from .checkpoints import checkpoint_binding_key, turn_thread_id
 from .subagents import SubagentRuntime, SUBAGENT_TOOLS, parse_subagents
 from .work_routing import delegation_allowed, tools_prohibited, user_request_text
 from .goal_loop import long_goal_requested
@@ -34,6 +34,7 @@ from .host_tools import (
     register_host_tools,
     register_mcp_catalog,
 )
+from .memory_tools import register_memory_tools
 from .model_agent import AgentBudget, ModelDrivenAgent
 from .inference_policy import select_inference
 from .models import ModelConfig, ModelFactory, ModelFactoryError
@@ -162,6 +163,7 @@ class PythonSidecar:
         self._audit_tasks: set[asyncio.Task[None]] = set()
         self._managed_ssh_service_binary = managed_ssh_service_binary
         self._managed_ssh_tools_registered = False
+        self._memory_tools_registered = False
         self._provider_store = provider_store
         self._conversations = conversation_store or ConversationStore()
         self._session_locks: dict[str, asyncio.Lock] = {}
@@ -195,6 +197,12 @@ class PythonSidecar:
         if host is not None and not self._host_tools_registered:
             register_host_tools(self._registry, host, excluded_names=frozenset(direct_tool_names))
             self._host_tools_registered = True
+        # Memory tools depend on the conversation store, not on the host connection,
+        # so they are registered from the same idempotent entry point the sidecar
+        # already uses on every `set_host_rpc`.
+        if not self._memory_tools_registered:
+            register_memory_tools(self._registry, self._conversations)
+            self._memory_tools_registered = True
 
     async def _record_plan_step_result(self, params: dict[str, Any]) -> Any:
         if self._host_rpc is None:
@@ -1086,7 +1094,9 @@ class PythonSidecar:
         parsed = _parse_memory_params(params, "save")
         try:
             memory = self._conversations.save_memory(scope=parsed["scope"], server_id=parsed.get("serverId"),
-                                                      title=parsed["title"], content=parsed["content"], memory_id=parsed.get("id"))
+                                                      title=parsed["title"], content=parsed["content"], memory_id=parsed.get("id"),
+                                                      expires_at=parsed.get("expiresAt"), supersedes=parsed.get("supersedes"),
+                                                      origin=parsed.get("origin", "user"))
         except ValueError as error:
             raise _RpcFault(RPC_INVALID_PARAMS, str(error)) from None
         return {"memory": memory}
@@ -1251,6 +1261,16 @@ class PythonSidecar:
             context_usage["inputBytes"] = message_bytes([*memories, *context.messages]) if memories or context.messages else 0
             context_usage["maxInputBytes"] = max(1, available_bytes)
             self._record_run_event(run_id, {"type": "context.loaded", "context": context_usage})
+            # Admission is an audit fact, not a hidden heuristic: the turn records
+            # which authority decided the loop (`budget`/`durable`/`prompt`/`default`)
+            # so a run that stopped short of the goal can be explained afterwards.
+            sustained, admission_source = _sustained_decision(request)
+            self._record_run_event(run_id, {
+                "type": "agent.admitted",
+                "sustainedGoal": sustained,
+                "source": admission_source,
+                "declaredBudget": request.get("taskBudget"),
+            })
             self._emit({
                 "type": "agent.started",
                 "runId": run_id,
@@ -1458,7 +1478,9 @@ class PythonSidecar:
             raise _RpcFault(RPC_INTERNAL_ERROR, "Agent approval is missing its tool call identity")
 
         fingerprint = approval.fingerprint
-        plan_binding = request.get("planBinding")
+        # The run's own binding goes stale as soon as it records or replaces a plan,
+        # so prefer the step the call actually ran from when the agent knows it.
+        plan_binding = approval.plan_binding or request.get("planBinding")
         if approval.tool_name in HOST_APPROVAL_TOOLS and not isinstance(host_input, dict):
             raise _RpcFault(RPC_INTERNAL_ERROR, "host action approval is missing its exact input")
         approval_id = "apr_" + hashlib.sha256(
@@ -2009,17 +2031,25 @@ def _fetch_model_catalog_page(
 
 
 def _map_provider_models(provider: str, payload: object) -> list[dict[str, Any]]:
+    """把服务商的模型清单归一成 `{id, label, ...}`。
+
+    顶层**只校验用一个字段，不校验没用上的字段**：`data` 必须是数组、每个条目必须带字符串
+    id，但不再要求顶层键集合恰好等于官方文档写的那几个。
+
+    这条规矩是被真实网关逼出来的：`https://api.execute233.top/v1/models` 在 `data`/`object`
+    之外还带一个 `success` 键（很多 OpenAI 兼容网关都会加自己的信封字段），旧实现在这里抛
+    "invalid catalog"，导致界面上「获取模型」永远失败，而同一个连接聊天却是通的 —— 用户
+    看到的是一个自相矛盾的应用。多出来的字段不影响解析，所以忽略它们。
+    """
     if not isinstance(payload, dict):
         raise ValueError("invalid catalog")
     if provider == "openai-compatible":
-        if set(payload) - {"data", "object"}:
+        if "data" not in payload:
             raise ValueError("invalid catalog")
-        entries = payload.get("data", [])
+        entries = payload.get("data")
         label_key = "id"
         id_key = "id"
     elif provider == "anthropic":
-        if set(payload) - {"data", "has_more", "first_id", "last_id"}:
-            raise ValueError("invalid catalog")
         entries = payload.get("data")
         label_key = "display_name"
         id_key = "id"
@@ -2316,10 +2346,56 @@ def _prompt_text(prompt: str, parts: object) -> str:
     return "\n\n".join([prompt_text, *file_blocks]).strip()
 
 
+#: A host-supplied task budget at or above these bounds *is* a declaration that
+#: the run is long-horizon. Admission reads the declaration, never the prompt.
+SUSTAINED_BUDGET_MIN_MS = 600_000
+SUSTAINED_BUDGET_MIN_STEPS = 40
+
+
+def _sustained_decision(request: dict[str, Any]) -> tuple[bool, str]:
+    """Decide whether a run is a sustained goal, and say why.
+
+    The prompt regex is a *hint* for the composer UI, not an authorization
+    decision: it misses real long-horizon work ("帮我把这个项目从零搭起来")
+    and matches one-line bug fixes ("请完整测试并修复这个 bug"). The authority
+    is the host-supplied `taskBudget`: when it declares a long horizon the run
+    is sustained, and when it declares a short one the run is not — even if the
+    prompt says 长任务. Only a run the host bound to neither a durable task nor a
+    plan step falls back to the prompt hint, because there is nothing else to
+    read. `source` is recorded in the `agent.admitted` audit event.
+
+    Blocking conditions stay prompt-independent and are checked first, so no
+    budget can turn a readonly watch probe or a no-tools turn into a loop:
+    `mode != goal` → `mode`; `toolAccess == none` → `tool_access`; an explicit
+    "this turn uses no tools" → `tools_prohibited`.
+    """
+    if request.get("mode", "goal") != "goal":
+        return False, "mode"
+    if request.get("toolAccess") == "none":
+        return False, "tool_access"
+    if tools_prohibited(request):
+        return False, "tools_prohibited"
+    declared = request.get("taskBudget")
+    if isinstance(declared, dict):
+        max_run_ms = declared.get("maxRunMs")
+        max_steps = declared.get("maxSteps")
+        long_horizon = (
+            isinstance(max_run_ms, int) and not isinstance(max_run_ms, bool) and max_run_ms >= SUSTAINED_BUDGET_MIN_MS
+        ) or (
+            isinstance(max_steps, int) and not isinstance(max_steps, bool) and max_steps >= SUSTAINED_BUDGET_MIN_STEPS
+        )
+        return (True, "budget") if long_horizon else (False, "budget")
+    if request.get("taskId") or request.get("planBinding"):
+        # The host already owns the loop for a durable task or a plan step and
+        # declared no budget for this turn: the sidecar must not widen it.
+        return False, "durable"
+    if long_goal_requested(user_request_text(request)):
+        return True, "prompt"
+    return False, "default"
+
+
 def _sustained_goal(request: dict[str, Any]) -> bool:
-    return (request.get("mode", "goal") == "goal" and request.get("toolAccess") != "none" and not tools_prohibited(request)
-            and not request.get("taskId") and not request.get("planBinding")
-            and long_goal_requested(user_request_text(request)))
+    return _sustained_decision(request)[0]
 
 
 def _run_budget(value: object, *, goal_mode: bool = False, sustained_goal: bool = False) -> AgentBudget:
@@ -2337,10 +2413,24 @@ def _run_budget(value: object, *, goal_mode: bool = False, sustained_goal: bool 
     # Execution has no default call/round quota. Preserve explicit host task
     # budgets; planning and readonly requests retain their bounded probes.
     unlimited_steps = goal_mode and value is None
-    steps = None if unlimited_steps else min(max_steps, 128 if sustained_goal else 32)
+    # `maxSteps` counts plan steps, not tool calls. One plan step legitimately costs
+    # several calls (read the target, record the evidence, cite it), so hanging the
+    # call budget straight off the step count starved real investigations halfway
+    # through the plan and failed the task with `tool_call_limit_exceeded`.
+    calls = None if unlimited_steps else min(100, max(8, max_steps * 4))
+    # A model round is one turn, and a turn may carry several calls or none: the
+    # agent reads, records the evidence and cites it in separate turns, and it also
+    # spends turns rewriting a rejected plan. Budgeting one round per plan step ended
+    # real investigations with `model_round_limit_exceeded` while the call budget was
+    # still half unused, so an execution run's rounds follow its calls. A read-only
+    # probe keeps its original tight bound: it must not grow because a goal run does.
+    if goal_mode:
+        rounds = None if unlimited_steps else min(128, max(8, calls))
+    else:
+        rounds = min(max_steps, 32)
     return AgentBudget(
-        max_tool_calls=None if unlimited_steps else min(100 if sustained_goal else 64, max_steps),
-        max_model_rounds=steps,
+        max_tool_calls=calls,
+        max_model_rounds=rounds,
         max_total_seconds=max(0.01, min(1800.0 if sustained_goal else 900.0, max_run_ms / 1000)),
         max_output_bytes=200_000,
     )
@@ -2392,8 +2482,7 @@ def _checkpoint_thread_id(session_id: str, task_id: str, resume_key: str) -> str
     the locator and a durable task id would make the same turn resolve differently.
     """
     del task_id
-    material = "".join(("turn", "local", _safe_context_id("session", session_id), resume_key))
-    return "agent-" + hashlib.sha256(material.encode("utf-8")).hexdigest()
+    return turn_thread_id("local", _safe_context_id("session", session_id), resume_key)
 
 
 def _turn_digest(request: dict[str, Any]) -> str:
@@ -2426,7 +2515,10 @@ def _run_checkpoint_binding(request: dict[str, Any]) -> str:
 
 
 def _parse_memory_params(value: object, action: str) -> dict[str, Any]:
-    fields = {"scope", "serverId"} | ({"query", "limit"} if action == "list" else {"id", "title", "content"} if action == "save" else {"id"})
+    fields = {"scope", "serverId"} | (
+        {"query", "limit"} if action == "list"
+        else {"id", "title", "content", "expiresAt", "supersedes", "origin"} if action == "save"
+        else {"id"})
     parsed = _strict_object(value, fields)
     scope = parsed.get("scope")
     server_id = parsed.get("serverId")
@@ -2446,6 +2538,18 @@ def _parse_memory_params(value: object, action: str) -> dict[str, Any]:
             if not isinstance(item, str) or not item.strip() or len(item) > limit:
                 raise _RpcFault(RPC_INVALID_PARAMS, "invalid memory " + field)
             parsed[field] = item.strip()
+    if action == "save":
+        # Every optional field is validated here so `save_memory` only ever sees a
+        # shape it accepts; the store still re-validates expiry because it is also
+        # reachable from the model-proposal tool.
+        for field, limit in (("expiresAt", 80), ("supersedes", 256)):
+            item = parsed.get(field)
+            if item is not None and (not isinstance(item, str) or not item.strip() or len(item) > limit):
+                raise _RpcFault(RPC_INVALID_PARAMS, "invalid memory " + field)
+            if item is not None:
+                parsed[field] = item.strip()
+        if "origin" in parsed and parsed["origin"] not in MEMORY_ORIGINS:
+            raise _RpcFault(RPC_INVALID_PARAMS, "invalid memory origin")
     if action == "list":
         query = parsed.get("query", "")
         limit = parsed.get("limit", 100)

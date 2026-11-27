@@ -94,6 +94,58 @@ class AutoApprovalTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(kwargs["rejection_code"], "approval_timeout")
 
 
+class LivePlanBindingTests(unittest.IsolatedAsyncioTestCase):
+    """A task approval must describe the step that is current when it is asked.
+
+    Regression: the sidecar forwarded only the binding captured when the run
+    started. On a first run the model records the plan *after* starting, so the
+    approval carried `taskId` without `planId`/`planStepId`, the host refused to
+    mint a one-shot ticket ("partial task binding"), and the person's approval was
+    answered with `AGENT_APPROVAL_UNKNOWN` until the request expired.
+    """
+
+    async def _event(self, *, plan_binding, run_binding) -> dict:
+        events: list[dict] = []
+        sidecar = PythonSidecar(_registry(), notification_sink=lambda _method, payload: events.append(payload),
+                                approval_ttl_seconds=1)
+        sidecar.handle({"jsonrpc": "2.0", "id": 1, "method": "initialize",
+                        "params": {"protocolVersion": "1.0", "clientVersion": "test", "dataDir": ""}})
+        request = {
+            "taskId": "task_live", "permissionMode": "ask",
+            "hostTarget": {"host": "remote", "serverId": "srv_stage1", "environment": "development"},
+        }
+        if run_binding is not None:
+            request["planBinding"] = run_binding
+        result = ModelAgentResult(
+            "task_live", "awaiting_approval", "",
+            ({"call_id": "call-live-1", "status": "awaiting_approval"},),
+            (ApprovalRequest("b" * 64, "server.exec", "srv_stage1", "destructive",
+                             {"command": "set -e\ntrue"}, {"command": "set -e\ntrue"},
+                             plan_binding=plan_binding),),
+            1, 0, "approval_required", "checkpoint-live",
+        )
+        await asyncio.wait_for(sidecar._await_approval(request, "run-live", _Agent(), result), 5)
+        waits = [event for event in events if event.get("type") == "agent.waiting_approval"]
+        self.assertEqual(len(waits), 1)
+        return waits[0]["approval"]
+
+    async def test_the_live_step_wins_over_a_stale_run_binding(self):
+        approval = await self._event(
+            plan_binding={"taskId": "task_live", "planId": "plan_live", "planStepId": "step_live",
+                          "evidenceIds": ["ev_live"]},
+            run_binding={"planId": "plan_start", "planStepId": "step_start", "evidenceIds": []},
+        )
+        self.assertEqual(approval["planId"], "plan_live")
+        self.assertEqual(approval["planStepId"], "step_live")
+        self.assertEqual(approval["evidenceIds"], ["ev_live"])
+
+    async def test_a_conversation_approval_still_omits_the_task_binding(self):
+        approval = await self._event(plan_binding=None, run_binding=None)
+        self.assertNotIn("planId", approval)
+        self.assertNotIn("planStepId", approval)
+        self.assertIn("hostInput", approval)
+
+
 class ApprovalContractTests(unittest.TestCase):
     def test_a_conversation_server_exec_approval_is_a_complete_binding(self):
         # Regression: the shared gate used to demand planId/planStepId for every

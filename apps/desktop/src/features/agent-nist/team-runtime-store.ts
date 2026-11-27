@@ -5,8 +5,8 @@ import { heartbeatSlot, mergeRunUsage } from "./team-operations.js";
 
 export type TeamStage = "starting" | "thinking" | "running_tool" | "waiting_approval" | "completed" | "failed" | "cancelled" | "interrupted";
 export type TeamRun = { source?: "coordinator" | "worker" | "watch"; id: string; team: AgentTeam; serverId: string | null; sessionId?: string; taskId?: string; scheduleId?: string; goal: string; stage: TeamStage; startedAt: number; updatedAt: number; usage?: AgentTokenUsage };
-/** Old view values remain accepted for persisted callers and are mapped by the pane. */
-export type TeamPanelView = "agent" | "watch" | "model" | "teams" | "config";
+/** The workbench owns three read-only surfaces plus the model selector. */
+export type TeamPanelView = "tasks" | "watch" | "activity" | "model";
 export type TeamCue = { runId: string; callId: string; team: AgentTeam; serverId: string | null; tool: string; finished: boolean; until: number; preview?: boolean };
 type RuntimeState = {
   runs: TeamRun[]; cues: TeamCue[]; beat: number; lastBeatAt: number | null; panelView: TeamPanelView;
@@ -29,7 +29,7 @@ export const TEAM_STAGE_LABEL: Record<TeamStage, string> = { starting: "正在�
 export function teamRunActive(run: TeamRun): boolean { return ["starting", "thinking", "running_tool", "waiting_approval"].includes(run.stage); }
 
 export const useTeamRuntimeStore = create<RuntimeState>((set) => ({
-  runs: [], cues: [], beat: heartbeatSlot(Date.now()), lastBeatAt: null, panelView: "agent",
+  runs: [], cues: [], beat: heartbeatSlot(Date.now()), lastBeatAt: null, panelView: "tasks",
   watchUpdates: [],
   noteWatchUpdate: (update) => set((state) => ({ watchUpdates: [...state.watchUpdates.filter((item) => item.scheduleId !== update.scheduleId), update].slice(-128) })),
   readWatchUpdates: (scheduleIds) => set((state) => ({ watchUpdates: state.watchUpdates.filter((item) => !scheduleIds.includes(item.scheduleId)) })),

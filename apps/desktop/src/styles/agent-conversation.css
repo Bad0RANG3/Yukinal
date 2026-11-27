@@ -258,15 +258,7 @@
 .agent-settings-field select { width: 100%; min-width: 0; min-height: 32px; padding: 5px 7px; border: 1px solid var(--edge-emphasis); border-radius: var(--radius-control); background: var(--material-inset); color: var(--text); font: inherit; }
 .agent-settings-description { margin: 0 0 8px; color: var(--faint); font-size: var(--text-caption); line-height: 1.6; overflow-wrap: anywhere; }
 .agent-settings-group > .agent-settings-description:last-child { margin-bottom: 0; }
-.agent-settings-advanced { border-top: 1px solid var(--line); }
-.agent-settings-advanced > summary { display: flex; min-height: 36px; align-items: center; gap: 8px; padding-block: 8px; color: var(--muted); font-size: var(--text-caption); list-style: none; cursor: pointer; }
-.agent-settings-advanced > summary::-webkit-details-marker { display: none; }
-.agent-settings-policy-label { margin-left: auto; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: var(--faint); }
-.agent-settings-advanced > summary > svg { flex-shrink: 0; transition: transform var(--motion-fast) var(--motion-ease); }
-.agent-settings-advanced[open] > summary > svg { transform: rotate(180deg); }
-.agent-settings-advanced > summary:focus-visible { outline: var(--focus-width) solid var(--focus-line); outline-offset: calc(-1 * var(--focus-width)); border-radius: var(--radius-control); }
-.agent-settings-advanced-body { display: grid; gap: 10px; padding-top: 6px; }
-.agent-settings-advanced-body > .agent-settings-description { margin: 0; }
+.agent-settings-extra { border-top: 1px solid var(--line); padding-top: 12px; }
 .agent-settings-delivery { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 6px; }
 .agent-settings-delivery > .agent-settings-option { min-height: 32px; align-items: center; justify-content: center; color: var(--muted); font-size: var(--text-caption); text-align: center; }
 .agent-settings-delivery > .agent-settings-option.is-selected { color: var(--text); background: var(--material-active); border-color: var(--edge-emphasis); }

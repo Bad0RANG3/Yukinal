@@ -58,6 +58,7 @@ struct SshCommandResult {
                                                   const std::string& server_id,
                                                   int timeout_seconds);
 
+
 // The remaining bounded read-only Agent tool operations. They use the same
 // resolved target and credentials as the Python-driven C++ SSH service; the
 // caller applies the matching Python `*.normalize` RPC to the raw output.

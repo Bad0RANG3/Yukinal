@@ -39,6 +39,8 @@ Python sidecar 在 `YUKINAL_DATA_DIR/agent-state/langgraph-checkpoints.sqlite` �
 - 服务器对话可检索 public 全局文档及与当前服务器匹配的文档；全局对话只进入没有服务器标签的 public 文档。`forbidden_doc_ids` 只是评估断言，用来让 `eval --threshold` 在召回禁止文档时失败，不是运行时的 ACL 强制机制。
 - 语料正文、标题、路径和远端相关说明都按不可信 advisory 数据处理，不能作为系统指令、工具授权或副作用批准依据。进入模型上下文的条目受数量、去重和 UTF-8 字节预算约束，并封装为不可信工具内容。
 - 查询先经过本地分词，生成后的 FTS 词项和检索参数作为引用／绑定数据处理；模型文本不会直接拼成 FTS 语法。检索失败会关闭语料检索并保留显式记忆能力，不把失败伪装成空结果或可信答案。
+- 显式记忆的写入面分两条通道：操作员走 `agent.memory.list/save/delete` RPC；模型只能走 `memory.search`（只读，server 范围固定为当前 run 的目标，不由模型自选）与 `memory.propose`（write，逐次调用人工批准后才入库）。提案入库时标 `origin=model`，`origin` 只是出处标记、**不是授权**：检索对 `user`/`model` 一视同仁，任何记忆内容都不能放宽工具预算或替代审批。
+- `expires_at` 过期在 SQL 侧过滤，过期行保留在盘上供审计但不进入 `list_memories`/`memory_context`；`supersedes` 只能指向同 scope 的存活前驱，用于版本链，不做自动去重或冲突消解。写入要求带时区的 ISO-8601 时刻，裸本地时间会被拒绝（否则会静默永不过期）。
 - 桌面记忆库直接导入 Markdown/TXT 时不携带 ACL 或 environment 元数据；需要这些元数据的语料必须使用独立 CLI 建立。直接导入也不等同于服务器授权。
 
 ## 明确的限制

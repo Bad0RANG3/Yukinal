@@ -8,9 +8,10 @@ from dataclasses import replace
 from langchain_core.messages import AIMessage, SystemMessage, ToolMessage
 
 from test_agent_model_loop import ScriptedModel, _registry
-from yukinal_agent import AgentBudget, MemoryAuditSink, ModelDrivenAgent, ToolRegistry
+from yukinal_agent import AgentBudget, MemoryAuditSink, ModelDrivenAgent, ToolRegistry, ToolSpec
 from yukinal_agent.goal_loop import long_goal_requested, parse_review
-from yukinal_agent.sidecar import _parse_run_request, _sustained_goal
+from yukinal_agent.policy import PolicyEngine, PrincipalScope
+from yukinal_agent.sidecar import _parse_run_request, _sustained_decision, _sustained_goal
 from yukinal_agent.tools import ToolCallError, approval_fingerprint
 
 
@@ -43,11 +44,12 @@ class GoalModel(ScriptedModel):
 
 
 class SustainedGoalTests(unittest.IsolatedAsyncioTestCase):
-    async def run_goal(self, responses, *, budget=None, handler=None, parallel=False, **kwargs):
+    async def run_goal(self, responses, *, budget=None, handler=None, parallel=False, registry=None,
+                       allowed_tools=frozenset({"ops.read"}), **kwargs):
         async def default_handler(args, _context):
             return {"verified": args.get("value", "ok")}
         model = GoalModel(responses)
-        registry = _registry(handler or default_handler)
+        registry = registry or _registry(handler or default_handler)
         if parallel:
             spec = registry.get("ops.read")
             registry = ToolRegistry(MemoryAuditSink())
@@ -55,7 +57,8 @@ class SustainedGoalTests(unittest.IsolatedAsyncioTestCase):
         agent = ModelDrivenAgent(registry, model,
             budget or AgentBudget(max_model_rounds=20), goal_loop=True, **kwargs)
         result = await agent.run(task_id="task-goal", tenant_id="tenant-1", user_id="user-1",
-            prompt="完整实现部署并测试网站，持续执行直到验收完成", allowed_tools={"ops.read"}, allowed_target_ids={"stage-1"})
+            prompt="完整实现部署并测试网站，持续执行直到验收完成", allowed_tools=set(allowed_tools),
+            allowed_target_ids={"stage-1"})
         return result, model
 
     async def test_intermediate_text_returns_to_same_loop_without_human_turn_or_replaying_actions(self):
@@ -256,6 +259,54 @@ class SustainedGoalTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual((blocked.status, blocked.error_code), ("failed", "goal_blocked"))
         self.assertTrue(any("缺少目标地址" in event.get("textDelta", "") for event in events))
 
+    async def test_a_published_decision_brief_pauses_instead_of_failing_the_run(self):
+        """The brief is the approval surface: failing the run made it unusable.
+
+        Live evidence: the model published a brief with a conservatively approved
+        option, the reviewer then reported blocked because the choice was still
+        pending, the run ended `goal_blocked`, the task went terminal `failed`, and
+        `investigation_task_start` refused the continuation the user had just chosen.
+        """
+        async def handler(args, _context):
+            return {"verified": args.get("value", "ok")}
+
+        async def brief_handler(args, _context):
+            return {"brief": {"id": "brief_fixture", "status": "presented"}}
+
+        def brief_registry():
+            # The fixture principal only owns `ops.*`, so widen that one scope rather
+            # than weakening the default-deny policy every other test depends on.
+            scope = PolicyEngine({("tenant-1", "user-1"): PrincipalScope(
+                frozenset({"ops.read", "investigation.brief"}),
+                frozenset({"stage-1"}),
+                frozenset({"read"}),
+            )})
+            registry = ToolRegistry(MemoryAuditSink(), scope)
+            registry.register(ToolSpec(
+                name="investigation.brief",
+                description="Record a decision brief the user must answer.",
+                input_schema={"type": "object", "properties": {"value": {"type": "string"}},
+                              "additionalProperties": False},
+                risk_level="read",
+                requires_approval=False,
+                handler=brief_handler,
+                target_id_argument=None,
+            ))
+            return registry
+
+        brief_call = AIMessage(content="", tool_calls=[{
+            "name": "investigation__brief", "args": {"value": "0"}, "id": "brief-0", "type": "tool_call"}])
+        paused, _ = await self.run_goal(
+            [brief_call, AIMessage(content="方案已就绪"), review("blocked", reason="等待用户选择方案")],
+            registry=brief_registry(), allowed_tools={"ops.read", "investigation.brief"})
+        self.assertEqual((paused.status, paused.error_code), ("succeeded", None))
+        self.assertIn("已发布决策摘要", paused.answer)
+        self.assertIn("等待用户选择方案", paused.answer)
+
+        plain, _ = await self.run_goal(
+            [AIMessage(content="需要提供目标地址"), review("blocked", reason="缺少目标地址")])
+        self.assertEqual((plain.status, plain.error_code), ("failed", "goal_blocked"))
+
     async def test_cancellation_during_review_does_not_start_more_tools(self):
         started = asyncio.Event()
         model = GoalModel([AIMessage(content="done")])
@@ -280,15 +331,61 @@ class SustainedGoalTests(unittest.IsolatedAsyncioTestCase):
             self.assertFalse(long_goal_requested(prompt))
         request = {"runId": "long-run", "sessionId": "long-session", "prompt": "长任务：完整实现、部署、测试并修复网站"}
         self.assertTrue(_sustained_goal(request))
-        for extra in [{"mode": "readonly"}, {"mode": "plan"}, {"toolAccess": "none"}, {"taskId": "durable"}, {"planBinding": {"planId": "p"}}]:
+        self.assertEqual(_sustained_decision(request), (True, "prompt"))
+        # A prompt-independent gate: no budget reaches a readonly probe, a plan, or
+        # a turn that declared it uses no tools.
+        for extra in [{"mode": "readonly"}, {"mode": "plan"}, {"toolAccess": "none"}]:
             self.assertFalse(_sustained_goal(request | extra))
+        self.assertEqual(_sustained_decision(request | {"mode": "readonly"}), (False, "mode"))
+        self.assertEqual(_sustained_decision(request | {"toolAccess": "none"}), (False, "tool_access"))
+        # A durable task or plan step without a declared budget is still the host's
+        # loop, not the sidecar's: the sidecar must not widen it.
+        for extra in [{"taskId": "durable"}, {"planBinding": {"planId": "p"}}]:
+            self.assertEqual(_sustained_decision(request | extra), (False, "durable"))
+        # The budget is the authority in both directions: a long-horizon budget makes
+        # a run sustained even when the prompt says nothing, and a short budget keeps
+        # a run bounded even when the prompt says 长任务 — the regex is only a hint.
+        long_budget = {"maxSteps": 600, "maxRunMs": 1_800_000, "maxAttempts": 3}
+        short_budget = {"maxSteps": 8, "maxRunMs": 60_000, "maxAttempts": 1}
+        self.assertEqual(_sustained_decision(request | {"taskBudget": long_budget}), (True, "budget"))
+        self.assertEqual(_sustained_decision({"runId": "r", "sessionId": "s", "prompt": "重构 agent 模块", "taskBudget": long_budget}), (True, "budget"))
+        self.assertEqual(_sustained_decision(request | {"taskBudget": short_budget}), (False, "budget"))
+        self.assertEqual(_sustained_decision(request | {"taskBudget": short_budget, "taskId": "durable"}), (False, "budget"))
+        # A declared budget outranks the durable-task fallback even for a sustained prompt.
+        self.assertEqual(_sustained_decision(request | {"taskBudget": long_budget, "taskId": "durable"}), (True, "budget"))
+        self.assertEqual(
+            _sustained_decision({"runId": "r", "sessionId": "s", "prompt": "帮我把这个项目从零搭起来，部署到测试机",
+                                  "taskBudget": long_budget}),
+            (True, "budget"),
+            "real long-horizon work the prompt regex misses must still be admitted",
+        )
+        self.assertEqual(_sustained_decision({"runId": "r", "sessionId": "s", "prompt": "请完整测试并修复这个 bug"}), (True, "prompt"))
+        self.assertEqual(
+            _sustained_decision({"runId": "r", "sessionId": "s", "prompt": "请完整测试并修复这个 bug", "taskBudget": short_budget}),
+            (False, "budget"),
+            "a one-line fix must not inherit an unbounded loop because of its wording",
+        )
         budget = _parse_run_request(request)["agentBudget"]
         self.assertEqual((budget.max_tool_calls, budget.max_model_rounds, budget.max_total_seconds), (None, None, 1800))
         ordinary = _parse_run_request(request | {"prompt": "检查并修复这个服务"})["agentBudget"]
         self.assertEqual((ordinary.max_tool_calls, ordinary.max_model_rounds), (None, None))
         self.assertFalse(long_goal_requested("不要持续执行，只检查部署配置"))
         explicit = _parse_run_request(request | {"taskBudget": {"maxSteps": 2, "maxRunMs": 3000, "maxAttempts": 1}})["agentBudget"]
-        self.assertEqual((explicit.max_tool_calls, explicit.max_model_rounds, explicit.max_total_seconds), (2, 2, 3))
+        # `maxSteps` counts plan steps, not tool calls: one step costs a read, the
+        # evidence that cites it and the round that decides the next one, so the call
+        # and round budgets stay above the step count while the deadline keeps the
+        # declared number.
+        self.assertEqual((explicit.max_tool_calls, explicit.max_model_rounds, explicit.max_total_seconds), (8, 8, 3))
+        # An explicit budget is never widened to the sustained ceiling, whichever way
+        # the admission went: `_run_budget` clamps to the declared numbers.
+        sustained_explicit = _parse_run_request(request | {"taskBudget": {"maxSteps": 3, "maxRunMs": 4000, "maxAttempts": 1}})["agentBudget"]
+        self.assertEqual(
+            (sustained_explicit.max_tool_calls, sustained_explicit.max_model_rounds, sustained_explicit.max_total_seconds),
+            (12, 12, 4),
+        )
+        # A generous explicit budget still stops at the documented ceiling.
+        ceiling = _parse_run_request(request | {"taskBudget": {"maxSteps": 400, "maxRunMs": 3_600_000, "maxAttempts": 1}})["agentBudget"]
+        self.assertEqual(ceiling.max_tool_calls, 100)
 
     def test_nonzero_command_cannot_be_completion_evidence(self):
         payload = json.dumps({"state": "completed", "remaining": [], "evidenceIds": ["bad"], "reason": ""})

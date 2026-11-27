@@ -5,7 +5,7 @@ import { WindowShellContextSchema, WindowShellSurfaceSchema } from "./window-she
 const context = { section: "servers", serverName: null, serverStatus: null, agentBusy: false };
 
 test("window context covers workspace sections and server lifecycle states", () => {
-  for (const section of ["servers", "agents", "projects", "tasks", "activity", "board", "settings"]) {
+  for (const section of ["servers", "agents", "settings"]) {
     assert.equal(WindowShellContextSchema.safeParse({ ...context, section }).success, true);
   }
   for (const serverStatus of ["connecting", "connected", "disconnected", "error"]) {
@@ -24,7 +24,7 @@ test("window context bounds Unicode names and rejects malformed payloads", () =>
   for (const serverName of ["🛰".repeat(80) + "a", "a".repeat(161), "a\nb", "a\0b", "a\x7fb", "\ud800"]) {
     assert.equal(WindowShellContextSchema.safeParse({ ...context, serverName }).success, false);
   }
-  for (const value of [null, [], {}, { ...context, section: "terminal" }, { ...context, serverStatus: "unknown" }, { ...context, agentBusy: "true" }]) {
+  for (const value of [null, [], {}, { ...context, section: "terminal" }, { ...context, section: "board" }, { ...context, section: "activity" }, { ...context, serverStatus: "unknown" }, { ...context, agentBusy: "true" }]) {
     assert.equal(WindowShellContextSchema.safeParse(value).success, false);
   }
 });

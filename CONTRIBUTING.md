@@ -1,10 +1,10 @@
 # 贡献指南
 
-感谢你愿意参与 Yukinal。桌面宿主已是 **C++ WebView 宿主**：Rust/Tauri 宿主与 legacy Node agent 已按 [`docs/rust-removal-plan.md`](./docs/rust-removal-plan.md) 从仓库删除，`pnpm check` 不再依赖 cargo。C++/Python 重写按 [`docs/rewrite-cpp-python.md`](./docs/rewrite-cpp-python.md) 与 [`docs/cpp-desktop-handoff.md`](./docs/cpp-desktop-handoff.md) 分阶段推进；尚未迁移的命令返回 `NOT_IMPLEMENTED`，不回退旧宿主。因此最重要的贡献原则是：**先定义边界，再实现行为，最后用测试和文档把边界钉住。**
+感谢你愿意参与 Yukinal。桌面宿主是 **C++ WebView 宿主**，Agent 是 Python sidecar，SSH 能力由 C++ 服务与宿主内嵌核心提供；Rust/Tauri 宿主与 legacy Node agent 已从仓库彻底删除，`pnpm check` 不再依赖 cargo。当前实现状态见[架构与构建计划](./docs/architecture-and-build-plan.md)与[原生桌面宿主](./docs/native-desktop-host.md)；尚未迁移的命令返回 `NOT_IMPLEMENTED`，不回退旧宿主。因此最重要的贡献原则是：**先定义边界，再实现行为，最后用测试和文档把边界钉住。**
 
 ## 开始之前
 
-1. 阅读 [文档索引](./docs/README.md)、[产品定义](./docs/product.md)、[重写状态](./docs/rewrite-cpp-python.md) 和[安全与数据边界](./docs/security.md)。
+1. 阅读 [文档索引](./docs/README.md)、[产品定义](./docs/product.md)、[架构与构建计划](./docs/architecture-and-build-plan.md) 和[安全与数据边界](./docs/security.md)。
 2. 要改权限、目标解析、IPC、sidecar 协议或 MCP 时，先说明现有行为与拟改变的信任边界，并在代码、测试和安全文档中保持一致。
 3. 不要在公开 Issue、提交、日志或测试 fixture 中放入真实密钥、令牌、私钥、主机凭据或机器专属路径。
 4. 发现安全漏洞时不要开公开 Issue，按 [安全策略](./SECURITY.md) 私下报告。

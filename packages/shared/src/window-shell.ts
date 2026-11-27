@@ -1,9 +1,15 @@
 import { z } from "zod";
 import { SERVER_STATUSES } from "./types/server.js";
 
-/** Presentation only: no credentials, prompts, approvals or execution authority. */
+/**
+ * Presentation only: no credentials, prompts, approvals or execution authority.
+ *
+ * The shell names three surfaces because that is all the workspace has: the server
+ * inspector, the operations workbench (which owns the task board, watch plans and
+ * the activity stream as tabs) and settings.
+ */
 export const WindowShellContextSchema = z.object({
-  section: z.enum(["servers", "agents", "projects", "tasks", "activity", "board", "settings"]),
+  section: z.enum(["servers", "agents", "settings"]),
   // Match Win32 UTF-16 bounds and reject lone surrogate code points.
   serverName: z.string().max(160).refine((name) => name.length <= 160)
     .regex(/^[^\u0000-\u001f\u007f\p{Surrogate}]*$/u).nullable(),

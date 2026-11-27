@@ -1870,7 +1870,7 @@ int main(int argc, char** argv) {
       poisoned_supervisor.stop("mcp_http_poisoned");
       poisoned_mcp.stop();
       poisoned_thread.join();
-      database.delete_mcp_server("mcp_http_poisoned");
+      (void)database.delete_mcp_server("mcp_http_poisoned");
     }
 
 #ifdef CPPHTTPLIB_OPENSSL_SUPPORT
@@ -2147,7 +2147,7 @@ int main(int argc, char** argv) {
         const auto output = oauth_supervisor.call("mcp.oauth_ac.echo", nlohmann::json::object());
         check(output.at("serverId") == "oauth_ac" && output.at("text") == "oauth:echo",
               "the OAuth-authenticated MCP tool call should return its content");
-        oauth_supervisor.stop("oauth_ac");
+        (void)oauth_supervisor.stop("oauth_ac");
       }
 
       // Router wiring: validation and the honest cancel answer.
@@ -2763,6 +2763,80 @@ int main(int argc, char** argv) {
                 completed_plan.at("plan").at("currentStepId").is_null() &&
                 completed_plan.at("plan").at("steps").at(1).at("status") == "succeeded",
             "the final successful durable tool result should persist plan completion");
+
+      // A finished Agent turn parks its task in `waiting_user` on purpose, so the last
+      // verification step of a fully successful plan settles while the task waits. If
+      // that edge is missing the task can never reach `completed` and the UI keeps
+      // asking for a decision nobody owes.
+      auto verified_task = task;
+      verified_task["id"] = "itask_verified_completion";
+      verified_task["status"] = "waiting_user";
+      check(database.create_investigation_task(verified_task).has_value(),
+            "verified-completion fixture task should be persisted");
+      // The timeline row is keyed by the run that owns the task, so this fixture needs
+      // a real run the way the host always has one while a plan step settles.
+      database.create_investigation_run({{"id", "run_verified_completion"},
+                                         {"taskId", "itask_verified_completion"},
+                                         {"attempt", 1},
+                                         {"phase", "verification"},
+                                         {"status", "running"},
+                                         {"startedAt", "2026-01-01T00:00:30Z"},
+                                         {"updatedAt", "2026-01-01T00:00:30Z"}});
+      (void)database.update_investigation_task_progress(
+          "itask_verified_completion", "waiting_user", "verification",
+          std::optional<std::string>("run_verified_completion"), std::nullopt,
+          "2026-01-01T00:00:30Z", std::nullopt);
+      auto verified_plan = plan;
+      verified_plan["id"] = "iplan_verified_completion";
+      verified_plan["taskId"] = "itask_verified_completion";
+      verified_plan["currentStepId"] = "step_verify_final";
+      verified_plan["steps"] = nlohmann::json::array(
+          {{{"id", "step_verify_final"},
+            {"ordinal", 0},
+            {"kind", "verification"},
+            {"title", "Verify the change landed"},
+            {"status", "running"},
+            {"attempts", 1},
+            {"maxAttempts", 2},
+            {"allowedTools", nlohmann::json::array({"filesystem.read"})}}});
+      database.save_investigation_plan(verified_plan);
+      const nlohmann::json verification_artifact = {
+          {"id", "iart_verified_completion"},
+          {"taskId", "itask_verified_completion"},
+          {"planId", "iplan_verified_completion"},
+          {"planStepId", "step_verify_final"},
+          {"phase", "verification"},
+          {"kind", "verification"},
+          {"status", "succeeded"},
+          {"title", "Verification"},
+          {"summary", "The change is observable"},
+          {"content", {{"note", "verified"}}},
+          {"evidenceIds", nlohmann::json::array()},
+          {"createdAt", "2026-01-01T00:00:40Z"},
+          {"updatedAt", "2026-01-01T00:00:40Z"}};
+      database.upsert_investigation_artifact(verification_artifact);
+      const auto final_settlement = router.handle_host_request(
+          "host.investigation.plan.step_result",
+          {{"taskId", "itask_verified_completion"},
+           {"planId", "iplan_verified_completion"},
+           {"stepId", "step_verify_final"},
+           {"callId", "call-verified-completion"},
+           {"status", "success"},
+           {"retryable", false},
+           {"toolName", "filesystem.read"},
+           {"outputSummary", "Verification read completed."}});
+      const auto completed_task = database.get_investigation_task("itask_verified_completion");
+      check(final_settlement.value("recorded", false) &&
+                final_settlement.at("plan").at("status") == "completed" &&
+                completed_task.has_value() &&
+                completed_task->at("task").at("status") == "completed",
+            "a verified plan must be able to complete a task that finished its Agent turn");
+      check(completed_task->at("task").at("phase") == "completed",
+            "a completed task must not keep reporting the phase it was working in");
+      check(completed_task->at("steps").size() == 1 &&
+                completed_task->at("steps").at(0).at("toolName") == "filesystem.read",
+            "a settled step must name the tool the Agent reported for it, even without a "
+            "host.tool.execute record");
 
       const nlohmann::json host_content = {{"note", "host-recorded"}};
       const nlohmann::json host_evidence = {
@@ -4512,6 +4586,80 @@ int main(int argc, char** argv) {
         bad_status_rejected = true;
       }
       check(bad_status_rejected, "an unknown host tool call status must be refused");
+      check(database.host_tool_step_effect("itask_backup_target", "iplan_ledger", "step_ledger")
+                    .value_or("") == "filesystem.write",
+            "a settled plan step should report the tool that really changed the target");
+      check(!database.host_tool_step_effect("itask_backup_target", "iplan_ledger",
+                                            "step_ledger_other")
+                 .has_value(),
+            "a plan step without a completed effect must report nothing");
+      check(!database.host_tool_step_effect("itask_backup_target", "iplan_ledger", "").has_value(),
+            "an empty plan step id must report nothing");
+
+      // The execution timeline is opened by the call that starts a plan step and
+      // settled by the result that closes it, and only the opening write knows which
+      // tool ran. Settling must not erase it, or the UI shows a step that changed
+      // something on the target as if nothing had happened.
+      auto timeline_task = nlohmann::json{
+          {"id", "itask_timeline_rows"},
+          {"serverId", "srv_target"},
+          {"objective", "Exercise the execution timeline"},
+          {"successCriteria", nlohmann::json::array({"the timeline keeps the tool"})},
+          {"scope",
+           {{"host", "remote"}, {"serverId", "srv_target"}, {"environment", "staging"}}},
+          {"guardrails",
+           {{"forbiddenTools", nlohmann::json::array()},
+            {"forbiddenPathPrefixes", nlohmann::json::array()}}},
+          {"mode", "goal"},
+          {"permissionMode", "auto"},
+          {"automationLevel", "execute"},
+          {"phase", "investigating"},
+          {"status", "pending"},
+          {"budget", {{"maxSteps", 8}, {"maxRunMs", 120000}, {"maxAttempts", 3}}},
+          {"createdBy", "user"},
+          {"createdAt", "2026-01-06T00:04:00Z"},
+          {"updatedAt", "2026-01-06T00:04:00Z"},
+      };
+      (void)database.create_investigation_task(timeline_task);
+      database.create_investigation_run({{"id", "run_timeline_rows"},
+                                         {"taskId", "itask_timeline_rows"},
+                                         {"attempt", 1},
+                                         {"phase", "execution"},
+                                         {"status", "running"},
+                                         {"startedAt", "2026-01-06T00:04:00Z"},
+                                         {"updatedAt", "2026-01-06T00:04:00Z"}});
+      const auto timeline_row = nlohmann::json{
+          {"id", "step_timeline_rows"},
+          {"taskId", "itask_timeline_rows"},
+          {"runId", "run_timeline_rows"},
+          {"ordinal", 0},
+          {"kind", "action"},
+          {"title", "restart the fixture service"},
+          {"status", "running"},
+          {"attempt", 1},
+          {"toolName", "systemd.restart"},
+          {"inputSummary", "{\"service\":\"fixture\"}"},
+          {"startedAt", "2026-01-06T00:04:00Z"}};
+      database.ensure_investigation_step(timeline_row);
+      database.ensure_investigation_step(timeline_row);
+      auto settled_row = timeline_row;
+      settled_row["status"] = "succeeded";
+      settled_row["outputSummary"] = "{\"exitCode\":0}";
+      settled_row["endedAt"] = "2026-01-06T00:04:30Z";
+      settled_row.erase("toolName");
+      settled_row.erase("inputSummary");
+      database.upsert_investigation_step(settled_row);
+      const auto stored_rows =
+          database.get_investigation_task("itask_timeline_rows")->at("steps");
+      check(stored_rows.size() == 1, "a plan step must have exactly one timeline row");
+      const auto& stored_row = stored_rows.at(0);
+      check(stored_row.at("toolName") == "systemd.restart",
+            "settling a plan step must keep the tool that actually ran");
+      check(stored_row.at("inputSummary") == "{\"service\":\"fixture\"}",
+            "settling a plan step must keep the input it was opened with");
+      check(stored_row.at("outputSummary") == "{\"exitCode\":0}" &&
+                stored_row.at("status") == "succeeded",
+            "settling a plan step must record its outcome");
     } catch (const std::exception& error) {
       std::cerr << "host tool call ledger block failed: " << error.what() << '\n';
       std::exit(5);

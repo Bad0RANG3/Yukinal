@@ -3,6 +3,15 @@
   <head>
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <!--
+      The window icon and the installer icon are the same artwork
+      (`apps/desktop/design/yukinal.ico`, staged as `assets/yukinal.ico` in the
+      payload). The browser tab used to ask for `/favicon.ico` and get a 404 on
+      every single load, which is a console error in both the dev server and the
+      packaged UI; pointing the document at the real file fixes it without adding
+      a build step.
+    -->
+    <link rel="icon" href="/favicon.ico" sizes="any" />
     <title>Yukinal</title>
     <style>
       html, body, #root { height: 100%; margin: 0; background: #080808; }

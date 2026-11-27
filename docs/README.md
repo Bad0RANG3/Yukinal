@@ -1,35 +1,30 @@
 # Yukinal 文档
 
-当前发行版本为 `2.0.3`。Computer Use 已验证真实只读工具调用、`server.info` 计划步骤结算与桌面重启恢复、任务/计划持久恢复、未批准操作自然超时，以及 host denylist 和桌面 SSH autoconfig 协同。Windows 宿主现嵌入任务栏/窗口图标。真实多目标并行和长时间压力、安装版 GUI、签名与公证仍未覆盖。详细证据见[2.0.3 发行说明](./releases/2.0.3.md)、[Agent 实机验收记录](./agent-live-acceptance-20261027.md)和[交付与发布](./release.md)。界面采用四按钮切换主工具、Agent 浮栏继续对话。
+当前发行版本为 `2.1.0`。本版打通了计划结算链路：Agent 可记录证据、结论与决策摘要，可跨 run 结算证据步、决策步与验证步，发布方案后停在等待用户而不是判失败；五个免审批固定读改走独立的 `read_probe` 结构化通道。用真实服务器与真实 Provider 跑过的一次完整流程（证据 → 计划 → 方案 → 批准 → 执行 → 验证）走到计划完成、任务完成。真实多目标并行和长时间压力、安装版 GUI、签名与公证仍未覆盖。详细状态见[2.1.0 发行说明](./releases/2.1.0.md)与[交付与发布](./release.md)。界面采用四按钮切换主工具、Agent 浮栏继续对话；主导航只有运维台与设置，运维台把任务看板、值守计划、动态流与模型摘要收成同一页的四个视图。
 
 ## 从哪里开始
 
 | 目的 | 阅读 |
 | --- | --- |
 | 了解和启动项目 | [中文 README](../README.zh-CN.md)、[English README](../README.md) |
-| 本版变化与安装包状态 | [2.0.3 发行说明](./releases/2.0.3.md)、[交付与发布](./release.md) |
+| 本版变化与安装包状态 | [2.1.0 发行说明](./releases/2.1.0.md)、[交付与发布](./release.md) |
 | 四工具、浮栏、状态和键盘行为 | [工作区交互说明](./workspace-tabs-spec.md) |
-| 布局与控件 | [桌面窗口与工作区](./desktop-window-direction.md)、[界面表达与皮肤约定](./ui-design-system.md) |
+| 布局与控件 | [界面表达与皮肤约定](./ui-design-system.md) |
 | 用户路径与功能范围 | [产品定义](./product.md) |
 | Agent 权限与方法 | [安全与数据边界](./security.md)、[运维 Agent 处理流程](./ops-agent-procedure.md) |
 | RAG 知识索引与离线 CLI | [RAG 知识索引](./rag-knowledge-index.md)、[示例语料与评估](../examples/rag/README.md) |
-| Agent 实机验收与缺陷 | [实机验收记录 2026-10-27](./agent-live-acceptance-20261027.md) |
-| 长任务、推理和上下文 | [AI 运行与对话体验](./ai-runtime-performance.md) |
-| 图形与检测扩展 | [AI 绘图协议](./ai-visual-protocol.md)、[服务器检测工具包](./server-toolkit.md) |
-| 审计与版本 | [第五轮审计](./audit-round5.md)、[变更记录](./changelog.md) |
 | 终端输出着色 | [界面表达与皮肤约定](./ui-design-system.md) 的 content hue 一节 |
 
 ## 实现与历史交接
 
-旧日期的“当前”记录按其时间和源码理解；发行状态以[交付与发布](./release.md)为准。
+发行状态以[交付与发布](./release.md)为准，历史记录查 Git 历史。
 
 | 主题 | 阅读 |
 | --- | --- |
-| C++ 宿主与重写 | [原生宿主](./native-desktop-host.md)、[重写方案](./rewrite-cpp-python.md) |
-| 施工与命令清单 | [目标架构](./architecture-and-build-plan.md)、[剩余目标交接](./handover.md)、[桌面施工交接](./cpp-desktop-handoff.md) |
-| RAG 知识索引接手 | [RAG 知识索引交接](./rag-knowledge-handoff.md) |
-| 迁移历史 | [C++ 接管与 Rust 移除](./rust-removal-plan.md) |
-| 早期验收 | [SSH + Agent 验收交接](./acceptance-handoff.md)、[旧发布记录](./release-history-20261020.md) |
+| C++ 宿主与构建 | [原生桌面宿主](./native-desktop-host.md)、[架构与构建计划](./architecture-and-build-plan.md) |
+| SSH 加固 | [SSH 加固 2026-11](./ssh-hardening-2026-11.md) |
+| 变更历史 | [变更记录](./changelog.md) |
+| 审查结论与修复 | [审查总报告](./review-report.md)、[审查修复](./review-fixes.md) |
 
 ## 文档规则
 

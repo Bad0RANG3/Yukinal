@@ -117,6 +117,12 @@ class DesktopDatabase {
       const std::string& task_id) const;
   void save_investigation_plan(const nlohmann::json& plan) const;
   void upsert_investigation_artifact(const nlohmann::json& artifact) const;
+  // Execution timeline rows. `ensure_investigation_step` creates the row the first
+  // time a plan step actually runs and leaves an existing row untouched, so a step
+  // that calls several tools still keeps its original start time and attempt count.
+  // `upsert_investigation_step` writes the settled outcome.
+  void ensure_investigation_step(const nlohmann::json& step) const;
+  void upsert_investigation_step(const nlohmann::json& step) const;
   [[nodiscard]] nlohmann::json list_investigation_artifacts(const std::string& task_id,
                                                             int limit) const;
   [[nodiscard]] std::optional<nlohmann::json> find_investigation_evidence_in_run(
@@ -228,6 +234,15 @@ class DesktopDatabase {
   [[nodiscard]] std::optional<std::string> host_tool_call_status(
       const std::string& trace_id, const std::string& call_id) const;
   [[nodiscard]] nlohmann::json claim_host_tool_call(const nlohmann::json& input) const;
+  /**
+   * The tool name of the most recent *successful* guarded call recorded for one
+   * plan step, or `std::nullopt` when that step has no completed effect. Only a
+   * guarded call writes a ledger row, so a hit proves the step really changed the
+   * target instead of merely settling its own bookkeeping.
+   */
+  [[nodiscard]] std::optional<std::string> host_tool_step_effect(
+      const std::string& task_id, const std::string& plan_id,
+      const std::string& plan_step_id) const;
   void finish_host_tool_call(const std::string& trace_id, const std::string& call_id,
                              const std::string& status, const std::string& ended_at) const;
   /** SHA-256 (lowercase hex) of the canonical JSON serialization used for evidence. */

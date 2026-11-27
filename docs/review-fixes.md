@@ -1,6 +1,6 @@
 # Yukinal 审查后修复说明（2026-10-18）
 
-配套文档：[三轮审查总报告](./review-report.md) ｜ [原始报告索引](./review/README.md)
+配套文档：[三轮审查总报告](./review-report.md)
 
 本文记录**改了什么、为什么改、怎么验证的**。每个修复都有实测验收，且尽量附
 **反向验证**（故意让门禁失败以证明它真的会失败），而不是只跑一次绿。
@@ -40,7 +40,7 @@
 | **FIX-10** | 契约诚实化（13 条 verbatim 响应 / 9 个零生产者通道 / Rust-Tauri 因果依据） | 57 | shared `135 → 142`、desktop `323 → 325`；容错构造恒等化后 shared 4 红 / desktop 1 红；13 条转发 pre-fix 13/13 拒 → post-fix 13/13 收 |
 | **FIX-7** | Agent 四条「永久停在运行中」（H1/H2/H2b/H3）+ H4 的 sync 放大后果 + `policyId` 边界 | 2 | Agent `153 → 164`（skip 数不增）；**Lead 独立复现**：仅替换 HEAD 的 `sidecar.py` 后 11 条新用例 `FAILED (failures=8, errors=1)` |
 | **FIX-18** | 给 FIX-7 的两个安全网补真读者（只动测试） | 1 | Agent `164 → 167`；AG-1 变异（删去重）**1 条红**（此前 0）、AG-3（记账前移）**3 条红**（此前 0）、AG-4 只红 1 条（证明钉的是另一根梁）；`sidecar.py` 哈希与 FIX-7 交付时逐字节一致 |
-| **FIX-15** | 桌面策略选择器诚实化（`policyId` 不再进请求） | 3 | desktop **325** 只增不减；`requestPolicyId` 恒返回 `undefined`，选择区禁用并附说明；断言「选任何内建策略都不出现该字段」 |
+| **FIX-15** | 桌面策略选择器诚实化（`policyId` 不再进请求） | 3 | desktop **325** 只增不减；`requestPolicyId` 恒返回 `undefined`，选择区禁用并附说明；断言「选任何内建策略都不出现该字段」。**后续**：策略选择在精简阶段被整段移除（选择器、`run-policy.ts` 与其测试），因为该能力始终没有后端支持；现在界面只剩运行方式与批准方式两个真正生效的轴 |
 | **FIX-9** | 桌面宿主：未知 `approvalId` 显式报错、`decision` 白名单、`mcp_server_list` 真状态、`consume` 有界 | 8 | 6 个 desktop ctest target **6/6 Passed**；四轮「修复前失败」对照（第 4 轮是**挂死 600 s 被 kill**）；反面护栏「sidecar 自有审批仍转发、`approvals.log` 恰为 `["approve_once"]`」 |
 | **FIX-16** | 给 SIGPIPE 屏蔽补第二个读者（源码级护栏） | 1 | `yukinal_ssh_tests` 63 → **64**；**5 个变异全部变红**（删守卫 2 红、挪位置 2 红、`SIG_DFL` 1 红、错文件 1 红、相对路径 4 红）；Linux 行为级仍未闭环，如实标注 |
 | **FIX-17** | nonce 上限：把「声称的界」变成真的界 | 2 | 6 组 barrier 矩阵 **overshoot = 0**（此前 188−128=60），每组恰好接受 `headroom` 个；控制平面 148 → **149**；README 与 docstring 降级为「未认证垃圾写入的界，非速率限制」 |
@@ -447,7 +447,7 @@ P83  签名错误 401 → 同一 nonce 换正确签名
 
 ### 7.1 FIX-6 控制平面 P0（P0-1 / P0-2 / P0-4 剩余 / nonce 上限）
 
-**修复前**（`docs/review/r2-control-plane.md` 的实测）：
+**修复前**（R2 控制平面实测）：
 
 - **P0-1**：`canonical_request(timestamp, nonce, method, path, body)` **不含 node id**，而验签用的是
   `X-Yukinal-Node` 指向的那一行；`nodes.public_key` 也没有唯一约束。两者相加 ⇒ 同一把公钥登记进
@@ -870,7 +870,7 @@ ctest --test-dir native/build-nmake -C Release
 | FIX-3 | `scripts/check.mjs`、`.github/workflows/check.yml`、`native/CMakeLists.txt` |
 | FIX-4 | `scripts/package.mjs`、`scripts/lib/release-artifacts*.mjs`、`docs/release.md`、`docs/cpp-desktop-handoff.md`（载荷布局段落） |
 | FIX-5 | `services/control-plane/src/yukinal_control_plane/**`、`services/control-plane/tests/**` |
-| R1/R2/R3 审查者 | 只读源码；各自只写一份 `docs/review/*.md`；临时探针只写 `target/`、`.tmp/`、`%TEMP%` |
+| R1/R2/R3 审查者 | 只读源码；各自只写一份过程报告；临时探针只写 `target/`、`.tmp/`、`%TEMP%` |
 | Lead | 最终汇总文档、跨文档一致性修正、统一跑门禁 |
 
 **审查者被明确要求不跑 `node scripts/check.mjs`**（完整门禁耗时且会与写入者竞争），
@@ -980,6 +980,6 @@ desktop 322 → **325**、CTest 目标数与用例只增不减；`check: green` 
 ### 10.4 一条仍然存在的门禁边界
 
 `check-publication.mjs` **只扫被跟踪文件**（`git ls-files -z`）。因此未被跟踪的
-`docs/review/`、`docs/review-report.md`、`docs/review-fixes.md` 目前不受该门禁保护——本轮靠人工
+`docs/review-report.md`、`docs/review-fixes.md` 目前不受该门禁保护——本轮靠人工
 临时 `git add -N` 后实测才确认合规（并因此发现并修掉一处 `§NN` 引用）。
-若这些报告要随仓库发布，需要先把它们纳入跟踪，届时该门禁才会自动覆盖。
+若这两份报告要随仓库发布，需要先把它们纳入跟踪，届时该门禁才会自动覆盖。

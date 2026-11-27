@@ -4,11 +4,14 @@ import { IPC_COMMANDS } from "@yukinal/shared";
 import { callDesktop, isDesktopShell } from "../../lib/ipc.js";
 import { providerDeleteNotice, useProviders, PROVIDERS_QUERY_KEY } from "../../lib/providers.js";
 import { useServers, useServerAction } from "../../lib/servers.js";
+import { useHostKeyStatus } from "../../lib/host-key.js";
 import { useAgentStatus, useSpawnAgent } from "../../lib/runtime.js";
 import { useWorkspaceStore } from "../../stores/workspace-store.js";
 import { usePreferencesStore } from "../../stores/preferences-store.js";
 import { ProviderEditor } from "../settings/RuntimeSettings.js";
 import { AddServerModal } from "../servers/AddServerModal.js";
+import { HostKeySection } from "../servers/HostKeySection.js";
+import { SshFailureNotice } from "../../components/SshFailureNotice.js";
 
 export function GettingStarted({ onClose }: { onClose(): void }) {
   const shell = isDesktopShell();
@@ -53,6 +56,11 @@ export function GettingStarted({ onClose }: { onClose(): void }) {
   });
   const tested = Boolean(provider && test.data === `${provider.id}@${provider.updatedAt}`);
   const connected = server?.status === "connected";
+  // 首连核验就放在向导里：闸门（HostKeyGate）原本只在打开终端/概览时才出现，
+  // 于是「先核对指纹」这句话在向导里只是一条没有出路的提示。
+  const hostKey = useHostKeyStatus(server?.id ?? "");
+  const caPolicyEnabled = Boolean(server?.connection.hostCertificateAuthority);
+  const hostKeyVerified = caPolicyEnabled || hostKey.data?.pinned === true;
   const prepare = useMutation({
     mutationFn: async () => {
       if (!tested || !provider || !connected || !server) throw new Error("请先测试模型并连接服务器。");
@@ -142,14 +150,19 @@ export function GettingStarted({ onClose }: { onClose(): void }) {
       {step === 1 ? <section className="settings-card">
         <h3>连接服务器</h3>
         <label className="settings-field"><span className="field-label">服务器</span><select className="form-input" value={server?.id ?? ""} disabled={!shell || busy || workspace.agentBusy} onChange={(event) => { workspace.selectServer(event.target.value || null); action.reset(); }}><option value="">请选择服务器</option>{servers.data?.map((item) => <option key={item.id} value={item.id}>{item.name} · {item.connection.host}</option>)}</select></label>
-        <p className="form-hint">首次连接前，请先通过可信渠道核对并保存主机指纹。后续指纹变化会拒绝连接。</p>
+        <p className="form-hint">首次连接前，请先通过可信渠道核对并保存主机指纹；未核验前无法进入下一步。后续指纹变化会直接拒绝连接。</p>
+        {server ? <HostKeySection serverId={server.id} caPolicyEnabled={caPolicyEnabled} /> : null}
         <div className="settings-actions">
           <button className="button-secondary" disabled={!shell || busy} onClick={() => setServerModal("add")}>添加服务器</button>
           {server ? <button className="button-secondary" disabled={busy} onClick={() => setServerModal("edit")}>编辑连接</button> : null}
           <button className="button-primary" disabled={!shell || !server || busy || connected || workspace.agentBusy} onClick={() => server && action.mutate({ type: "connect", serverId: server.id })}>{busy ? "正在验证 SSH…" : connected ? "SSH 已连接" : "连接并验证 SSH"}</button>
         </div>
-        {action.isError ? <p className="form-error" role="alert">{action.error.message} 请检查地址、端口、用户名及认证信息后重试。</p> : null}
+        {action.isError ? <>
+          <SshFailureNotice error={action.error} />
+          <p className="form-hint">也可以返回上一步，改用私钥或 ssh-agent 认证。</p>
+        </> : null}
         {connected ? <p className="form-success" role="status">已连接 {server.name}，SSH 验证成功。</p> : null}
+        {server && !hostKeyVerified && hostKey.isSuccess ? <p className="form-hint form-hint-warning" role="status">这台主机还没有核验过指纹：先点「探针」读取它这次出示的指纹，与你在服务器上看到的 <code>SHA256:</code> 指纹核对一致，再点「信任此指纹」。</p> : null}
       </section> : null}
       {step === 2 ? <section className="settings-card">
         <h3>准备一次只读巡检</h3><p>模型：{provider?.label} / {provider?.model}</p><p>服务器：{server?.name ?? "未选择"}</p>
@@ -161,7 +174,7 @@ export function GettingStarted({ onClose }: { onClose(): void }) {
       <footer className="getting-started-footer">
         <div className="settings-actions">
           {step > 0 ? <button className="button-secondary" disabled={prepare.isPending || busy} onClick={() => changeStep(step - 1)}>上一步</button> : null}
-          {step < 2 ? <button className="button-primary" disabled={step === 0 ? !tested || editingProvider || test.isPending : !connected || busy} onClick={() => changeStep(step + 1)}>下一步</button>
+          {step < 2 ? <button className="button-primary" disabled={step === 0 ? !tested || editingProvider || test.isPending : !connected || busy || !hostKeyVerified} onClick={() => changeStep(step + 1)}>下一步</button>
             : <button className="button-primary" disabled={!tested || !connected || prepare.isPending || workspace.agentBusy || Boolean(workspace.agentDraft.trim() || workspace.agentAttachments.length)} onClick={() => prepare.mutate()}>{prepare.isPending ? "准备中…" : "填入巡检草稿"}</button>}
         </div>
       </footer>

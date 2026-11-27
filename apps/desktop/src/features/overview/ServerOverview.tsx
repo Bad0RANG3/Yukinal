@@ -17,6 +17,7 @@ import {
 import { errorMessage, formatBytes } from "../../lib/format.js";
 import { EmptyPanel, ErrorPanel, LoadingPanel } from "../../components/PanelStates.js";
 import { Icon } from "../../components/Icon.js";
+import { SshFailureNotice } from "../../components/SshFailureNotice.js";
 import { callDesktop, isDesktopShell, subscribeDesktop } from "../../lib/ipc.js";
 import { useWorkspaceStore } from "../../stores/workspace-store.js";
 import { useServerAction, useServers } from "../../lib/servers.js";
@@ -153,7 +154,7 @@ export function ServerOverview({ active = true }: { active?: boolean }) {
       <p>{server.connection.username}@{server.connection.host}:{server.connection.port}</p>
       <small>建立 SSH 连接后，查看系统资源与服务状态。</small>
       <button type="button" className="button-primary" disabled={busy || server.status === "connecting"} onClick={() => action.mutate({ type: "connect", serverId: server.id })}><Icon name="connect" size="md" />{busy || server.status === "connecting" ? "正在连接…" : "连接服务器"}</button>
-      {action.isError ? <p className="form-error" role="alert">{action.error.message}</p> : null}
+      {action.isError ? <SshFailureNotice error={action.error} /> : null}
     </div>;
   }
 
@@ -188,7 +189,7 @@ export function ServerOverview({ active = true }: { active?: boolean }) {
       onRefresh={() => void snapshotQuery.refetch({ cancelRefetch: false })}
       onConnect={() => action.mutate({ type: "connect", serverId: server.id })}
       connecting={busy || server.status === "connecting"}
-      connectionError={action.isError ? action.error.message : undefined}
+      connectionError={action.isError ? action.error : undefined}
     />
   </>;
 }
@@ -212,7 +213,7 @@ function OverviewContent({
   onRefresh: () => void;
   onConnect: () => void;
   connecting: boolean;
-  connectionError?: string;
+  connectionError?: unknown;
 }) {
   const [now, setNow] = useState(() => Date.now());
   const [observedResources, setObservedResources] = useState(() => resourceTrendStore.read(server.id));
@@ -254,7 +255,7 @@ function OverviewContent({
           <div>
             <strong>{server.status === "connecting" ? "正在连接服务器" : server.status === "error" ? "服务器连接异常" : "服务器当前未连接"}</strong>
             <p>{server.status === "connecting" ? "下方保留最近一次快照；连接完成后才会重新采集。" : "下方数据来自缓存快照，不能代表主机当前状态。重新连接后会开始采集。"}</p>
-            {connectionError ? <p className="overview-connection-error">{connectionError}</p> : null}
+            {connectionError ? <div className="overview-connection-error"><SshFailureNotice error={connectionError} /></div> : null}
           </div>
           <button type="button" className="button-secondary" onClick={onConnect} disabled={connecting}>
             <Icon name="connect" size="sm" />{connecting ? "正在连接…" : "重新连接"}

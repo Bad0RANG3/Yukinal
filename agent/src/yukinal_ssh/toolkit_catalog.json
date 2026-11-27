@@ -218,5 +218,50 @@
       "timeoutSeconds": 2,
       "command": "ss -H -lntu 2>/dev/null"
     }
+  ],
+  "readProbes": [
+    {
+      "id": "system.swap",
+      "timeoutSeconds": 5,
+      "command": "grep -E '^(SwapTotal|SwapFree|SwapCached):' /proc/meminfo",
+      "summary": "Read total and free swap from /proc/meminfo."
+    },
+    {
+      "id": "filesystem.inodes",
+      "timeoutSeconds": 10,
+      "command": "df -i -x tmpfs -x devtmpfs -x squashfs",
+      "summary": "Read inode usage for every real filesystem."
+    },
+    {
+      "id": "filesystem.mounts",
+      "timeoutSeconds": 10,
+      "command": "df -hT -x tmpfs -x devtmpfs -x squashfs",
+      "summary": "Read the real filesystem table with types."
+    },
+    {
+      "id": "system.time",
+      "timeoutSeconds": 5,
+      "command": "date -Is",
+      "summary": "Read the target clock and timezone."
+    },
+    {
+      "id": "filesystem.exists",
+      "timeoutSeconds": 5,
+      "parameter": "path",
+      "allowedPrefixes": [
+        "/etc/",
+        "/opt/",
+        "/srv/",
+        "/var/log/",
+        "/var/lib/",
+        "/usr/local/",
+        "/home/",
+        "/root/",
+        "/tmp/",
+        "/run/"
+      ],
+      "command": "if [ -e {path} ]; then echo PRESENT; else echo ABSENT; fi",
+      "summary": "Test whether one allowlisted absolute path exists on the target."
+    }
   ]
 }

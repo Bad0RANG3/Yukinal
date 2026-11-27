@@ -10,7 +10,6 @@ interface WorkpagesState {
   operationsOpen: boolean;
   collapsed: boolean;
   openTool(kind: WorkpageTool, options?: { serverId?: string | null; dock?: WorkpageDock; additional?: boolean }): void;
-  openTeamBoard(serverId: string | null): void;
   openEvidence(evidence: WorkpageEvidence): void;
   openArtifact(artifact: WorkpageArtifact): void;
   reopen(page: Workpage): void;
@@ -47,10 +46,6 @@ export const useWorkpagesStore = create<WorkpagesState>((set) => ({
       kind, title: WORKPAGE_LABEL[kind], serverId: options.serverId ?? null, pinned,
       dock: options.dock ?? (kind === "files" || kind === "terminal" ? "left" : "right"),
     });
-  }),
-  openTeamBoard: (serverId) => set((state) => {
-    const page: Workpage = { id: `board:${serverId ?? "all"}`, kind: "board", title: "看板", serverId, dock: "left" };
-    return { ...showPage(state, page), expandedId: page.id };
   }),
   openEvidence: (evidence) => set((state) => showPage(state, { id: `evidence:${evidence.id}`, kind: "evidence", title: evidence.title, evidence, serverId: evidence.execution.serverId ?? null, dock: "right" })),
   openArtifact: (artifact) => set((state) => showPage(state, { id: `artifact:${artifact.id}`, kind: "artifact", title: artifact.title, artifact, serverId: artifact.serverId ?? null, dock: "right" })),

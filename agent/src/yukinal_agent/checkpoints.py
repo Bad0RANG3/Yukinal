@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import hashlib
 import os
 import stat
 from contextlib import asynccontextmanager
@@ -8,6 +9,32 @@ from typing import AsyncIterator
 
 _PRIVATE_FILE = 0o600
 _PRIVATE_DIR = 0o700
+#: Field separator for the thread-id material. A unit separator cannot appear in
+#: a validated tenant/user/task identifier, so two different locators can never
+#: collide by concatenation.
+_THREAD_SEPARATOR = "\x1f"
+
+
+def turn_thread_id(tenant_id: str, user_id: str, resume_key: str) -> str:
+    """Checkpoint thread id for one conversation turn.
+
+    This is the single implementation: the agent derives the id when it starts a
+    turn and the sidecar derives the identical id when a reset has to delete it.
+    Two copies of the formula drift, and the visible symptom is a reset that
+    leaks threads instead of removing them.
+
+    `resume_key` is the locator, so the same turn in the same window resolves to
+    the same thread across a process restart; a durable task id is deliberately
+    not part of the material.
+    """
+    material = _THREAD_SEPARATOR.join(("turn", tenant_id, user_id, resume_key))
+    return "agent-" + hashlib.sha256(material.encode("utf-8")).hexdigest()
+
+
+def run_thread_id(tenant_id: str, user_id: str, task_id: str, run_id: str) -> str:
+    """Checkpoint thread id for a run that has no reusable turn locator."""
+    material = _THREAD_SEPARATOR.join((tenant_id, user_id, task_id, run_id))
+    return "agent-" + hashlib.sha256(material.encode("utf-8")).hexdigest()
 
 
 def _require_regular_file(path: Path, message: str) -> None:

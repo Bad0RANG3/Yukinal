@@ -90,6 +90,12 @@ export const AgentMemorySchema = z.strictObject({
   content: z.string().trim().min(1).max(12_000),
   createdAt: z.string().min(1).max(80),
   updatedAt: z.string().min(1).max(80),
+  /** Retrieval deadline; absent means the memory never expires and stays listed. */
+  expiresAt: z.string().min(1).max(80).optional(),
+  /** The memory this row replaced, so a correction keeps its history. */
+  supersedes: IdentifierSchema.optional(),
+  /** `user` wrote it directly, `model` means the operator approved a proposal. */
+  origin: z.enum(["user", "model"]).optional(),
 });
 
 function validMemoryScope(value: { scope?: "global" | "server"; serverId?: string }): boolean {
@@ -109,6 +115,10 @@ export const AgentMemorySaveInputSchema = z.strictObject({
   serverId: SERVER_ID_SCHEMA.optional(),
   title: z.string().trim().min(1).max(200),
   content: z.string().trim().min(1).max(12_000),
+  /** A time zone is mandatory: a naive instant would silently never expire. */
+  expiresAt: z.string().datetime({ offset: true }).optional(),
+  supersedes: IdentifierSchema.optional(),
+  origin: z.enum(["user", "model"]).optional(),
 }).refine(validMemoryScope, { message: "server memory requires serverId; global memory cannot have one" });
 
 export const AgentMemoryDeleteInputSchema = z.strictObject({

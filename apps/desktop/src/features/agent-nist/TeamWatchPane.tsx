@@ -1,49 +1,41 @@
-import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
+import { useMutation } from "@tanstack/react-query";
 import { IPC_COMMANDS } from "@yukinal/shared";
 import { useEffect, useState } from "react";
 import { Icon } from "../../components/Icon.js";
-import { callDesktop, isDesktopShell } from "../../lib/ipc.js";
+import { callDesktop } from "../../lib/ipc.js";
 import { isPreviewFixture } from "../../lib/preview-fixtures.js";
 import { errorMessage, formatTimestamp } from "../../lib/format.js";
 import { useWorkspaceStore } from "../../stores/workspace-store.js";
+import { useInvalidateInvestigations, useInvestigationOverview } from "../investigations/investigation-overview.js";
 import { scheduleIntervalLabel, notificationPolicyLabel } from "../investigations/schedule-ui.js";
 import { TEAM_STAGE_LABEL, teamRunActive, useTeamRuntimeStore } from "./team-runtime-store.js";
 
-export function useTeamWatch() {
-  return useQuery({ queryKey: ["team-watch"], enabled: isDesktopShell(), staleTime: 2_000, refetchInterval: 2_000,
-    queryFn: async () => {
-      const [tasks, schedules] = await Promise.all([callDesktop(IPC_COMMANDS.investigationTaskList, {}), callDesktop(IPC_COMMANDS.investigationScheduleList, {})]);
-      return { tasks: tasks.tasks, schedules: schedules.schedules };
-    },
-  });
-}
-
 export function TeamWatchPane() {
-  const query = useTeamWatch();
+  const overview = useInvestigationOverview();
+  const invalidate = useInvalidateInvestigations();
   const serverId = useWorkspaceStore((state) => state.selectedServerId);
   const totals = useTeamRuntimeStore((state) => state.totals);
   const runs = useTeamRuntimeStore((state) => state.runs);
   const updates = useTeamRuntimeStore((state) => state.watchUpdates);
-  const queryClient = useQueryClient();
   const [notice, setNotice] = useState<string | null>(null);
-  const update = useMutation({ mutationFn: (input: { scheduleId: string; status: "active" | "paused" }) => callDesktop(IPC_COMMANDS.investigationScheduleUpdate, { input }), onMutate: () => setNotice(null), onSuccess: () => { void queryClient.invalidateQueries({ queryKey: ["team-watch"] }); }, onError: (error) => setNotice(errorMessage(error)) });
-  const tasks = new Map(query.data?.tasks.map((task) => [task.id, task]));
-  const rows = query.data?.schedules.filter((schedule) => !serverId || tasks.get(schedule.taskId)?.scope.serverId === serverId) ?? [];
+  const update = useMutation({ mutationFn: (input: { scheduleId: string; status: "active" | "paused" }) => callDesktop(IPC_COMMANDS.investigationScheduleUpdate, { input }), onMutate: () => setNotice(null), onSuccess: () => { void invalidate(); }, onError: (error) => setNotice(errorMessage(error)) });
+  const tasks = new Map(overview.tasks.data?.tasks.map((task) => [task.id, task]));
+  const rows = overview.schedules.data?.schedules.filter((schedule) => !serverId || tasks.get(schedule.taskId)?.scope.serverId === serverId) ?? [];
   const visibleUpdates = updates.filter((update) => rows.some((row) => row.id === update.scheduleId));
   const readKey = visibleUpdates.map((update) => update.scheduleId).join("\n");
   useEffect(() => {
     if (readKey) {
-      void queryClient.invalidateQueries({ queryKey: ["team-watch"] });
+      void invalidate();
       useTeamRuntimeStore.getState().readWatchUpdates(readKey.split("\n"));
     }
-  }, [readKey, queryClient]);
+  }, [readKey, invalidate]);
   return <div className="team-watch-pane">
-    <div className="team-heartbeat"><span><Icon name="activity" size="sm" />值守状态</span><strong>独立更新</strong><small>{query.dataUpdatedAt ? `更新 ${formatTimestamp(new Date(query.dataUpdatedAt).toISOString())}` : "等待数据"}</small></div>
+    <div className="team-heartbeat"><span><Icon name="activity" size="sm" />值守状态</span><strong>独立更新</strong><small>{overview.schedules.dataUpdatedAt ? `更新 ${formatTimestamp(new Date(overview.schedules.dataUpdatedAt).toISOString())}` : "等待数据"}</small></div>
     <div className="team-watch-intro"><strong>持续值守</strong><span>进度与最新结果在此更新，主对话可继续使用。</span></div>
-    {query.isLoading ? <p className="agent-nist-notice" role="status">读取值守计划…</p> : null}
-    {query.isError ? <div className="agent-nist-notice is-error" role="alert">无法读取值守计划：{errorMessage(query.error)}<button type="button" className="agent-nist-text-action" onClick={() => void query.refetch()}>重试</button></div> : null}
+    {overview.schedules.isLoading ? <p className="agent-nist-notice" role="status">读取值守计划…</p> : null}
+    {overview.schedules.isError ? <div className="agent-nist-notice is-error" role="alert">无法读取值守计划：{errorMessage(overview.schedules.error)}<button type="button" className="agent-nist-text-action" onClick={() => void invalidate()}>重试</button></div> : null}
     {notice ? <p className="agent-nist-notice is-error" role="alert">{notice}</p> : null}
-    {!query.isLoading && !query.isError && !rows.length ? <p className="team-empty">当前范围没有值守计划。</p> : null}
+    {!overview.schedules.isLoading && !overview.schedules.isError && !rows.length ? <p className="team-empty">当前范围没有值守计划。</p> : null}
     <ul className="team-watch-list">{rows.map((schedule) => {
       const run = [...runs].reverse().find((run) => run.source === "watch" && run.scheduleId === schedule.id && teamRunActive(run));
       const working = schedule.status === "active" && (Boolean(run) || schedule.lastRunStatus === "running" || schedule.lastRunStatus === "claimed");
@@ -70,12 +62,4 @@ export function watchResult(error?: string, outcome?: string): string {
   if (!outcome) return "尚无执行结果";
   try { const report: unknown = JSON.parse(outcome); if (report && typeof report === "object" && "summary" in report && typeof report.summary === "string") return report.summary; } catch { /* Older runs contain plain text. */ }
   return outcome;
-}
-
-export function ConversationWatchStatus({ onOpen }: { onOpen?: () => void }) {
-  const query = useTeamWatch();
-  const serverId = useWorkspaceStore((state) => state.selectedServerId);
-  const schedules = query.data?.schedules.filter((schedule) => serverId && query.data.tasks.find((task) => task.id === schedule.taskId)?.scope.serverId === serverId && schedule.status !== "revoked") ?? [];
-  if (!schedules.length) return null;
-  return <button type="button" className="conversation-watch-status" onClick={() => { useTeamRuntimeStore.getState().setPanelView("watch"); if (onOpen) onOpen(); else useWorkspaceStore.getState().setPrimary("agents"); }} title="在运维 Agent 页面查看已登记的值守计划"><Icon name="activity" size="sm" /><span>值守计划 · {schedules.length}</span><span>{schedules.filter((schedule) => schedule.status === "active").length} 已启用</span><Icon name="chevronRight" size="xs" /></button>;
 }

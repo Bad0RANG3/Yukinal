@@ -9,7 +9,6 @@ import { DECISION_LABEL, EXECUTION_STATUS_LABEL, approvalSourceLabel, environmen
 import { useWorkspaceStore } from "../../stores/workspace-store.js";
 import { HostKeyGate } from "../servers/HostKeyGate.js";
 import { TeamActionCue, TeamOperationOutline } from "../agent-nist/TeamActivity.js";
-import { TeamBoardPane } from "../agent-nist/TeamBoardPane.js";
 import { WorkpageArtifactView } from "./WorkpageArtifactView.js";
 import { useWorkpageOperations } from "./useWorkpageOperations.js";
 import { artifactFromContent, printableContent, WORKPAGE_LABEL, WORKPAGE_TOOLS, type Workpage, type WorkpageTool } from "./workpage-model.js";
@@ -20,7 +19,7 @@ const TerminalPane = lazy(async () => ({ default: (await import("../terminal/Ter
 const RemoteFilesPane = lazy(async () => ({ default: (await import("../files/RemoteFilesPane.js")).RemoteFilesPane }));
 const LogsPane = lazy(async () => ({ default: (await import("../logs/LogsPane.js")).LogsPane }));
 const ServicesPane = lazy(async () => ({ default: (await import("../services/ServicesPane.js")).ServicesPane }));
-const PAGE_ICON: Record<Workpage["kind"], IconName> = { files: "folder", terminal: "terminal", logs: "logs", services: "services", evidence: "activity", artifact: "file", board: "board" };
+const PAGE_ICON: Record<Workpage["kind"], IconName> = { files: "folder", terminal: "terminal", logs: "logs", services: "services", evidence: "activity", artifact: "file" };
 type ChooseTarget = (kind: WorkpageTool) => void;
 const isTool = (page: Workpage | undefined): page is Workpage & { kind: WorkpageTool } => Boolean(page && WORKPAGE_TOOLS.includes(page.kind as WorkpageTool));
 
@@ -79,7 +78,6 @@ function TerminalStatus({ serverId }: { serverId: string }) {
 
 /** Reused by a native standalone window; the target is never the global selection. */
 export function WorkpageContent({ page, active = true, onChooseTarget }: { page: Workpage; active?: boolean; onChooseTarget?: () => void }) {
-  if (page.kind === "board") return <TeamBoardPane serverId={page.serverId} expanded />;
   if (page.kind === "artifact") return <WorkpageArtifactView artifact={page.artifact} />;
   if (page.kind === "evidence") return <WorkpageEvidenceView page={page} />;
   if (!page.serverId) return <div className="workpage-unbound" role="status"><Icon name={PAGE_ICON[page.kind]} size="md" /><strong>选择服务器以使用{WORKPAGE_LABEL[page.kind]}</strong><p>从左侧服务器列表选择目标，所选工具会直接打开。</p>{onChooseTarget ? <button type="button" className="button-secondary" onClick={onChooseTarget}>选择服务器</button> : null}</div>;

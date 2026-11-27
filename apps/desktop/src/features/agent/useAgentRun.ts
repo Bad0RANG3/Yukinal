@@ -1,15 +1,16 @@
 /**
- * 一次 Agent 运行的全部机制：Tauri 事件流、run 生命周期握手、审批簿记。
+ * 一次 Agent 运行的全部机制：宿主事件流、run 生命周期握手、审批簿记。
  *
  * 这个模块存在的理由，是 panel 里最难写对、也最难用界面验证的那部分：
  *
- *  - Rust 可能在 `agent_run_start` 命令 resolve *之前* 就发出 started/completed，
+ *  - 宿主可能在 `agent_run_start` 命令 resolve *之前* 就发出 started/completed，
  *    所以「claim 一个 run 槽位」必须先于命令发生，并且只接受自己期望的那个 runId。
  *  - 一个 dying sidecar 会在没人看事件流的时候断开，因此轮询到的存活信号
- *    也必须能把在途运行判死。
+ *    也必须能把在途运行判死（见 `sidecar-watchdog.ts`）。
  *  - 审批是一次性的：重复点击、过期、运行已结束都必须被挡在 IPC 之外。
  *
  * 调用方只需要说「跑这句话」和「回复怎么落库」，其余顺序由这里保证。
+ * 事件接线在 `run-events.ts`，死亡信号在 `sidecar-watchdog.ts`；本文件只留生命周期本身。
  */
 
 import {
@@ -31,31 +32,17 @@ import {
 } from "@yukinal/shared";
 import { useCallback, useEffect, useRef, useState } from "react";
 
-import { callDesktop, isDesktopShell, subscribeDesktop, type AgentEventName, type DesktopEventPayload, type DesktopSubscription } from "../../lib/ipc.js";
+import { callDesktop, isDesktopShell } from "../../lib/ipc.js";
 import { errorMessage } from "../../lib/format.js";
 import { resetAdmissionOnFailure, type AdmissionRef, type PendingAdmission } from "./run-lifecycle.js";
 import { ASSISTANT_REPLY_NOT_SAVED, assistantReplyNotSaved } from "./session-persistence.js";
 import type { AgentTeam } from "../agent-nist/agent-teams.js";
 import { useTeamRuntimeStore } from "../agent-nist/team-runtime-store.js";
 import { AgentRunStream, appendStreamBatch, settleStreamText, type RunStreamScope } from "./run-stream.js";
-import {
-  appendEntries,
-  appendToolCall,
-  settleToolResult,
-  targetLabel,
-  toolPurpose,
-  toolOutcomeFromEvent,
-  type Entry,
-  type ReplyIdentity,
-} from "./transcript.js";
+import { wireAgentRunEvents } from "./run-events.js";
+import { useSidecarWatchdog } from "./sidecar-watchdog.js";
+import { appendEntries, type Entry, type ReplyIdentity } from "./transcript.js";
 
-const SIDECAR_EXIT_NOTICE = "Agent sidecar 已退出，本次运行已中断。";
-/**
- * 崩溃后已被自动重启时的措辞。与上面那句分开，是因为用户的处境不同：这里进程已经
- * 回来了（可以立刻重试），而上面那句需要用户自己按下启动——把两者说成一句话会让
- * 用户在「已经恢复」和「还没恢复」之间猜。
- */
-const SIDECAR_RESTART_NOTICE = "Agent sidecar 崩溃后已自动重启，本次运行已中断，可以重新提问。";
 
 export type StartOutcome =
   /** 运行已提交（或已生成 runId 并等待 started 事件）。 */
@@ -90,11 +77,6 @@ export type StartRunInput = {
   permissionMode?: AgentPermissionMode;
   /** 运行模式：只读 / 计划 / 目标。由 sidecar 的权限引擎强制。 */
   mode?: AgentRunMode;
-  /**
-   * 这次运行按哪套策略判定。不传 = 按目标环境自动（sidecar 用内建表推导）；
-   * 传了就必须是 sidecar 认得的内建策略 id，否则整次调用被拒。
-   */
-  policyId?: string;
   /** `sync` waits for the terminal result before the start call resolves. */
   delivery?: "async" | "sync";
 };
@@ -226,192 +208,49 @@ export function useAgentRun(options: {
 
   useEffect(() => {
     mounted.current = true;
-    const resetView = (): void => {
+    if (!isDesktopShell()) {
+      mounted.current = false;
+      stream.reset();
+      stoppingScope.current = null;
+      return;
+    }
+    const disconnect = wireAgentRunEvents({
+      stream,
+      completeRun,
+      onApprovalRequested,
+      setRunId,
+      setRunning,
+      setRunState,
+      setStage,
+      setTokenUsage,
+      setStopping,
+      setPendingApprovalIds,
+      setApprovalStatuses,
+      setEntries,
+      setListening,
+      pendingAdmission,
+    });
+    return () => {
+      disconnect();
       mounted.current = false;
       stream.reset();
       stoppingScope.current = null;
     };
-    if (!isDesktopShell()) return resetView;
-    const subscriptions: DesktopSubscription[] = [];
-    let disposed = false;
-    // 订阅/退订的竞态由 `subscribeDesktop` 负责；这里只关心两件事 —— 把 8 个通道
-    // 接上，以及「全部接上」这个时刻（`ready`），因为 listen 是异步的，在它完成
-    // 之前发提示词会丢掉回答。
-    // 泛型**就是重点**：`on` 曾经把 handler 的参数写成 `(payload: AgentStreamEvent) => void`，
-    // 于是 `subscribeDesktop(name, …)` 按通道收窄出来的类型，在这里又被拓宽回整个联合，
-    // 下游只能靠 9 次 `as Extract<…>` 重新收窄 —— 而 cast 正是「通过粗闸门但形状不符的
-    // payload 被当成没校验过的形状交给 handler」的地方（`event.result` 对别的成员就是
-    // undefined）。保留 `E` 之后，每个 handler 拿到的就是它那个通道的**成员**类型。
-    // （`subscribeDesktop(name, …)` 不需要显式写 `<E>`：`name: E` 能从字面量反推出 `E`。）
-    const on = <E extends AgentEventName>(name: E, handler: (payload: DesktopEventPayload<E>) => void): void => {
-      subscriptions.push(
-        subscribeDesktop(name, (payload) => {
-          if (disposed) return;
-          handler(payload);
-        }),
-      );
-    };
-
-    const isActive = (payload: { runId: string }): boolean => stream.isActive(payload.runId);
-
-    on("agent.started", (event) => {
-      if (!stream.started(event.runId)) return;
-      setRunId(event.runId);
-      setRunning(true);
-      setRunState("thinking");
-      setStage("intake");
-      useTeamRuntimeStore.getState().stage(event.runId, "thinking");
-    });
-    on("agent.stage", (event) => {
-      if (!isActive(event)) return;
-      // Only the payload's own stage is stored; the runtime derived it from
-      // executed results, so a late or duplicated frame cannot invent progress.
-      setStage(event.stage);
-    });
-    on("agent.thinking", (event) => {
-      if (!isActive(event)) return;
-      const delta = event.textDelta ?? "";
-      stream.enqueue(event.runId, "reasoning", delta);
-    });
-    on("agent.text", (event) => {
-      if (!isActive(event)) return;
-      stream.enqueue(event.runId, "assistant", event.textDelta);
-    });
-    on("agent.usage", (event) => {
-      useTeamRuntimeStore.getState().usage(event.runId, event.usage);
-      if (!isActive(event)) return;
-      setTokenUsage(event.usage);
-    });
-    on("agent.tool_call", (event) => {
-      if (!isActive(event)) return;
-      stream.boundary();
-      setRunState("running_tool");
-      useTeamRuntimeStore.getState().stage(event.runId, "running_tool");
-      useTeamRuntimeStore.getState().tool(event.runId, event.toolName, event.target.serverId ?? null, false, event.callId);
-      setEntries((current) =>
-        appendToolCall(current, {
-          callId: event.callId,
-          toolName: event.toolName,
-          purpose: toolPurpose(event.input),
-          target: targetLabel(event.target),
-          riskLevel: event.riskLevel,
-          decision: event.decision,
-          approvedBy: event.approvedBy,
-        }),
-      );
-    });
-    on("agent.tool_result", (event) => {
-      if (!isActive(event)) return;
-      stream.boundary();
-      useTeamRuntimeStore.getState().stage(event.runId, "thinking");
-      useTeamRuntimeStore.getState().tool(event.runId, event.toolName, event.target.serverId ?? null, true, event.callId);
-      setRunState("thinking");
-      setEntries((current) =>
-        settleToolResult(
-          current,
-          {
-            callId: event.callId,
-            toolName: event.toolName,
-          purpose: toolPurpose(event.input),
-            target: targetLabel(event.target),
-            riskLevel: event.riskLevel,
-            decision: event.decision,
-            approvedBy: event.approvedBy,
-          },
-          toolOutcomeFromEvent(event),
-        ),
-      );
-    });
-    on("agent.waiting_approval", (event) => {
-      if (!isActive(event)) return;
-      stream.boundary();
-      if (event.approval.autoApproved === true) {
-        // Auto-approval mode: the host already minted and accepted its one-shot
-        // ticket. This is a record of a call that is running, not a decision
-        // waiting for a person, so it must not interrupt or render buttons.
-        return;
-      }
-      setRunState("waiting_approval");
-      useTeamRuntimeStore.getState().stage(event.runId, "waiting_approval");
-      onApprovalRequested.current?.();
-      setEntries((current) => appendEntries(current, [{ kind: "approval", approval: event.approval }]));
-    });
-    on("agent.approval_expired", (event) => {
-      if (!isActive(event)) return;
-      stream.flush();
-      setApprovalStatuses((current) => ({ ...current, [event.approvalId]: "审批已过期" }));
-    });
-    on("agent.completed", (event) => completeRun(event.runId, event.result));
-    on("agent.failed", (event) => {
-      if (!stream.finish(event.runId)) return;
-      useTeamRuntimeStore.getState().stage(event.runId, "failed");
-      if (pendingAdmission.current?.runId === event.runId) pendingAdmission.current = null;
-      setRunning(false);
-      setRunState("failed");
-      setStopping(false);
-      setPendingApprovalIds([]);
-      setEntries((current) => appendEntries(current, [{ kind: "error", text: event.error }]));
-    });
-
-    void Promise.all(subscriptions.map((subscription) => subscription.ready))
-      .then(() => {
-        if (!disposed) setListening(true);
-      })
-      .catch((error) => {
-        if (!disposed) setEntries(appendEntries([], [{ kind: "error", text: `无法接收 Agent 事件：${String(error)}` }]));
-      });
-
-    return () => {
-      disposed = true;
-      subscriptions.forEach((subscription) => subscription.stop());
-      resetView();
-    };
   }, []);
 
-  // 轮询到的存活信号是权威的：进程没了，在途运行不可能继续。
-  useEffect(() => {
-    if (!running || sidecarRunning !== false) return;
-    if (!stream.fail()) return;
-    resetAdmissionOnFailure(pendingAdmission);
-    useTeamRuntimeStore.getState().runs.filter((run) => ["starting", "thinking", "running_tool", "waiting_approval"].includes(run.stage)).forEach((run) => useTeamRuntimeStore.getState().stage(run.id, "interrupted"));
-    setRunning(false);
-    setRunId(null);
-    setStopping(false);
-    setPendingApprovalIds([]);
-    setRunState("failed");
-    setEntries((current) => {
-      const last = current.at(-1);
-      if (last?.kind === "error" && last.text === SIDECAR_EXIT_NOTICE) return current;
-      return appendEntries(current, [{ kind: "error", text: SIDECAR_EXIT_NOTICE }]);
-    });
-  }, [sidecarRunning, running]);
-
-  // 自动重启把上面那条信号变得不可靠：崩溃后一两次尝试就恢复了，而运行中的轮询是
-  // 1.5 秒一次，界面完全可能只看到 `running === true`。那会让一个已经随进程消失的
-  // run 永远停在「运行中」，用户等一个不会到来的回答。
-  //
-  // 重启记录是权威的第二条信号，而且它只在**真的发生了一次重启**时变化（用户自己的
-  // 启动/停止会把记录清空，那种情况由上面那条覆盖，所以清空不在这里触发失败）。
-  const seenRestart = useRef<string | null>(sidecarRestart ?? null);
-  useEffect(() => {
-    const next = sidecarRestart ?? null;
-    if (next === null || next === seenRestart.current) return;
-    seenRestart.current = next;
-    if (!running) return;
-    if (!stream.fail()) return;
-    resetAdmissionOnFailure(pendingAdmission);
-    useTeamRuntimeStore.getState().runs.filter((run) => ["starting", "thinking", "running_tool", "waiting_approval"].includes(run.stage)).forEach((run) => useTeamRuntimeStore.getState().stage(run.id, "interrupted"));
-    setRunning(false);
-    setRunId(null);
-    setStopping(false);
-    setPendingApprovalIds([]);
-    setRunState("failed");
-    setEntries((current) => {
-      const last = current.at(-1);
-      if (last?.kind === "error" && last.text === SIDECAR_RESTART_NOTICE) return current;
-      return appendEntries(current, [{ kind: "error", text: SIDECAR_RESTART_NOTICE }]);
-    });
-  }, [sidecarRestart, running]);
+  useSidecarWatchdog({
+    stream,
+    pendingAdmission,
+    running,
+    sidecarRunning,
+    sidecarRestart,
+    setRunning,
+    setRunId,
+    setStopping,
+    setPendingApprovalIds,
+    setRunState,
+    setEntries,
+  });
 
   const start = useCallback(async (input: StartRunInput): Promise<StartOutcome> => {
     if (!mounted.current) return "failed";
@@ -427,7 +266,7 @@ export function useAgentRun(options: {
       return "failed";
     }
     const contentKey = JSON.stringify(parts);
-    const routingKey = JSON.stringify({ persona: input.persona, subagents: input.subagents, participant: input.participant, providerId: input.providerId, model: input.model, focusServerId: input.focusServerId, reasoningEffort: input.reasoningEffort, toolAccess: input.toolAccess, permissionMode: input.permissionMode, mode: input.mode, policyId: input.policyId });
+    const routingKey = JSON.stringify({ persona: input.persona, subagents: input.subagents, participant: input.participant, providerId: input.providerId, model: input.model, focusServerId: input.focusServerId, reasoningEffort: input.reasoningEffort, toolAccess: input.toolAccess, permissionMode: input.permissionMode, mode: input.mode });
     const previous = pendingAdmission.current;
     const reusable =
       previous?.prompt === prompt && JSON.stringify(previous.parts) === contentKey && previous.taskId === (input.taskId ?? null) && previous.routingKey === routingKey
@@ -487,8 +326,6 @@ export function useAgentRun(options: {
         focusServerId: input.focusServerId ?? undefined,
         permissionMode: input.permissionMode,
         mode: input.mode,
-        // Omitted policy means the sidecar derives it from the target environment.
-        policyId: input.policyId ?? undefined,
       };
       const admissionResponse = await callDesktop(IPC_COMMANDS.agentRunStart, {
         ...request, delivery: "async", resume: false,

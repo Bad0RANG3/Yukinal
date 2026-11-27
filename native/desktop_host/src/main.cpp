@@ -441,16 +441,24 @@ constexpr const char* kHostBridge = R"JS(
   if (window.top !== window) return;
   const subscriptions = new Map();
   const nativeCall = (method, params) => window.yukinalNativeInvoke(method, params);
+  // The message keeps the code as a suffix so existing logs stay readable, and
+  // the code also travels as `error.code`. Without that property the UI can only
+  // read a sentence: every SSH failure used to look like the same event.
+  const withCode = (code, message, fallback) => {
+    const error = new Error(`${message} ${code ? `(${code})` : ""}`.trim());
+    if (code) error.code = code;
+    return error;
+  };
   const check = (result) => {
     if (result && typeof result.code === "string" && typeof result.message === "string") {
-      throw new Error(`${result.message} (${result.code})`);
+      throw withCode(result.code, result.message);
     }
     return result;
   };
   const normalizeError = (error, fallback) => {
     if (error instanceof Error) return error;
     if (error && typeof error.code === "string" && typeof error.message === "string") {
-      return new Error(`${error.message} (${error.code})`);
+      return withCode(error.code, error.message);
     }
     return new Error(fallback);
   };

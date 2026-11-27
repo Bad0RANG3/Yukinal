@@ -440,17 +440,6 @@
 .agent-composer .agent-input-notices .agent-notice { padding: 0; font-size: var(--text-caption); line-height: 1.5; }
 .agent-composer .agent-input-notices .text-button { font-size: inherit; }
 
-.agent-settings-warning {
-  margin: 0;
-  border: 1px solid var(--warn-line);
-  border-radius: var(--radius-control);
-  background: var(--warn-surface);
-  color: var(--text);
-  padding: 7px 9px;
-  font-size: var(--text-caption);
-  line-height: 1.5;
-}
-
 .agent-settings-trigger.is-open {
   background: var(--surface-4);
   color: var(--text);
@@ -496,15 +485,6 @@
 }
 
 /* Notes use the shared muted tone on the raised composer surface. */
-
-.agent-settings-options {
-  display: flex;
-  flex-direction: column;
-  gap: 4px;
-  margin: 0;
-  padding: 0;
-  list-style: none;
-}
 
 .agent-settings-option {
   display: flex;

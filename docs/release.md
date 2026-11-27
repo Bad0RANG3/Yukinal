@@ -1,8 +1,33 @@
 # 交付与发布
 
+## 2.1.0 验收范围（2026-11-27）
+
+本版来自一次完整的实机 E2E 回归：真实 Provider、真实 SSH 目标，从创建目标任务开始，
+经证据采集、方案发布、用户审批、行动执行，一路跑到计划验证完成。完整证据与逐项修复
+说明见[2.1.0 发行说明](./releases/2.1.0.md)。
+
+- 免审批固定读改走新增的 `read_probe` SSH 操作，命令文本来自编译进 C++ 与 Python 的
+  共享工具目录，`server.exec` 的审批与 action-only 规则未放松；
+- 补齐 `investigation.evidence`/`.finding`/`.brief`/`.artifact` 四个记录工具，决策摘要
+  从"host 有能力但无人调用"变成真实可用；
+- 新增计划上下文：证据/决策/验证步骤续跑时也会拿到当前计划步骤，行动绑定仍只给 action；
+- 执行时间线真正写入 `investigation_steps`，结算不覆盖开始时记录的工具名与输入；
+- `waiting_user` 允许流转到 `completed`/`failed`，验证通过的计划可以收尾，任务完成时 phase
+  落到 `completed`；
+- 目标评审的 blocked/no-progress/invalid-evidence 等结论、`confirmation_turn_required`、
+  `plan_step_settlement_failed` 不再落到无路可走的 `unknown`；发布决策摘要后停在
+  `waiting_user` 等待用户，而不是把任务判为终态；
+- 审批事件携带**当前**计划步骤，任务绑定的 `server.exec` 审批能真正铸票并被批准；
+- Agent 预算、无效工具调用、schema 拒绝、确认轮与 `contentType` 的韧性修复；
+- 界面：活动运行期间选择方案改为延后启动；新增 favicon；Provider 模型目录不再拒绝
+  真实网关的顶层键。
+
+门禁：`pnpm check` 内的 CTest 14/14、Python Agent 545 项（5 项需外部环境跳过）、
+桌面 661 项、workspace 类型检查与生产构建全部通过。
+
 ## 2.0.3 验收范围（2026-10-28）
 
-本版收录 2026-10-27 至 2026-10-28 的实机验收修复、持久任务/计划恢复、策略边界与桌面 UI 改动，并修复 Windows 任务栏图标。此前 `2.0.1` 的 Agent 验收结论已由后续证据修订；完整复现与逐项结果见[Agent 实机验收记录](./agent-live-acceptance-20261027.md)及[交接手册](./acceptance-handoff.md)。
+本版收录 2026-10-27 至 2026-10-28 的实机验收修复、持久任务/计划恢复、策略边界与桌面 UI 改动，并修复 Windows 任务栏图标。此前 `2.0.1` 的 Agent 验收结论已由后续证据修订；完整复现与逐项结果见下文各节与[本版发行说明](./releases/2.0.3.md)。
 
 - 确认并修复了 4 项缺陷（阶段把只读命令报成变更、拒绝后审计缺终态行、健康检查
   被迫走 destructive 审批、批准等待时间混入工具耗时），另修 2 项（偏好迁移
@@ -11,20 +36,20 @@
   待批准调用，不同窗口重新开始；
 - 修复 1 项设计意图缺口（拒绝后模型拿不到失败结果），加固 1 项提示词约束。
 
-完整证据、复现步骤与修复说明见[Agent 实机验收记录（2026-10-27）](./agent-live-acceptance-20261027.md)。Computer Use 复验覆盖真实只读工具循环、一次 `server.info` 计划步骤成功结算及桌面重启后恢复；两份待选择任务和计划也在重启后恢复。独立 `server.exec` 审批测试保持自动执行关闭、不批准请求，等待 120 秒后显示审批过期，且发起时尚未执行。host denylist 与桌面 SSH autoconfig 联合通过实机验证：只读请求成功，命中策略的命令在 SSH 派发前被拒绝。结构化回复组件、复制、历史回开与任务绑定修复由桌面测试和 Computer Use 覆盖。
+完整证据、复现步骤与修复说明见[本版发行说明](./releases/2.0.3.md)。Computer Use 复验覆盖真实只读工具循环、一次 `server.info` 计划步骤成功结算及桌面重启后恢复；两份待选择任务和计划也在重启后恢复。独立 `server.exec` 审批测试保持自动执行关闭、不批准请求，等待 120 秒后显示审批过期，且发起时尚未执行。host denylist 与桌面 SSH autoconfig 联合通过实机验证：只读请求成功，命中策略的命令在 SSH 派发前被拒绝。结构化回复组件、复制、历史回开与任务绑定修复由桌面测试和 Computer Use 覆盖。
 
 完整 `pnpm check` 通过：CTest 17/17、control plane 157 项、Python Agent 345 项、桌面 641 项；生产 UI bundle、Python sidecar smoke、文档链接、发布卫生与秘密扫描通过。Python 3.14 测试出现非致命资源警告。当前仍未覆盖真实多目标并行/长时间压力与安装版 GUI；对应本地策略、并行会话和长工作流回归通过。
 
 Windows 任务栏图标修复将 Yukinal ICO 资源嵌入 C++ 宿主可执行文件，主窗口和独立工作页窗口均显式设置小/大图标，并设置稳定的 Windows AppUserModelID；安装包快捷方式与宿主共用同一图标源。
 
-## 当前发行：2.0.3（2026-10-28）
+## 当前发行：2.1.0（2026-11-27）
 
-`v2.0.3` 是本次修复与验收更新的正式版。`main` 保存源码，稳定标签触发三平台完整门禁、安装器 smoke 与正式 Release 发布；只有工作流全部成功后，GitHub Release 才包含本版安装包。
+`v2.1.0` 是本次实机 E2E 回归与修复更新的正式版。`main` 保存源码，稳定标签触发三平台完整门禁、安装器 smoke 与正式 Release 发布；只有工作流全部成功后，GitHub Release 才包含本版安装包。
 
-- [本版发行说明](./releases/2.0.3.md)、[变更记录](./changelog.md)
+- [本版发行说明](./releases/2.1.0.md)、[变更记录](./changelog.md)
 - [发行工作流与运行记录](https://github.com/Bad0RANG3/Yukinal/actions/workflows/release-candidate.yml)
-- [本版 GitHub Release](https://github.com/Bad0RANG3/Yukinal/releases/tag/v2.0.3)
-- [2026-10-20 及更早的发布记录归档](./release-history-20261020.md)
+- [本版 GitHub Release](https://github.com/Bad0RANG3/Yukinal/releases/tag/v2.1.0)
+- 2026-10-20 及更早的发布记录见[变更记录](./changelog.md)与 Git 历史
 
 ## 本版交互
 
@@ -34,17 +59,18 @@ Windows 任务栏图标修复将 Yukinal ICO 资源嵌入 C++ 宿主可执行文
 
 | 范围 | 结论与来源 |
 | --- | --- |
-| Agent 能力 | **部分通过**：真实只读工具循环、持久计划结算和重启恢复、审批过期、host denylist 与桌面 autoconfig 联合工作、原生 UI 七项清单均已由 Computer Use/本地回归覆盖。真实多目标并行/长时压力与当前源码安装版 GUI 尚未验收，见[实机验收记录](./agent-live-acceptance-20261027.md) |
-| UI 自动回归 | `pnpm check`：桌面 641 项通过；类型检查与生产构建通过 |
-| Windows 任务栏图标 | Windows C++ 宿主编译嵌入 Yukinal ICO，主窗口和独立工作页窗口均设置图标；正式 installer smoke 由 v2.0.3 发布工作流验证 |
+| Agent 能力（2.1.0） | **实机闭环通过**：真实 Provider 与一台真实 Linux 服务器上，从创建目标任务到计划 `completed`、任务 `completed`；5 步计划（证据、行动、决策、行动、验证）全部成功，5 次 `server.exec` 审批全部经人工批准后真实执行，免审批固定读在审计中标记 `not_required`。仅覆盖单目标，多目标并行与长时压力未测 |
+| Agent 能力（2.0.3 及以前） | **部分通过**：真实只读工具循环、持久计划结算和重启恢复、审批过期、host denylist 与桌面 autoconfig 联合工作、原生 UI 七项清单均已由 Computer Use/本地回归覆盖。真实多目标并行/长时压力与当前源码安装版 GUI 尚未验收 |
+| UI 自动回归 | `pnpm check`：桌面 661 项通过；类型检查与生产构建通过 |
+| Windows 任务栏图标 | Windows C++ 宿主编译嵌入 Yukinal ICO，主窗口和独立工作页窗口均设置图标；正式 installer smoke 由 v2.1.0 发布工作流验证 |
 | 浏览器交互 | 模拟数据下检查 1381×1244、1024×768、390×844；连续切换四工具、跨服务器终端恢复、目录/筛选/草稿保留、参考面板恢复、弹层边界、Escape/外部关闭及焦点恢复；控制台无错误 |
 | 模拟用量 | 仅开发 fixture 的 `diagnostics=tokens` 或 `diagnostics=1`，不代表真实 Provider 消耗 |
 | 发行整理复核 | 更新依赖后，workspace 类型检查、共享库构建、桌面生产构建、文档链接、发布卫生与秘密扫描通过；`pnpm audit` 未发现已知漏洞 |
-| 三平台本版安装包 | 以 `v2.0.3` 对应成功 workflow 的完整门禁、冻结 Agent、安装包构建和安装/卸载 smoke 为准 |
+| 三平台本版安装包 | 以 `v2.1.0` 对应成功 workflow 的完整门禁、冻结 Agent、安装包构建和安装/卸载 smoke 为准 |
 | 签名/公证 | 安装包未签名，macOS 应用未公证 |
 | 其他环境组合 | 本次确认针对 Agent 能力；未新增逐端点、三平台 GUI 拖放或升级组合的公开验收记录 |
 
-真实 Provider/SSH 证据限定为文首记录的只读调用、一个已结算且桌面重开后仍成功的计划步骤、一次未批准审批过期、denylist 拒绝与任务/计划恢复；没有把这些证据扩展为真实多目标长时压力、安装包 GUI 或所有端点组合通过。
+2.1.0 的真实 Provider/SSH 证据是一次完整的单目标任务闭环；2.0.3 及以前的证据限定为文首记录的只读调用、一个已结算且桌面重开后仍成功的计划步骤、一次未批准审批过期、denylist 拒绝与任务/计划恢复；没有把这些证据扩展为真实多目标长时压力、安装包 GUI 或所有端点组合通过。
 
 ## 版本与载荷
 

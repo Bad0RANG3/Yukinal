@@ -40,6 +40,12 @@ test("attention uses a strict semantic allowlist and never converts the visible 
   assert.match(reference, /srv_a/);
   assert.match(reference, /srv_b/);
   assert.doesNotMatch(attentionReference({ section: "password=secret", serverId: "credential\nsecret", action: "textarea:draft=secret" }), /secret/);
+  // The standalone board and activity pages were folded into the workbench, so their
+  // navigation labels can no longer be forwarded as context.
+  for (const retired of ["board", "activity"]) {
+    assert.match(attentionReference({ section: retired, serverId: null }), /"section":"agents"/);
+    assert.doesNotMatch(attentionReference({ section: "agents", serverId: null, action: `nav:${retired}` }), new RegExp(retired));
+  }
 });
 test("watch suggestions do not turn stop or pause requests into a new loop", () => {
   assert.equal(isWatchRequest("每5分钟帮我盯着服务"), true);

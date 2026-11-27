@@ -811,7 +811,7 @@
   /* 只有真正的 `<details>` 能用 ::details-content。
      `.activity-trace-detail` 是一个条件渲染的 div，不是 details —— 它靠
      presence + expand-enter / expand-exit 走另一条路，不要写在这里。 */
-  :is(.tool-card, .agent-reasoning, .approval-input, .agent-settings-advanced)::details-content {
+  :is(.tool-card, .agent-reasoning, .approval-input)::details-content {
     block-size: 0;
     overflow: hidden;
     transition:
@@ -819,7 +819,7 @@
       content-visibility var(--motion-medium) allow-discrete;
   }
 
-  :is(.tool-card, .agent-reasoning, .approval-input, .agent-settings-advanced)[open]::details-content {
+  :is(.tool-card, .agent-reasoning, .approval-input)[open]::details-content {
     block-size: auto;
   }
 }

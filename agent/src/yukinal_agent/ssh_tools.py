@@ -26,6 +26,7 @@ from .host_tools import (
     _execute_on_host,
 )
 from .filesystem_action_ledger import FilesystemActionLedger, FilesystemActionLedgerError
+from .read_commands import validate_exists_path
 from .ssh_service_process import SshServiceProcess, SshServiceProcessError
 from .system_snapshot import normalize_system_snapshot
 from .tools import (
@@ -346,6 +347,65 @@ def register_desktop_ssh_tools(
             "disk_usage",
         ),
         (
+            "system.swap",
+            "Read total, free and cached swap from /proc/meminfo on the selected server.",
+            {
+                "type": "object",
+                "properties": {"timeout_seconds": {"type": "integer", "minimum": 1, "maximum": 30}},
+                "additionalProperties": False,
+            },
+            "read_probe",
+        ),
+        (
+            "filesystem.inodes",
+            "Read inode usage for every real filesystem on the selected server.",
+            {
+                "type": "object",
+                "properties": {"timeout_seconds": {"type": "integer", "minimum": 1, "maximum": 30}},
+                "additionalProperties": False,
+            },
+            "read_probe",
+        ),
+        (
+            "filesystem.mounts",
+            "Read the mounted real filesystem table, with filesystem types, on the selected server.",
+            {
+                "type": "object",
+                "properties": {"timeout_seconds": {"type": "integer", "minimum": 1, "maximum": 30}},
+                "additionalProperties": False,
+            },
+            "read_probe",
+        ),
+        (
+            "system.time",
+            "Read the selected server's clock and timezone in ISO-8601 form.",
+            {
+                "type": "object",
+                "properties": {"timeout_seconds": {"type": "integer", "minimum": 1, "maximum": 30}},
+                "additionalProperties": False,
+            },
+            "read_probe",
+        ),
+        (
+            "filesystem.exists",
+            "Check whether one allow-listed absolute path exists on the selected server.",
+            {
+                "type": "object",
+                "properties": {
+                    "timeout_seconds": {"type": "integer", "minimum": 1, "maximum": 30},
+                    "path": {
+                        "type": "string",
+                        "minLength": 1,
+                        "maxLength": 512,
+                        "pattern": "^/[^\\u0000-\\u001f\\\\]*$",
+                    },
+                },
+                "required": ["path"],
+                "additionalProperties": False,
+            },
+            "read_probe",
+        ),
+        (
             "server.logs",
             "Read a bounded tail from the selected server's journal or system log.",
             {
@@ -615,6 +675,34 @@ def register_desktop_ssh_tools(
                     arguments["service"],
                     arguments.get("timeout_seconds", 10),
                 )
+            elif operation == "read_probe":
+                # The tool name *is* the catalog probe id, so the model cannot
+                # name a probe that is not registered and cannot supply a command.
+                probe_path = arguments.get("path")
+                if isinstance(probe_path, str):
+                    # Same validator the schema mirrors: refuse traversal and
+                    # shell metacharacters before the request leaves the Agent.
+                    probe_path = validate_exists_path(probe_path)
+                result = await asyncio.to_thread(
+                    client.read_probe,
+                    target_id,
+                    tool_name,
+                    probe_path,
+                    arguments.get("timeout_seconds", 10),
+                )
+                if result.exit_code != 0:
+                    raise ToolCallError(
+                        "execution_failed",
+                        f"the fixed read probe `{tool_name}` failed on the target",
+                    )
+                payload: dict[str, object] = {
+                    "tool": tool_name,
+                    "stdout": result.stdout,
+                    "duration_ms": result.duration_ms,
+                }
+                if "path" in arguments:
+                    payload["path"] = arguments["path"]
+                return payload
             elif operation == "disk_usage":
                 result = await asyncio.to_thread(
                     client.disk_usage, target_id, arguments.get("timeout_seconds", 10)

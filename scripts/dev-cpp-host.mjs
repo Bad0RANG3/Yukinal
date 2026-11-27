@@ -209,6 +209,15 @@ async function main() {
     if (serviceBinary) {
       hostEnvironment.YUKINAL_SSH_SERVICE_BINARY = serviceBinary;
       hostEnvironment.YUKINAL_SSH_SERVICE_AUTOCONFIG = "1";
+      // The managed SSH worker owns every remote call in this session. An inherited
+      // token would register the standalone HTTP client first, so `ssh.*` calls
+      // would silently go to a service this command did not start.
+      for (const inherited of ["YUKINAL_SSH_API_TOKEN", "YUKINAL_SSH_API_URL", "YUKINAL_SSH_SERVICE_CONFIG"]) {
+        if (hostEnvironment[inherited]) {
+          console.log(`Ignoring inherited ${inherited}: pnpm dev manages the SSH worker itself.`);
+          delete hostEnvironment[inherited];
+        }
+      }
       const runtimeDirectories = [dirname(serviceBinary)];
       if (opensslRoot) runtimeDirectories.push(join(resolve(opensslRoot), "bin"));
       hostEnvironment.PATH = [...runtimeDirectories, hostEnvironment.PATH ?? ""].join(delimiter);

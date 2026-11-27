@@ -32,6 +32,14 @@ nlohmann::json forwarded_environment_for_test();
 
 }  // namespace yukinal::desktop_host::sidecar_launch_detail
 
+namespace yukinal::desktop_host::ssh_failure_detail {
+
+// Linked from `ipc_router.cpp` so the failure-code mapping is tested through the
+// same helper the router uses, not through a copy of the table.
+nlohmann::json reply_for_test(const std::string& error_code, const std::string& error_message);
+
+}  // namespace yukinal::desktop_host::ssh_failure_detail
+
 namespace {
 
 void check(bool condition, const char* message) {
@@ -271,6 +279,46 @@ void check_sidecar_environment_forwarding() {
   const auto absent = forwarded_environment_for_test();
   check(!absent.contains("YUKINAL_KNOWLEDGE_DB"),
         "an empty knowledge database path must not be forwarded as an explicit capability");
+}
+
+// The UI can only tell a rejected password from a missing credential, a timeout
+// or an unverified host key if the host keeps the SSH core's `error_code`. The
+// old code folded every one of them into `SSH_ERROR`, so this checks the mapping
+// the router actually applies — including that an unknown code stays generic
+// instead of pretending to be a cause we have advice for.
+void check_ssh_failure_codes() {
+  using yukinal::desktop_host::ssh_failure_detail::reply_for_test;
+
+  struct Case {
+    const char* error_code;
+    const char* expected;
+  };
+  for (const auto& item : {Case{"authentication_failed", "SSH_AUTHENTICATION_FAILED"},
+                           Case{"credential_unavailable", "SSH_CREDENTIAL_UNAVAILABLE"},
+                           Case{"host_key_unverified", "SSH_HOST_KEY_UNVERIFIED"},
+                           Case{"timeout", "SSH_TIMEOUT"},
+                           Case{"connection_failed", "SSH_CONNECTION_FAILED"},
+                           Case{"denied_by_policy", "SSH_DENIED_BY_POLICY"},
+                           Case{"resolver_unavailable", "SSH_RESOLVER_UNAVAILABLE"},
+                           Case{"resolver_busy", "SSH_RESOLVER_BUSY"},
+                           Case{"proxy_tls_failed", "SSH_PROXY_TLS_FAILED"},
+                           Case{"proxy_connect_failed", "SSH_PROXY_CONNECT_FAILED"},
+                           Case{"proxy_auth_required", "SSH_PROXY_AUTH_REQUIRED"},
+                           Case{"something_new", "SSH_ERROR"}}) {
+    const auto reply = reply_for_test(item.error_code, "");
+    check(reply.at("code") == item.expected,
+          "every SSH failure code must reach the UI as its own code");
+  }
+
+  const auto detailed = reply_for_test("authentication_failed", "SSH authentication failed");
+  check(detailed.at("code") == "SSH_AUTHENTICATION_FAILED",
+        "the cause must survive when the core also wrote a message");
+  check(detailed.at("message") == "SSH authentication failed",
+        "the core's message must stay the text the user reads");
+
+  const auto code_only = reply_for_test("credential_unavailable", "");
+  check(code_only.at("message") == "credential_unavailable",
+        "a failure without a message must still say something the user can act on");
 }
 
 }  // namespace
@@ -605,6 +653,7 @@ int main() {
   // unreadable configured policy look like an empty one.
   check_server_exec_denylist_loader();
   check_sidecar_environment_forwarding();
+  check_ssh_failure_codes();
 
   return 0;
 }

@@ -49,6 +49,25 @@ YUKINAL_TEST(snapshot_toolkit_accepts_legacy_and_keeps_optional_network_gpu_secu
   YUKINAL_REQUIRE(parsed.at("network_addresses").at("stdout") == "value");
 }
 
+YUKINAL_TEST(snapshot_toolkit_read_probe_prefixes_cover_their_own_directory) {
+  const nlohmann::json* entry = nullptr;
+  for (const auto& probe : snapshot_toolkit_catalog().at("readProbes")) {
+    if (probe.at("id").get<std::string>() == "filesystem.exists") entry = &probe;
+  }
+  YUKINAL_REQUIRE(entry != nullptr);
+  // A prefix ends in '/', so both the directory and anything below it are inside
+  // the allowlist. The Agent validator has always accepted `/var/log`; refusing it
+  // here turned an approved read into an error the model could not act on.
+  YUKINAL_REQUIRE(read_probe_path_allowed(*entry, "/var/log"));
+  YUKINAL_REQUIRE(read_probe_path_allowed(*entry, "/var/log/journal"));
+  YUKINAL_REQUIRE(read_probe_path_allowed(*entry, "/tmp"));
+  YUKINAL_REQUIRE(!read_probe_path_allowed(*entry, "/var"));
+  YUKINAL_REQUIRE(!read_probe_path_allowed(*entry, "/var/logs"));
+  YUKINAL_REQUIRE(!read_probe_path_allowed(*entry, "/etc-shadow"));
+  YUKINAL_REQUIRE(!read_probe_path_allowed(*entry, ""));
+  YUKINAL_REQUIRE(!read_probe_path_allowed(nlohmann::json::object(), "/var/log"));
+}
+
 YUKINAL_TEST(snapshot_toolkit_rejects_partial_duplicate_and_invalid_status_extensions) {
   for (const auto& tail : {frame("gpu_nvidia", "0oops"), frame("gpu_nvidia", "256"),
                            frame("gpu_nvidia") + frame("gpu_nvidia"),

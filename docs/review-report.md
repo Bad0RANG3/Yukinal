@@ -1,7 +1,7 @@
-﻿# Yukinal 三轮审查总报告（2026-10-18）
+# Yukinal 三轮审查总报告（2026-10-18）
 
-本报告是 **R1 广度 → R2 深度 → R3 对抗式证伪** 三轮审查的汇总与交叉验证结论。原始证据保留在
-[`docs/review/`](./review/README.md)（10 份报告、约 730 KB、全部未跟踪）。配套的修复说明见
+本报告是 **R1 广度 → R2 深度 → R3 对抗式证伪** 三轮审查的汇总与交叉验证结论。原始证据是 10 份
+过程报告（约 730 KB），属审查过程产物、未纳入仓库；本文件与修复说明保留了可复用的结论。配套的修复说明见
 [`docs/review-fixes.md`](./review-fixes.md)。
 
 ## 目录
@@ -82,9 +82,9 @@ shared **142** / 桌面 **325**（324 pass + 1 skip）。**18 项修复全部完
 
 | 报告 | 范围 | 计数 |
 | --- | --- | --- |
-| [`r1-native.md`](./review/r1-native.md) | `native/src`、`native/include/yukinal`、`native/tests`、CMake 与第三方依赖语义 | Critical 0 / High 2 / Medium 3 / Low 4 |
-| [`r1-desktop.md`](./review/r1-desktop.md) | `native/desktop_host`、`apps/desktop`、`packages/shared`+`agent-sdk`+`provider-sdk` | **Critical 2** / High 4 / Medium 5 / Low 3 |
-| [`r1-python.md`](./review/r1-python.md) | `agent`、`services/control-plane`、`scripts`、CI 与配置 | Critical 0 / High 3 / Medium 5 / Low 5 |
+| `r1-native.md` | `native/src`、`native/include/yukinal`、`native/tests`、CMake 与第三方依赖语义 | Critical 0 / High 2 / Medium 3 / Low 4 |
+| `r1-desktop.md` | `native/desktop_host`、`apps/desktop`、`packages/shared`+`agent-sdk`+`provider-sdk` | **Critical 2** / High 4 / Medium 5 / Low 3 |
+| `r1-python.md` | `agent`、`services/control-plane`、`scripts`、CI 与配置 | Critical 0 / High 3 / Medium 5 / Low 5 |
 
 ### 第二轮（R2）：深度
 
@@ -92,11 +92,11 @@ shared **142** / 桌面 **325**（324 pass + 1 skip）。**18 项修复全部完
 
 | 报告 | 焦点 | 产出 |
 | --- | --- | --- |
-| [`r2-release.md`](./review/r2-release.md) | 构建 → 打包 → 发布链路的完整性边界 | Critical 0 / High 3 / Medium 7 / Low 4 |
-| [`r2-control-plane.md`](./review/r2-control-plane.md) | 多租户隔离、节点 Ed25519 签名与重放、WS、迁移 | 27 条操作员路由 + 5 条节点路由矩阵；7 项威胁判定；F-1..F-10；探针编号到 **P115**（报告正文出现 83 个不同编号，其中空缺者是早期脚本重写留下的） |
-| [`r2-approval.md`](./review/r2-approval.md) | 审批 / 授权状态机（host ledger ↔ sidecar admission） | Critical 0 / High 2 / Medium 3 / Low 2；T1–T12 状态表 + 11 个静默失败点 |
-| [`r2-contract-matrix.md`](./review/r2-contract-matrix.md) | 全部 IPC 命令 × 宿主 / sidecar / UI 三方穷举 | **86 行矩阵（机器生成，非人工列举）**；响应键集差集 |
-| [`r2-agent-lifecycle.md`](./review/r2-agent-lifecycle.md) | Agent 运行生命周期、取消传播、并发、resume、审计 | High 4 / Medium 4，其中 **4 项是用户可见的永久挂起** |
+| `r2-release.md` | 构建 → 打包 → 发布链路的完整性边界 | Critical 0 / High 3 / Medium 7 / Low 4 |
+| `r2-control-plane.md` | 多租户隔离、节点 Ed25519 签名与重放、WS、迁移 | 27 条操作员路由 + 5 条节点路由矩阵；7 项威胁判定；F-1..F-10；探针编号到 **P115**（报告正文出现 83 个不同编号，其中空缺者是早期脚本重写留下的） |
+| `r2-approval.md` | 审批 / 授权状态机（host ledger ↔ sidecar admission） | Critical 0 / High 2 / Medium 3 / Low 2；T1–T12 状态表 + 11 个静默失败点 |
+| `r2-contract-matrix.md` | 全部 IPC 命令 × 宿主 / sidecar / UI 三方穷举 | **86 行矩阵（机器生成，非人工列举）**；响应键集差集 |
+| `r2-agent-lifecycle.md` | Agent 运行生命周期、取消传播、并发、resume、审计 | High 4 / Medium 4，其中 **4 项是用户可见的永久挂起** |
 
 R2 的两条方法学亮点：
 
@@ -120,7 +120,7 @@ R2 的两条方法学亮点：
 | **不成立** | 0 | —— |
 | **无法判定** | 0 | —— |
 
-详见 [`r3-verification.md`](./review/r3-verification.md)。
+详见 `r3-verification.md`。
 
 ---
 
@@ -385,18 +385,19 @@ CTest，但**不要**把「已修」读成「端到端验证过」：
 
 前三轮之后又做了一轮独立审查（四路只读审计 + 三路修复 + 门禁加固），新增 26 项确认缺陷与
 FIX-19 – FIX-44，连同「这一轮改变了哪些判断」「仍然未修 / 明确不做」「变异验证」都记录在
-[`review-round4.md`](./review-round4.md)。本文件（第 1–9 节）保持为前三轮的结论，**不被第四轮
+`review-round4.md`。本文件（第 1–9 节）保持为前三轮的结论，**不被第四轮
 覆盖**；两批修复说明的关系是：
 
 - [`review-fixes.md`](./review-fixes.md)：FIX-1 – FIX-18（第一、二批）
-- [`review-round4.md`](./review-round4.md)：FIX-19 – FIX-44（第三批）
+- `review-round4.md`：FIX-19 – FIX-44（第三批）
 
 ---
 
 ## 11. 可复核性
 
-- **原始报告**：10 份，全部在 [`docs/review/`](./review/README.md)，含 `file:line` 证据、
-  探针脚本源码或逐字命令行、实测转录。全部**未跟踪**（`?? docs/review/`），是过程证据不是仓库文档。
+- **原始报告**：10 份过程报告（约 730 KB），含 `file:line` 证据、
+  探针脚本源码或逐字命令行、实测转录。它们从未纳入仓库跟踪，属审查过程证据而非仓库文档；
+  当前只保留本文件与 [审查修复](./review-fixes.md) 的结论部分。
 - **探针与产物**：控制在 `target/`、`services/control-plane/.tmp/`、`%TEMP%`，均被 `.gitignore` 覆盖；
   审查者未借探针改动任何被审查文件（各报告均有 `git status --porcelain <范围>` 为空的声明）。
   **复审过一处真实违规**：FIX-10 的写者在 `packages/shared/` 下留了 9 个未跟踪的
@@ -410,6 +411,6 @@ FIX-19 – FIX-44，连同「这一轮改变了哪些判断」「仍然未修 / 
   （`review-report.md` 里一处章节符号引用被 `§NN` 规则命中），修正后转绿；这也是把它当成
   收尾步骤而不是一次性动作的理由。
 - **写入面**：`git diff --stat` 现为 **99 个被跟踪文件、+3858 / −489 行**（含 FIX-6/8/10 的
-  大批改动；FIX-7/9/11 合入后还会上升），新增 `docs/review/`、两份汇总结论文档、
+  大批改动；FIX-7/9/11 合入后还会上升），新增两份汇总结论文档、
   `scripts/lib/gate.test.mjs`、`native/src/exit_status.hpp` 与一个 Alembic 迁移。
   `ssh_agent_development_brief.md` 是外部任务输入，**保持未跟踪、不提交**。

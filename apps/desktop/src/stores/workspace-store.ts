@@ -1,19 +1,21 @@
 /**
  * Main navigation skeleton:
  *
- *   Activity | Board | Teams | Settings <- primary nav
+ *   Operations | Settings <- primary nav
  *   Overview | Activity <- server inspector pages
  *   Files | Terminal | Logs | Services <- server-scoped workpages in the center
- *   AI workspace (persistent center) | Activity / selected server (right)
+ *   AI workspace (persistent center) | Operations / selected server (right)
  *
- * Server selection is contextual; it does not need its own navigation entry.
+ * The operations workbench owns the task board, watch plans and the activity
+ * stream as tabs, so they need no separate top-level entry. Server selection is
+ * contextual; it does not need its own navigation entry either.
  */
 
 import { create } from "zustand";
 
 import type { AgentPromptPart } from "@yukinal/shared";
 
-export const PRIMARY_NAV = ["activity", "board", "agents", "tasks", "settings"] as const;
+export const PRIMARY_NAV = ["agents", "settings"] as const;
 export type PrimaryNav = (typeof PRIMARY_NAV)[number] | "servers";
 
 export const SERVER_PAGES = ["overview", "terminal", "files", "logs", "services", "activity"] as const;
@@ -59,7 +61,7 @@ export interface WorkspaceState {
 }
 
 export const useWorkspaceStore = create<WorkspaceState>((set) => ({
-  primary: "activity",
+  primary: "agents",
   serverPage: "overview",
   serverDetailOpen: false,
   selectedServerId: null,
@@ -80,7 +82,9 @@ export const useWorkspaceStore = create<WorkspaceState>((set) => ({
   setAgentBusy: (agentBusy) => set({ agentBusy }),
   setAgentHistoryOpen: (agentHistoryOpen) => set({ agentHistoryOpen }),
   setAgentSessionArchived: (agentSessionArchived) => set({ agentSessionArchived }),
-  setPrimary: (primary) => set(primary === "servers" || primary === "activity" ? { primary: "activity", serverDetailOpen: false } : { primary }),
+  // Leaving the server inspector returns to the durable operations workbench;
+  // it is the only navigation entry that owns a page of its own.
+  setPrimary: (primary) => set(primary === "servers" ? { primary: "agents", serverDetailOpen: false } : { primary }),
   setServerPage: (serverPage) => set({ serverPage, primary: "servers", serverDetailOpen: true }),
   selectServer: (selectedServerId) => set((state) => state.agentBusy && selectedServerId !== state.selectedServerId ? state : ({
     selectedServerId,

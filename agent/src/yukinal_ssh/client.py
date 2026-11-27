@@ -25,6 +25,7 @@ from .toolkit_catalog import (
 _TARGET_ID = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.-]{0,63}$")
 _SERVICE_NAME = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.@:-]{0,127}$")
 _CONTAINER_REF = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.-]{0,127}$")
+_READ_PROBE_ID = re.compile(r"^[a-z][a-z0-9._-]{2,63}$")
 _PACKAGE_REF = re.compile(r"^[A-Za-z0-9][A-Za-z0-9+._:-]{0,127}$")
 _PACKAGE_VERSION = re.compile(r"^[A-Za-z0-9][A-Za-z0-9+._:~^-]{0,127}$")
 _MAX_BODY_BYTES = 2 * 1024 * 1024
@@ -155,6 +156,22 @@ class SshServiceClient:
     def disk_usage(self, target_id: str, timeout_seconds: int = 10) -> SshOperationResult:
         """Read root filesystem capacity using the service's fixed df query."""
         return self._execute_operation(target_id, "disk_usage", {}, timeout_seconds)
+
+    def read_probe(
+        self, target_id: str, probe: str, path: str | None = None, timeout_seconds: int = 10
+    ) -> SshOperationResult:
+        """Run one fixed read probe from the bundled catalog on the target.
+
+        `probe` is a catalog id, never a command: the SSH service resolves the
+        shell text from the same bundled file the Agent reads. `path` is only
+        accepted by the probes the catalog declares as templated.
+        """
+        if not isinstance(probe, str) or not _READ_PROBE_ID.fullmatch(probe):
+            raise ValueError("probe must be a bundled read probe id")
+        parameters: dict[str, Any] = {"probe": probe}
+        if path is not None:
+            parameters["path"] = path
+        return self._execute_operation(target_id, "read_probe", parameters, timeout_seconds)
 
     def connection_check(self, target_id: str, timeout_seconds: int = 10) -> SshOperationResult:
         """Verify SSH authentication for the configured target without running a command."""

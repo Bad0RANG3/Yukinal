@@ -2721,6 +2721,70 @@ ExecResult disk_usage(const TargetConfig& target, int timeout_seconds) {
   return run_ssh_command(target, "df -Pk /", timeout_seconds);
 }
 
+namespace {
+
+//: Resolve one fixed read probe from the compiled catalog. The returned entry
+//: owns the remote shell text; a request can only name an id.
+const nlohmann::json* find_read_probe(const std::string& probe) {
+  const auto& catalog = snapshot_toolkit_catalog();
+  const auto probes = catalog.find("readProbes");
+  if (probes == catalog.end() || !probes->is_array()) return nullptr;
+  for (const auto& entry : *probes) {
+    const auto id = entry.find("id");
+    if (id != entry.end() && id->is_string() && id->get<std::string>() == probe) return &entry;
+  }
+  return nullptr;
+}
+
+}  // namespace
+
+ExecResult read_probe(const TargetConfig& target, const std::string& probe,
+                      const std::string& path, int timeout_seconds) {
+  ExecResult result;
+  if (target.probe_only || timeout_seconds < 1 || timeout_seconds > 30) {
+    fail(&result, "invalid_parameters", "The read-only probe parameters are invalid");
+    return result;
+  }
+  const auto* entry = find_read_probe(probe);
+  if (entry == nullptr) {
+    fail(&result, "invalid_parameters", "The requested read probe is not in the bundled catalog");
+    return result;
+  }
+  const auto command = entry->find("command");
+  if (command == entry->end() || !command->is_string() || command->get<std::string>().empty()) {
+    fail(&result, "internal_error", "The bundled read probe has no command");
+    return result;
+  }
+  std::string shell = command->get<std::string>();
+  const auto placeholder = entry->find("parameter");
+  const bool templated = placeholder != entry->end() && placeholder->is_string();
+  if (templated) {
+    if (path.empty()) {
+      fail(&result, "invalid_parameters", "This read probe requires one path parameter");
+      return result;
+    }
+    // The catalog owns the allowlist; a path outside it never reaches the shell.
+    if (!read_probe_path_allowed(*entry, path)) {
+      fail(&result, "invalid_parameters", "The read probe path is outside its allowed prefixes");
+      return result;
+    }
+    const auto token = "{" + placeholder->get<std::string>() + "}";
+    const auto at = shell.find(token);
+    if (at == std::string::npos) {
+      fail(&result, "internal_error", "The bundled read probe template has no placeholder");
+      return result;
+    }
+    // One quoted literal word: the template keeps no quotes of its own, so
+    // shell_quote is the only quoting step the path ever passes through.
+    shell.replace(at, token.size(), shell_quote(path));
+  } else if (!path.empty()) {
+    fail(&result, "invalid_parameters", "This read probe accepts no path parameter");
+    return result;
+  }
+  // The shell text is the reviewed catalog constant, never request input.
+  return run_ssh_command(target, shell, timeout_seconds);
+}
+
 ExecResult connection_check(const TargetConfig& target, int timeout_seconds) {
   ExecResult result;
   const auto started = Clock::now();
@@ -4262,7 +4326,8 @@ ExecResult run_operation(const TargetConfig& target, const ExecRequest& request)
   static const std::set<std::string> confirmation_operations{
       "service_status", "disk_usage", "connection_check", "system_snapshot", "docker_ps",
       "docker_logs", "docker_inspect", "systemd_inspect", "package_inspect", "service_inventory",
-      "process_inventory", "port_inventory", "server_logs", "host_key_probe", "sftp_list",
+      "process_inventory", "port_inventory", "server_logs", "host_key_probe", "read_probe",
+      "sftp_list",
       "sftp_stat", "sftp_lstat_optional", "sftp_read", "sftp_link_count"};
   if (!execution_allowed() || (target.confirmation_read_only && !confirmation_operations.contains(request.operation))) {
     ExecResult result;
@@ -4287,6 +4352,9 @@ ExecResult run_operation(const TargetConfig& target, const ExecRequest& request)
   }
   if (request.operation == "disk_usage") {
     return disk_usage(target, request.timeout_seconds);
+  }
+  if (request.operation == "read_probe") {
+    return read_probe(target, request.probe, request.path, request.timeout_seconds);
   }
   if (request.operation == "server_exec") {
     return server_exec_operation(target, request);

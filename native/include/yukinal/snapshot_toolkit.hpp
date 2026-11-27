@@ -46,6 +46,28 @@ inline std::string build_system_snapshot_command(const std::string& nonce) {
   return command;
 }
 
+// The catalog owns the read-probe path allowlist, and both the Agent and this
+// service must agree on it. A prefix names a directory, so the directory itself
+// counts as inside it: without that rule `/var/log` was refused while
+// `/var/log/journal` passed, and a request the Agent had already accepted came
+// back as an error the model could not act on.
+inline bool read_probe_path_allowed(const nlohmann::json& entry, const std::string& path) {
+  const auto prefixes = entry.find("allowedPrefixes");
+  if (prefixes == entry.end() || !prefixes->is_array()) return false;
+  for (const auto& prefix : *prefixes) {
+    if (!prefix.is_string()) continue;
+    const std::string allowed = prefix.get<std::string>();
+    if (allowed.empty()) continue;
+    if (path == allowed) return true;
+    if (path.rfind(allowed, 0) == 0) return true;
+    if (allowed.size() > 1 && allowed.back() == '/' &&
+        path == allowed.substr(0, allowed.size() - 1)) {
+      return true;
+    }
+  }
+  return false;
+}
+
 inline nlohmann::json parse_system_snapshot_outputs(const std::string& output,
                                                     const std::string& nonce) {
   // Validate nonce before constructing delimiters, including for test callers.

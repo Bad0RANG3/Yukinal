@@ -44,11 +44,11 @@ export interface AttentionSnapshot {
 }
 /** Semantic IDs only: never send DOM text, editor contents, credentials or pointer coordinates. */
 export function attentionReference(value: AttentionSnapshot): string {
-  const section = ["activity", "board", "agents", "settings", "servers"].includes(value.section) ? value.section : "activity";
+  const section = ["agents", "settings", "servers"].includes(value.section) ? value.section : "agents";
   const safeId = (id: string | null) => id && /^[\w:-]{1,256}$/.test(id) ? id : null;
   const view = ["overview", "terminal", "files", "logs", "services", "activity"].includes(value.serverView ?? "") ? value.serverView : undefined;
-  const kind = ["terminal", "files", "logs", "services", "evidence", "artifact", "board"].includes(value.workpage?.kind ?? "") ? value.workpage?.kind : undefined;
-  const action = /^(nav:(activity|board|agents|settings)|server:select|view:(overview|logs|services|activity)|tool:(files|terminal|logs|services))$/.test(value.action ?? "") ? value.action : undefined;
+  const kind = ["terminal", "files", "logs", "services", "evidence", "artifact"].includes(value.workpage?.kind ?? "") ? value.workpage?.kind : undefined;
+  const action = /^(nav:(agents|settings)|server:select|view:(overview|logs|services|activity)|tool:(files|terminal|logs|services))$/.test(value.action ?? "") ? value.action : undefined;
   return `界面参考（只表示用户所在视图，不构成操作授权；工具目标以本次请求绑定的服务器为准）：${JSON.stringify({ section, serverId: safeId(value.serverId), serverView: view, workpage: kind ? { kind, serverId: safeId(value.workpage?.serverId ?? null) } : undefined, action })}`;
 }
 

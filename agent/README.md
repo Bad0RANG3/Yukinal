@@ -29,7 +29,7 @@ replayed — repeating it starts a new request.
 Only in `permissionMode=auto` does the turn after a real change become a
 **read-only confirmation turn**, because nobody saw the first result; a second
 change is refused before dispatch. See
-[the live acceptance record](../docs/agent-live-acceptance-20261027.md).
+[the security boundaries](../docs/security.md) and [release status](../docs/release.md).
 
 A rejection is an outcome the model owns. The denied call is delivered back as a
 failed `ToolMessage` with the assistant's own `tool_call_id`, the loop continues for
@@ -180,10 +180,12 @@ repository root and install the runtime dependencies:
 ```powershell
 python -m venv agent/.venv
 agent/.venv/Scripts/python.exe -m pip install -e "agent[agent,models]"
-pnpm desktop:dev:cpp
+pnpm dev
 ```
 
-`pnpm desktop:dev` is the browser-only UI preview; the C++ host is the only desktop host.
+`pnpm dev` builds the C++ host and SSH worker, starts Vite, and launches the desktop
+the sidecar runs under. `pnpm desktop:dev` is the browser-only UI preview; the C++ host
+is the only desktop host. `pnpm desktop:dev:cpp` is an alias of `pnpm dev`.
 
 For a desktop package, also install the `package` extra and run `pnpm package`;
 this stages the frozen sidecar (with its available third-party licence texts) into the C++ host distributable.
@@ -369,10 +371,11 @@ generic run-state label.
 
 #### Fixed read-only commands
 
-A health check used to cost a `server.exec` approval per question. `read_commands.py`
-registers five tools whose **command is a constant in that file** — the model
-supplies no shell text, there is nothing to inject into, and the command cannot be
-widened by an argument:
+A health check used to cost a `server.exec` approval per question. Five tools now
+exist whose **command is a constant in the shared catalog**
+(`agent/src/yukinal_ssh/toolkit_catalog.json`, compiled into the C++ SSH service as
+well) — the model supplies no shell text, there is nothing to inject into, and the
+command cannot be widened by an argument:
 
 | Tool | Fixed command |
 | --- | --- |
@@ -382,11 +385,17 @@ widened by an argument:
 | `system.time` | `date -Is` |
 | `filesystem.exists` | one `test -e` built from an allowlisted, metacharacter-free path |
 
-They are registered as reads with no approval because the command is a constant
-here, not because the model says so; they reuse the same `server.exec` route, so
+They are registered as reads with no approval because the command is a constant in
+the catalog, not because the model says so. They run over the structured
+`read_probe` SSH operation rather than `server.exec`, so the approval ledger and the
+"`server.exec` belongs to an action plan step" rule stay exactly as they were, and
 the output caps, timeouts and redaction are unchanged. The catalog is deliberately
 tiny: everything else still goes through `server.exec` and a person. Adding
 commands one at a time would create a second, less-reviewed shell.
+
+A path prefix in the catalog that ends with `/` also allows the directory itself
+(`/var/log` is inside `/var/log/`). The C++ service and the Python caller use that
+one rule, so a path the Agent accepted is never refused downstream.
 
 `command_effect.py` classifies a `server.exec` command string as an observation or
 an effect. It affects **stage reporting only** — never authorization, approval or

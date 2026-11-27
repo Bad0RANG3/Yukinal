@@ -238,7 +238,7 @@ class HostActionToolTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(second_step_result["callId"], result.tool_results[2]["call_id"])
         self.assertEqual(host.plan["status"], "completed")
 
-    async def test_plan_settlement_failure_stops_without_replaying_the_successful_tool(self) -> None:
+    async def test_plan_settlement_failure_keeps_the_result_and_asks_for_a_diagnostic_read(self) -> None:
         host = FakePlanHost()
         registry = ToolRegistry(MemoryAuditSink())
         register_host_tools(registry, host)  # type: ignore[arg-type]
@@ -251,7 +251,7 @@ class HostActionToolTests(unittest.IsolatedAsyncioTestCase):
                     "kind": "evidence",
                     "title": "Inspect server health",
                     "purpose": "Collect a durable read result.",
-                    "allowedTools": ["server.info"],
+                    "allowedTools": ["server.info", "server.logs"],
                     "successCriteria": ["The host returns a structured status snapshot."],
                     "requiresApproval": False,
                 }]},
@@ -261,7 +261,10 @@ class HostActionToolTests(unittest.IsolatedAsyncioTestCase):
             AIMessage(content="", tool_calls=[{
                 "name": "server.info", "args": {}, "id": "info-call-fail", "type": "tool_call",
             }]),
-            AIMessage(content="This response must not be requested."),
+            AIMessage(content="", tool_calls=[{
+                "name": "server.logs", "args": {}, "id": "logs-call-after-fail", "type": "tool_call",
+            }]),
+            AIMessage(content="The server answered, so the task can continue."),
         ])
 
         async def reject_plan_step_result(params: dict[str, Any]) -> dict[str, Any]:
@@ -275,7 +278,7 @@ class HostActionToolTests(unittest.IsolatedAsyncioTestCase):
             tenant_id="local",
             user_id="agent-session-1",
             prompt="Check the selected server.",
-            allowed_tools={"investigation.plan", "server.info"},
+            allowed_tools={"investigation.plan", "server.info", "server.logs"},
             allowed_target_ids={"srv_stage1"},
             host_target={"host": "remote", "serverId": "srv_stage1", "environment": "staging"},
             host_task_id="task-durable-1",
@@ -283,11 +286,101 @@ class HostActionToolTests(unittest.IsolatedAsyncioTestCase):
             trace_id="trace-plan-settlement-failed",
         )
 
-        self.assertEqual(result.status, "failed")
-        self.assertEqual(result.error_code, "plan_step_settlement_failed")
-        self.assertEqual(result.tool_calls, 2)
-        self.assertEqual(
-            [method for method, _params, _timeout in host.calls].count("host.tool.execute"), 1
+        # The read that already succeeded is kept, the run continues, and the model
+        # is asked for a diagnostic read instead of being told the run is over.
+        self.assertEqual(result.status, "succeeded")
+        self.assertIsNone(result.error_code)
+        self.assertEqual(result.tool_calls, 3)
+        executed = [
+            params["toolName"]
+            for method, params, _timeout in host.calls
+            if method == "host.tool.execute"
+        ]
+        self.assertEqual(executed, ["server.info", "server.logs"])
+        self.assertIn("succeeded", [item["status"] for item in result.tool_results])
+
+    async def test_plan_settlement_refusal_repeats_the_reason_instead_of_asking_for_a_read(self) -> None:
+        # A refusal is an answer, not a lost reply. The host names the reason (for
+        # example "an action step cannot finish without a recorded change"), and the
+        # model has to be pointed at the tool that step really needs. Asking for
+        # another diagnostic read would loop: the read succeeds, the settlement is
+        # refused again, and nothing on the target ever changes.
+        host = FakePlanHost()
+        registry = ToolRegistry(MemoryAuditSink())
+        register_host_tools(registry, host)  # type: ignore[arg-type]
+        captured: list[list[Any]] = []
+
+        class CapturingModel(ScriptedModel):
+            async def ainvoke(self, messages: list[Any]) -> AIMessage:
+                captured.append(list(messages))
+                return await super().ainvoke(messages)
+
+        model = CapturingModel([
+            AIMessage(content="", tool_calls=[{
+                "name": "investigation.plan",
+                "args": {"steps": [{
+                    "id": "inspect-server",
+                    "ordinal": 0,
+                    "kind": "evidence",
+                    "title": "Inspect server health",
+                    "purpose": "Collect a durable read result.",
+                    "allowedTools": ["server.info"],
+                    "successCriteria": ["The host returns a structured status snapshot."],
+                    "requiresApproval": False,
+                }]},
+                "id": "plan-call-refused",
+                "type": "tool_call",
+            }]),
+            AIMessage(content="", tool_calls=[{
+                "name": "server.info", "args": {}, "id": "info-call-refused", "type": "tool_call",
+            }]),
+            AIMessage(content="The server answered, so the task can continue."),
+        ])
+        refusal = (
+            "action step completed without a recorded change on the target; run the approved "
+            "action tool in this step before reporting it as done"
+        )
+        seen: list[dict[str, Any]] = []
+
+        async def refuse_plan_step_result(params: dict[str, Any]) -> dict[str, Any]:
+            seen.append(params)
+            return {"recorded": False, "error": {"code": "evidence_missing", "message": refusal}}
+
+        result = await ModelDrivenAgent(
+            registry, model, plan_step_result=refuse_plan_step_result
+        ).run(
+            task_id="agent-task-1",
+            tenant_id="local",
+            user_id="agent-session-1",
+            prompt="Check the selected server.",
+            allowed_tools={"investigation.plan", "server.info"},
+            allowed_target_ids={"srv_stage1"},
+            host_target={"host": "remote", "serverId": "srv_stage1", "environment": "staging"},
+            host_task_id="task-durable-1",
+            run_id="run-plan-settlement-refused",
+            trace_id="trace-plan-settlement-refused",
+        )
+
+        self.assertEqual(result.status, "succeeded")
+        self.assertIsNone(result.error_code)
+        # A refusal cannot be fixed by repeating the identical request, so it is asked
+        # exactly once instead of being retried like a transport hiccup.
+        self.assertEqual(len(seen), 1)
+        guidance = [
+            str(getattr(message, "content", ""))
+            for turn in captured
+            for message in turn
+            if type(message).__name__ == "SystemMessage"
+        ]
+        self.assertTrue(
+            any("The host refused to record that plan step" in text and refusal in text
+                for text in guidance),
+            guidance,
+        )
+        self.assertFalse(
+            any("Read the target with a different allowed read-only tool" in text
+                for text in guidance),
+            guidance,
         )
 
     async def test_plan_rejects_tools_not_registered_by_the_host(self) -> None:

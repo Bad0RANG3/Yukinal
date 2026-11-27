@@ -15,6 +15,8 @@
 #include <stdexcept>
 #include <string>
 #include <thread>
+#include <tuple>
+#include <vector>
 
 #ifdef _WIN32
 #include <windows.h>
@@ -27,7 +29,7 @@ using yukinal::desktop_host::IpcRouter;
 
 std::filesystem::path fixture_wire_path;
 
-void check(bool condition, const char* message) {
+void check(bool condition, const std::string& message) {
   if (!condition) throw std::runtime_error(message);
 }
 
@@ -287,6 +289,40 @@ void run_continuation_prompt_checks(IpcRouter& router, DesktopDatabase& database
   check(prompt != initial.at("prompt").get<std::string>(),
         "a second start must not resend the identical first-turn planning prompt");
   deliver(router, completion(continued, "task_prompt_continuation"));
+
+  // A run that continues a plan from a non-action step still has to know which
+  // step it owns: only the host can say so, and the run that recorded the plan is
+  // already over. The binding here is plan context, not permission — the action
+  // tools stay unavailable because `actionBindingAttached` stays false.
+  {
+    const std::string decision_id = "task_prompt_decision_context";
+    (void)database.create_investigation_task(remote_task(decision_id));
+    auto decision_plan = saved_plan("plan_prompt_decision_context", decision_id);
+    auto& decision_step = decision_plan["steps"][0];
+    decision_step["kind"] = "decision";
+    decision_step["allowedTools"] = json::array({"investigation.brief", "investigation.finding"});
+    decision_step["requiresApproval"] = false;
+    decision_plan["steps"].push_back({{"id", "fixture_execute"}, {"ordinal", 1},
+        {"kind", "action"}, {"title", "Run the approved command"},
+        {"status", "pending"}, {"attempts", 0}, {"maxAttempts", 1},
+        {"requiresApproval", true}, {"allowedTools", json::array({"server.exec"})},
+        {"evidenceIds", json::array()}});
+    database.save_investigation_plan(decision_plan);
+    const auto decision_run = start(router, decision_id);
+    const auto request = last_start(router);
+    const auto state = prompt_state(request);
+    check(request.contains("planBinding") &&
+              request.at("planBinding").at("planId") == "plan_prompt_decision_context" &&
+              request.at("planBinding").at("planStepId") == "fixture_action" &&
+              state.at("currentStep").at("id") == "fixture_action" &&
+              state.at("currentStep").at("kind") == "decision",
+          "a run continuing from a decision step must be told which plan step it owns");
+    check(!state.at("actionBindingAttached").get<bool>(),
+          "plan context must never be reported as an approved action binding");
+    check(state.at("stage") == "continuation" && state.at("currentStepRunnable") == true,
+          "a decision step with attempts left is runnable");
+    deliver(router, completion(decision_run, decision_id));
+  }
 
   for (const auto* variant : {"missing_current", "unknown_current", "completed_plan", "exhausted_step", "blocked_step"}) {
     const std::string id = std::string("task_prompt_") + variant;
@@ -874,6 +910,36 @@ void run_tests(const std::string& python) {
             cancelled.at("lastFailure").at("options").at(0).at("action") == "resume" &&
             database.get_investigation_run(retried)->at("status") == "cancelled",
         "cancelled attempts must stop with an explicit resume choice");
+
+  // The goal reviewer's own verdicts are outcomes a person can act on. Left
+  // unmapped they collapsed into `unknown`, whose only options were inspect and
+  // stop, so a run that correctly said "the plan's premise no longer holds" left
+  // the operator with no way to plan again.
+  for (const auto& [agent_error, expected_code, expected_action] : {
+           std::tuple<std::string, std::string, std::string>{"goal_blocked", "plan_deviation", "replan"},
+           {"goal_no_progress", "budget_exhausted", "replan"},
+           {"goal_review_invalid_evidence", "evidence_missing", "replan"},
+           {"confirmation_turn_required", "plan_deviation", "replan"},
+       }) {
+    const std::string id = "task_goal_review_" + agent_error;
+    (void)database.create_investigation_task(task(id));
+    const auto attempt = start(router, id);
+    auto blocked = event("agent.failed", attempt, id);
+    blocked["error"] = agent_error;
+    deliver(router, blocked);
+    const auto blocked_task = read_task(database, id);
+    const auto failure = blocked_task.at("lastFailure");
+    const auto actions = [&failure] {
+      std::vector<std::string> values;
+      for (const auto& option : failure.at("options")) values.push_back(option.at("action"));
+      return values;
+    }();
+    check(blocked_task.at("status") == "failed" &&
+              failure.at("code") == expected_code &&
+              std::find(actions.begin(), actions.end(), expected_action) != actions.end() &&
+              failure.at("options").at(0).at("action") == expected_action,
+          "a goal reviewer verdict must keep a forward option instead of dead-ending at " + agent_error);
+  }
 
   // An authoritative host stop/completion/failure/expiry cannot be revived by
   // the final model notification. The bound attempt may still be finalized.

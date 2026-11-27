@@ -51,12 +51,12 @@ test("server selection opens its workspace without resetting the current server'
   assert.equal(useWorkspaceStore.getState().serverPage, "overview");
 });
 
-test("opening the task workspace from a selected server keeps that server available as the goal target", () => {
+test("opening the operations workbench from a selected server keeps that server available as the goal target", () => {
   const workspace = useWorkspaceStore.getState();
   workspace.selectServer("srv_goal_target");
-  workspace.setPrimary("tasks");
+  workspace.setPrimary("agents");
 
-  assert.equal(useWorkspaceStore.getState().primary, "tasks");
+  assert.equal(useWorkspaceStore.getState().primary, "agents");
   assert.equal(useWorkspaceStore.getState().selectedServerId, "srv_goal_target");
 });
 
@@ -79,9 +79,9 @@ test("explicit global scope detaches a selected task and suppresses the sole-ser
   assert.equal(useWorkspaceStore.getState().agentScopeMode, "auto");
 });
 
-test("Activity replaces the dashboard and navigation preserves the current target and draft", () => {
-  assert.deepEqual(PRIMARY_NAV, ["activity", "board", "agents", "tasks", "settings"]);
-  assert.equal(useWorkspaceStore.getInitialState().primary, "activity");
+test("the operations workbench replaces the standalone board and activity pages and keeps the target and draft", () => {
+  assert.deepEqual(PRIMARY_NAV, ["agents", "settings"]);
+  assert.equal(useWorkspaceStore.getInitialState().primary, "agents");
   const workspace = useWorkspaceStore.getState();
   workspace.selectServer("srv_role_target");
   workspace.setServerPage("activity");
@@ -337,15 +337,29 @@ test("every terminal start failure clears the pending admission in useAgentRun",
   // therefore pinned at the source level: all three terminal paths (sidecar exit,
   // automatic restart, thrown start) must call the same reset, or a retry would reuse
   // a runId/messageId the new sidecar never admitted.
+  //
+  // The two sidecar-death paths live in the watchdog module; the thrown-start path stays
+  // in the hook. Both files are read so a refactor cannot quietly drop one of them.
   const { readFile } = await import("node:fs/promises");
   const source = await readFile(new URL("../src/features/agent/useAgentRun.ts", import.meta.url), "utf8");
-  const calls = source.match(/resetAdmissionOnFailure\(pendingAdmission\)/g) ?? [];
-  assert.equal(calls.length, 3, "sidecar exit, restart record and start() catch must all clear the admission");
+  const watchdog = await readFile(new URL("../src/features/agent/sidecar-watchdog.ts", import.meta.url), "utf8");
+  const terminal = `${source}\n${watchdog}`;
+  const calls = terminal.match(/resetAdmissionOnFailure\(pendingAdmission\)/g) ?? [];
+  // Two call sites now cover three paths: the watchdog's shared helper serves both
+  // sidecar-death signals, and start()'s catch handles the thrown case.
+  assert.equal(calls.length, 2, "the shared sidecar helper and start()'s catch must both clear the admission");
 
-  const sidecarExit = source.slice(source.indexOf("if (!running || sidecarRunning !== false) return;"));
-  assert.ok(sidecarExit.slice(0, 500).includes("resetAdmissionOnFailure(pendingAdmission)"), "sidecar exit must drop the admission");
-  const restart = source.slice(source.indexOf("if (next === null || next === seenRestart.current) return;"));
-  assert.ok(restart.slice(0, 700).includes("resetAdmissionOnFailure(pendingAdmission)"), "an automatic restart must drop the admission");
+  const sidecarExit = watchdog.slice(watchdog.indexOf("if (!running || sidecarRunning !== false) return;"));
+  assert.ok(sidecarExit.slice(0, 500).includes("markInterrupted(options, SIDECAR_EXIT_NOTICE)"), "sidecar exit must drop the admission");
+  const restart = watchdog.slice(watchdog.indexOf("if (next === null || next === seenRestart.current) return;"));
+  assert.ok(restart.slice(0, 700).includes("markInterrupted(options, SIDECAR_RESTART_NOTICE)"), "an automatic restart must drop the admission");
+  // Both notices must go through the one helper that resets the admission.
+  assert.equal(watchdog.match(/markInterrupted\(options, SIDECAR_(EXIT|RESTART)_NOTICE\)/g)?.length, 2);
+  assert.ok(
+    watchdog.slice(watchdog.indexOf("function markInterrupted"), watchdog.indexOf("export function useSidecarWatchdog")).includes("resetAdmissionOnFailure(pendingAdmission)"),
+    "the shared helper must be the only place that resets, so neither path can skip it",
+  );
+
   const startBody = source.slice(source.indexOf("const start = useCallback"));
   const startCatch = startBody.slice(startBody.indexOf("} catch (error) {"));
   assert.ok(startCatch.slice(0, 500).includes("resetAdmissionOnFailure(pendingAdmission)"), "a thrown start must drop the admission");

@@ -25,11 +25,7 @@ export function WindowFrame({ children }: { children: ReactNode }) {
 
   useEffect(() => {
     if (!native) return;
-    void updateNativeWindowContext({ section, serverName, serverStatus, agentBusy }).catch((error: unknown) => {
-      // Older running hosts fall back to Activity until a host restart adds Board.
-      if (section !== "board") throw error;
-      return updateNativeWindowContext({ section: "activity", serverName: null, serverStatus: null, agentBusy });
-    })
+    void updateNativeWindowContext({ section, serverName, serverStatus, agentBusy })
       .catch((error: unknown) => console.warn("Could not update native window context", error));
   }, [native, section, serverName, serverStatus, agentBusy]);
 

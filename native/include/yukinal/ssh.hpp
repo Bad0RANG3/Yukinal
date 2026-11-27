@@ -55,6 +55,10 @@ struct ExecResult {
 ExecResult service_status(const TargetConfig& target, const std::string& service,
                           int timeout_seconds);
 ExecResult disk_usage(const TargetConfig& target, int timeout_seconds);
+/// Run one fixed read-only probe from the bundled catalog by id. The shell text
+/// comes from `toolkit_catalog.json`; the caller never supplies a command.
+ExecResult read_probe(const TargetConfig& target, const std::string& probe,
+                      const std::string& path, int timeout_seconds);
 ExecResult connection_check(const TargetConfig& target, int timeout_seconds);
 ExecResult system_snapshot(const TargetConfig& target, const std::string& nonce,
                            int timeout_seconds);

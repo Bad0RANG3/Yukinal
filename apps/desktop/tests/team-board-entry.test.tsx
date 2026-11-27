@@ -36,7 +36,6 @@ function renderOffline(content: ReactNode) {
   } });
   const client = new QueryClient({ defaultOptions: { queries: { retry: false, gcTime: Infinity, staleTime: Infinity } } });
   client.setQueryData(["servers"], [server]);
-  client.setQueryData(["team-board-tasks"], []);
   client.setQueryData(["investigationTasks"], { tasks: [] });
   client.setQueryData(["investigationSchedules"], { schedules: [] });
   try {

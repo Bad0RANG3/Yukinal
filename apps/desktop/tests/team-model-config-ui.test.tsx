@@ -36,7 +36,7 @@ const second: AiProviderConfig = { ...deepseek, id: "deepseek-two", label: "Deep
  * on real machines. `localStorage` is therefore seeded with a legacy payload whose
  * text is a sentinel: the page must neither read it nor echo it.
  */
-function render(options: { view?: "agent" | "watch" | "model"; busy?: boolean; model?: string; providers?: AiProviderConfig[] } = {}) {
+function render(options: { view?: "tasks" | "watch" | "activity" | "model"; busy?: boolean; model?: string; providers?: AiProviderConfig[] } = {}) {
   const saved = JSON.stringify({ version: 1, catalogVersion: 2, roles: [
     { id: "blue-guardian", name: "PRIVATE_CUSTOM_NAME_SENTINEL", responsibility: "PRIVATE_SYSTEM_PROMPT_SENTINEL" },
   ] });
@@ -86,10 +86,10 @@ test("a running conversation still renders the model page with the live selectio
   assert.match(html, /当前使用：DeepSeek · deepseek-chat/);
 });
 
-test("the agent page names a single owner and no colour-coded roster", () => {
-  const html = render({ view: "agent" });
-  assert.match(html, /一个 Agent 负责完整运维流程/);
+test("the operations workbench names a single owner and no colour-coded roster", () => {
+  const html = render({ view: "tasks" });
   assert.match(html, /运维 Agent/);
+  assert.match(html, /aria-label="运维 Agent 页面"/);
   assert.doesNotMatch(html, /蓝队|红队|紫队|白队|黄队|橙队|绿队|team-roster|team-color-|PRIVATE_SYSTEM_PROMPT_SENTINEL/);
 });
 

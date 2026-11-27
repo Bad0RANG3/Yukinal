@@ -15,7 +15,7 @@ afterEach(() => {
 const base: InvestigationScheduleActivityEvent = { scheduleId: "schedule_a", runId: "watch_a", taskId: "task_a",
   sessionId: "watch:watch_a", serverId: "srv_a", goal: "检查资源与服务", stage: "thinking", at: "2026-10-20T09:00:00Z" };
 test("watch operations use real scoped cues and never touch foreground composition or navigation", () => {
-  useWorkspaceStore.setState({ primary: "activity", agentDraft: "主对话未发送草稿", agentBusy: true, selectedServerId: "srv_b" });
+  useWorkspaceStore.setState({ primary: "agents", agentDraft: "主对话未发送草稿", agentBusy: true, selectedServerId: "srv_b" });
   const foreground = useWorkspaceStore.getState();
   const runtime = useTeamRuntimeStore.getState();
   runtime.begin({ id: "main_chat", team: "yellow", sessionId: "main", serverId: "srv_b", goal: "独立工作" });

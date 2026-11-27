@@ -25,6 +25,9 @@ struct ExecRequest {
   std::string source_path;
   std::string destination_path;
   std::string command;
+  //: One fixed read-only probe id from `toolkit_catalog.json`'s `readProbes`.
+  //: The remote command text lives in the bundled catalog, never in a request.
+  std::string probe;
   std::string workdir;
   std::map<std::string, std::string> environment;
   std::string nonce;

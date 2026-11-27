@@ -19,7 +19,6 @@ import {
   type AgentPromptPart,
   type ChatMessage,
   type ChatSession,
-  type Environment,
   type RestartRecord,
   type AgentSubagentConfig,
 } from "@yukinal/shared";
@@ -60,7 +59,6 @@ import { attentionReference } from "../agent-nist/team-operations.js";
 import { useTeamRuntimeStore } from "../agent-nist/team-runtime-store.js";
 import { useWorkpagesStore } from "../workpages/workpages-store.js";
 import { recalledDraft, rememberDraft, type SessionDraft } from "./session-drafts.js";
-import { requestPolicyId, type RunPolicyChoice } from "./run-policy.js";
 import { useAgentModels } from "./useAgentModels.js";
 import { reasoningLevels, requestReasoningEffort } from "./reasoning.js";
 import { useAgentPanelShell } from "./useAgentPanelShell.js";
@@ -156,13 +154,6 @@ export function AgentPanel({ onCloseStart, onCloseEnd, workspace = false, worksp
   const scopeRef = useRef(selectedServerId);
   const liveView = useRef({ prompt, attachments, sessionId: sessions.activeSessionId, session: sessions.activeSession, entries: run.entries, running: run.running });
   liveView.current = { prompt, attachments, sessionId: sessions.activeSessionId, session: sessions.activeSession, entries: run.entries, running: run.running };
-  /**
-   * 这次运行按哪套策略判定。**有意不写进偏好设置**：偏好会在重启后自动恢复，而一次
-   * 放宽审批的策略选择（比如在本机目标上选「开发策略」）如果留到下次启动、用户又没
-   * 注意到，就等于悄悄改变了审批边界。运行模式与批准方式是「我愿意长期这么干」的
-   * 设定，策略覆盖是「这一次」，所以它只活在面板的这一次会话里。
-   */
-  const [runPolicy, setRunPolicy] = useState<RunPolicyChoice>(null);
   const conversationScope = (selectedServerId ?? "global") + ":" + (sessions.activeSessionId ?? "new");
   const follow = useFeedFollow(agentOpen, run.entries, conversationScope);
   // 必须稳定：焦点陷阱那个 effect 以它为依赖，每次渲染都换新函数会让键盘监听反复重装。
@@ -227,13 +218,6 @@ export function AgentPanel({ onCloseStart, onCloseEnd, workspace = false, worksp
     setContextError(null);
     setHistoryOpen(false);
   }, [contextEpoch]);
-
-  const policyTarget = useMemo(() => {
-    const mentioned = resolveMentionedServer(prompt, mentionCandidates);
-    const serverId = mentioned?.id ?? selectedServerId;
-    return servers.data?.find((server) => server.id === serverId);
-  }, [prompt, mentionCandidates, selectedServerId, servers.data]);
-  const targetEnvironment: Environment = policyTarget?.metadata.environment ?? "unknown";
 
   const send = async (
     raw: string,
@@ -313,8 +297,6 @@ export function AgentPanel({ onCloseStart, onCloseEnd, workspace = false, worksp
       } satisfies AgentSubagentConfig,
       permissionMode,
       mode: runMode,
-      // 「按环境自动」在这里就是「不带这个字段」，由 requestPolicyId 保证。
-      policyId: requestPolicyId(runPolicy),
       delivery,
     });
     // 没跑起来就把输入还给用户，别让他重新打一遍。
@@ -537,9 +519,6 @@ export function AgentPanel({ onCloseStart, onCloseEnd, workspace = false, worksp
                 onRunModeChange={(mode) => setPreferences({ agentRunMode: mode })}
                 delivery={delivery}
                 onDeliveryChange={(value) => setPreferences({ agentDelivery: value })}
-                runPolicy={runPolicy}
-                onRunPolicyChange={setRunPolicy}
-                targetEnvironment={targetEnvironment}
                 models={models.modelChoices}
                 selectedModelKey={models.selectedModelKey}
                 selectedModelLabel={models.selectedModelLabel}

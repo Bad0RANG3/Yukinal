@@ -55,7 +55,6 @@ beforeEach(() => {
   client = new QueryClient({ defaultOptions: { queries: { retry: false, retryOnMount: false, staleTime: Infinity, gcTime: Infinity } } });
   client.setQueryData(["servers"], servers);
   client.setQueryData(["providers"], []);
-  client.setQueryData(["team-board-tasks"], []);
   client.setQueryData(["investigationTasks"], { tasks: [] });
   client.setQueryData(["investigationSchedules"], { schedules: [] });
   client.setQueryData(["file-transfers", serverId], []);
@@ -429,11 +428,11 @@ test("host-key loading and errors fail closed; only an actual pinned status rend
 });
 
 test("task board preserves lanes but does not call unsynchronized data an empty task list", () => {
-  pending(["team-board-tasks"]); let markup = render(<TeamBoardPane serverId={null} />); assert.match(markup, /读取任务/); assert.match(markup, /team-board-columns/); assert.doesNotMatch(markup, /暂无任务/);
-  failed(["team-board-tasks"]); markup = render(<TeamBoardPane serverId={null} />); assertAlert(markup); assert.match(markup, /任务状态未同步/); assert.doesNotMatch(markup, /暂无任务/);
-  client.setQueryData(["team-board-tasks"], []); markup = render(<TeamBoardPane serverId={null} />); assert.match(markup, /暂无任务/);
+  pending(["investigationTasks"]); let markup = render(<TeamBoardPane serverId={null} />); assert.match(markup, /读取任务/); assert.match(markup, /team-board-columns/); assert.doesNotMatch(markup, /暂无任务/);
+  failed(["investigationTasks"]); markup = render(<TeamBoardPane serverId={null} />); assertAlert(markup); assert.match(markup, /任务状态未同步/); assert.doesNotMatch(markup, /暂无任务/);
+  client.setQueryData(["investigationTasks"], { tasks: [] }); markup = render(<TeamBoardPane serverId={null} />); assert.match(markup, /暂无任务/);
   const detail = IPC_SCHEMAS.investigation_task_get.response.parse(previewResponse(IPC_COMMANDS.investigationTaskGet, { taskId: "task_preview" }));
-  client.setQueryData(["team-board-tasks"], [detail.task]); markup = render(<TeamBoardPane serverId={null} />); assert.match(markup, /查看任务属性：/); assert.ok(markup.includes(detail.task.objective));
+  client.setQueryData(["investigationTasks"], { tasks: [detail.task] }); markup = render(<TeamBoardPane serverId={null} />); assert.match(markup, /查看任务属性：/); assert.ok(markup.includes(detail.task.objective));
 });
 test("goal-task loading and read failures do not replace the state with a successful empty result", () => {
   pending(["investigationTasks"]); let markup = render(<InvestigationsPane />); assert.match(markup, /role="status"/);

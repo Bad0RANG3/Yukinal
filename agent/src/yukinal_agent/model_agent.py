@@ -16,6 +16,7 @@ from langchain_core.messages import AIMessage, AIMessageChunk, HumanMessage, Sys
 from langgraph.checkpoint.memory import InMemorySaver
 from langgraph.graph import END, START, StateGraph
 
+from .checkpoints import run_thread_id, turn_thread_id
 from .host_tools import HOST_APPROVAL_TOOLS
 from .agent_stage import STAGE_SET, derive_report_stage, derive_stage, stage_for_start
 from .command_effect import is_read_only_command
@@ -55,6 +56,12 @@ logger = logging.getLogger(__name__)
 _CHECKPOINT_WRITE_ERRORS = (sqlite3.Error, OSError)
 _CHECKPOINT_WRITE_CODE = "checkpoint_write_failed"
 _OUTCOME_UNKNOWN_CODE = "outcome_unknown"
+
+# How many times one run may ask the model to re-issue a tool call whose arguments
+# were not valid JSON. A provider glitch or a truncated argument stream is a model
+# mistake, not evidence about the target, so the durable run must survive it; the
+# bound keeps a model that cannot produce valid JSON from looping forever.
+_MAX_CALL_REPAIRS = 3
 
 
 # Private model guidance: never add it to user messages, public events or metadata.
@@ -141,6 +148,10 @@ class ApprovalRequest:
     host_input: dict[str, Any] | None = None
     remote_evidence: bool = False
     expires_at_ms: int | None = None
+    #: The plan step the call ran from. The host binds an approved action ticket to
+    #: the step that is current *now*; the binding captured when the run started is
+    #: stale as soon as the model records its first plan or replans.
+    plan_binding: dict[str, Any] | None = None
 
 
 @dataclass(frozen=True)
@@ -206,6 +217,13 @@ class _AgentState(TypedDict, total=False):
     #: How many times the model tried to change the target during that turn. Bounded
     #: so a stubborn model cannot spend the whole budget being refused.
     confirm_refusals: int
+    #: How many times this run asked the model to re-issue a tool call whose
+    #: arguments were not valid JSON. A provider glitch is not a target failure.
+    call_repairs: int
+    #: Set while the loop is waiting for the model to re-issue a call it mangled.
+    #: `_route_model` needs an explicit marker to run another model round with no
+    #: pending calls; without it the graph would treat the empty update as final.
+    call_repair_pending: bool
 
 
 class ModelDrivenAgent:
@@ -442,6 +460,8 @@ class ModelDrivenAgent:
             "stage": "intake",
             "confirm_after_change": False,
             "confirm_refusals": 0,
+            "call_repairs": 0,
+            "call_repair_pending": False,
         }
         resume_key = checkpoint_key if isinstance(checkpoint_key, str) and checkpoint_key else ""
         # A run starts with a clean effect counter: what matters below is whether
@@ -454,11 +474,9 @@ class ModelDrivenAgent:
             # hence a different key, hence a fresh start — the requested rule exactly.
             # `checkpoint_binding` stays the *verifier*: a key that resolves to a thread
             # bound to other scope or authorization is refused.
-            locator = "\x1f".join(("turn", context.tenant_id, context.user_id, resume_key))
-            checkpoint_id = f"agent-{hashlib.sha256(locator.encode('utf-8')).hexdigest()}"
+            checkpoint_id = turn_thread_id(context.tenant_id, context.user_id, resume_key)
         elif run_id:
-            thread_material = "\x1f".join((context.tenant_id, context.user_id, context.task_id, run_id))
-            checkpoint_id = f"agent-{hashlib.sha256(thread_material.encode('utf-8')).hexdigest()}"
+            checkpoint_id = run_thread_id(context.tenant_id, context.user_id, context.task_id, run_id)
         else:
             checkpoint_id = f"agent-{uuid.uuid4().hex}"
         config = self._graph_config(checkpoint_id)
@@ -527,6 +545,10 @@ class ModelDrivenAgent:
         return self._record_model_update(state, update)
 
     def _record_model_update(self, state: _AgentState, update: dict[str, Any], response: AIMessage | None = None) -> dict[str, Any]:
+        if state.get("call_repair_pending") and not update.get("call_repair_pending"):
+            # The repaired round arrived; the marker exists only to route one more
+            # model turn, so it must never outlive the turn that asked for it.
+            update["call_repair_pending"] = False
         if state.get("confirm_after_change") and update.get("status") != "running":
             # The confirmation turn has produced its conclusion; a refused proposal
             # keeps the flag so the loop can ask once more (bounded above).
@@ -635,6 +657,17 @@ class ModelDrivenAgent:
         if review["state"] == "blocked":
             if self._event_sink is not None:
                 self._event_sink({"type": "agent.text", "runId": state.get("run_id", ""), "textDelta": "\n\n任务阻塞：" + _redact_sensitive_text(review["reason"]) + "\n", "at": datetime.now(UTC).isoformat()})
+            if _decision_brief_published(state):
+                # A published decision brief *is* the product's approval surface: the
+                # user picks an option and the host starts the continuation run. Ending
+                # this run as a failure made the task terminal, so the choice the model
+                # had just offered could never be taken — the operator saw a dead task
+                # and `investigation_task_start` refused to resume it.
+                reason = _truncate_utf16(_redact_sensitive_text(str(review["reason"] or "")), 400)
+                answer = "已发布决策摘要，等待你选择方案后继续。"
+                if reason:
+                    answer += "\n\n" + reason
+                return {**update, "status": "succeeded", "error_code": None, "answer": answer}
             return {**update, "status": "failed", "error_code": "goal_blocked"}
         usable = successful_evidence(state["tool_results"])
         progress_count = len({(item.get("tool"), item.get("result_digest", item["call_id"]))
@@ -750,6 +783,7 @@ class ModelDrivenAgent:
         failure = None
         recovery_read_required = bool(state.get("recovery_read_required"))
         recovery_diagnosis_required = bool(state.get("recovery_diagnosis_required"))
+        confirm_after_change = bool(state.get("confirm_after_change"))
         for index, update in zip(indices, updates):
             call_id = state["calls"][index]["call_id"]
             messages.extend(update.get("messages", [])[len(state["messages"]):])
@@ -773,6 +807,9 @@ class ModelDrivenAgent:
             if successful_read:
                 recovery_read_required = False
                 recovery_diagnosis_required = False
+                # A successful read is the confirmation the previous change asked
+                # for, exactly as in the sequential path.
+                confirm_after_change = False
             else:
                 recovery_read_required = bool(update.get("recovery_read_required", recovery_read_required))
                 recovery_diagnosis_required = bool(update.get("recovery_diagnosis_required", recovery_diagnosis_required))
@@ -786,7 +823,8 @@ class ModelDrivenAgent:
                   "tool_call_count": len(counted), "output_bytes": output_bytes,
                   "call_index": indices[-1] + 1, "status": "running", "error_code": None,
                   "recovery_read_required": recovery_read_required,
-                  "recovery_diagnosis_required": recovery_diagnosis_required}
+                  "recovery_diagnosis_required": recovery_diagnosis_required,
+                  "confirm_after_change": confirm_after_change}
         if failure is not None:
             merged.update(status="failed", error_code=failure.get("error_code", "tool_failed"))
         elif pending:
@@ -997,8 +1035,42 @@ class ModelDrivenAgent:
                     "status": "failed", "error_code": "model_response_blocked"}
         calls = getattr(response, "tool_calls", None)
         invalid_calls = getattr(response, "invalid_tool_calls", None)
-        if invalid_calls:
+        if invalid_calls and not calls:
+            # A provider occasionally emits a tool call whose arguments are not valid
+            # JSON. That is a model mistake mid-conversation, not a host or target
+            # failure: the same round can simply be asked again. Ending the durable
+            # run here would throw away every plan step that already succeeded, so the
+            # repair is bounded instead of terminal.
+            repairs = int(state.get("call_repairs", 0)) + 1
+            if repairs <= _MAX_CALL_REPAIRS:
+                return {
+                    "messages": [*state["messages"], response, SystemMessage(content=(
+                        "Your last message carried a tool call whose arguments were not a valid JSON "
+                        "object, so nothing ran. Re-issue that one call with arguments that match the "
+                        "tool schema exactly. If you already have enough evidence, answer without a "
+                        "tool call instead."
+                    ))],
+                    "model_rounds": next_round,
+                    "streamed_bytes": streamed_bytes,
+                    "calls": [],
+                    "call_index": 0,
+                    "answer": "",
+                    "status": "running",
+                    "error_code": None,
+                    "call_repairs": repairs,
+                    "call_repair_pending": True,
+                }
             return {"messages": [*state["messages"], response], "status": "failed", "error_code": "invalid_model_tool_call"}
+        if invalid_calls:
+            # Only the unparseable calls are dropped; the valid ones in the same round
+            # still run, and the model is told which of its proposals never executed.
+            dropped_notice: SystemMessage | None = SystemMessage(content=(
+                "One of the tool calls in your previous message had arguments that were not valid "
+                "JSON, so it was dropped without running. The other calls in that message ran "
+                "normally. Re-issue the dropped call only if you still need it."
+            ))
+        else:
+            dropped_notice = None
         if not isinstance(calls, list):
             calls = []
         if self._budget.max_tool_calls is not None and state["tool_call_count"] + len(calls) > self._budget.max_tool_calls:
@@ -1051,6 +1123,8 @@ class ModelDrivenAgent:
         else:
             confirmation_refusals = 0
             messages_with_notice = list(state["messages"])
+        if dropped_notice is not None:
+            messages_with_notice = [*messages_with_notice, dropped_notice]
         if not calls:
             if state.get("recovery_diagnosis_required"):
                 # Do not let an assistant's premature final response end recovery. Its
@@ -1506,8 +1580,13 @@ class ModelDrivenAgent:
                 if item.get("phase") != "input_validation":
                     break
                 prior_repairs += 1
+            # A rejected call is a wording problem the model can fix in one turn, so
+            # it is handed back for repair no matter how many siblings the response
+            # carried: requiring a single call meant a batch lost the whole run to a
+            # schema complaint about one argument. Siblings keep their place in the
+            # queue; the repair only replaces this call's message.
             if (not schema_validated and error.code == "invalid_arguments" and spec is not None
-                    and len(state["calls"]) == 1 and (prior_repairs < 2 or state.get("goal_loop_enabled"))):
+                    and (prior_repairs < 2 or state.get("goal_loop_enabled"))):
                 failed_item["phase"] = "input_validation"
                 encoded = json.dumps({
                     "state": "not_executed", "errorCode": "invalid_arguments",
@@ -1656,6 +1735,47 @@ class ModelDrivenAgent:
                 "error_code": error.code,
             }
             if pending:
+                binding = _current_plan_binding(state)
+                if spec.name in HOST_APPROVAL_TOOLS and state.get("host_task_id") and binding is None:
+                    # A durable task may only run an effectful host action from a plan
+                    # step: the host refuses `server.exec` without one and cannot even
+                    # mint the approval ticket, so asking the person here would show a
+                    # prompt that no answer can honour. Tell the model what is missing.
+                    failed_item["status"] = "failed"
+                    failed_item["error_code"] = "durable_plan_required"
+                    failed_item["phase"] = "plan_binding_missing"
+                    encoded = json.dumps({
+                        "state": "not_executed",
+                        "errorCode": "durable_plan_required",
+                        "notice": (
+                            "Effectful host actions run only from a recorded plan step, and this task "
+                            "has no current plan step yet, so nothing ran and no approval was asked for. "
+                            "Record a plan first (investigation.plan) whose step names this tool, or "
+                            "continue with a read-only tool if the measurement can be collected that way."
+                        ),
+                        "requiredPlanTool": spec.name,
+                    }, ensure_ascii=False, separators=(",", ":"))
+                    output_size = len(encoded.encode("utf-8"))
+                    if output_size <= remaining:
+                        self._emit_tool_result(
+                            event_base,
+                            started_at=started_at,
+                            status="failed",
+                            output_summary=f"Tool call failed ({error.code})",
+                            error=error.args[0] if error.args else "Tool call failed",
+                            error_code=error.code,
+                        )
+                        return {
+                            "messages": [*state["messages"], _safe_tool_message(
+                                content=encoded, tool_call_id=request["id"],
+                                name=request.get("provider_name", request["name"]))],
+                            "call_index": state["call_index"] + 1,
+                            "tool_results": results,
+                            "counted_call_ids": next_counted_call_ids,
+                            "tool_call_count": next_tool_call_count,
+                            "output_bytes": state["output_bytes"] + output_size,
+                            "status": "running", "error_code": None,
+                        }
                 calls = [dict(item) for item in state["calls"]]
                 calls[state["call_index"]]["event_emitted"] = True
                 calls[state["call_index"]]["started_at"] = started_at
@@ -1675,6 +1795,12 @@ class ModelDrivenAgent:
                 }
                 if spec.name in HOST_APPROVAL_TOOLS:
                     approval["host_input"] = request["arguments"]
+                    # A durable task binds an approved action to the plan step that is
+                    # current when the person answers, so capture that binding here
+                    # rather than reusing the one captured when the run started.
+                    binding = _current_plan_binding(state)
+                    if binding is not None:
+                        approval["plan_binding"] = binding
                 update["calls"] = calls
                 update["approval_requests"] = [
                     *(item for item in state["approval_requests"] if item["fingerprint"] != approval["fingerprint"]), approval]
@@ -1708,6 +1834,7 @@ class ModelDrivenAgent:
 
         settlement_update: dict[str, Any] = {}
         settlement_failed = False
+        settlement_refusal: dict[str, Any] | None = None
         current_plan_id = state.get("plan_id")
         current_plan_step_id = state.get("plan_step_id")
         host_task_id = state.get("host_task_id")
@@ -1718,16 +1845,46 @@ class ModelDrivenAgent:
             and isinstance(current_plan_step_id, str)
             and request["name"] != "investigation.plan"
         ):
+            settlement_params = {
+                "taskId": host_task_id,
+                "planId": current_plan_id,
+                "stepId": current_plan_step_id,
+                "callId": call_id,
+                "status": "success",
+                "retryable": False,
+                "outputSummary": _tool_output_summary(result.value),
+                # The step is settled by whichever call finished it, and for most tools
+                # that call never passes the host's `host.tool.execute` door (the fixed
+                # reads and the SSH operations go straight to the SSH service). Without
+                # this name the execution timeline could only ever show "unknown tool"
+                # for a step that really ran one.
+                "toolName": spec.name if spec is not None else request["name"],
+            }
             try:
-                settlement = await self._plan_step_result({
-                    "taskId": host_task_id,
-                    "planId": current_plan_id,
-                    "stepId": current_plan_step_id,
-                    "callId": call_id,
-                    "status": "success",
-                    "retryable": False,
-                    "outputSummary": _tool_output_summary(result.value),
-                })
+                # The tool already ran, so a settlement failure must not throw the
+                # work away. The host deduplicates by `callId`, which makes one
+                # immediate retry free when the first attempt lost its reply or came
+                # back without a record. Only a second, equally failed attempt is
+                # treated as a real disagreement about the plan.
+                settlement: Any = None
+                for attempt in range(2):
+                    try:
+                        settlement = await self._plan_step_result(settlement_params)
+                    except asyncio.CancelledError:
+                        raise
+                    except Exception:
+                        settlement = None
+                    if isinstance(settlement, dict) and settlement.get("recorded") is True:
+                        break
+                    if isinstance(settlement, dict) and isinstance(settlement.get("error"), dict):
+                        # The host understood the settlement and refused it on purpose,
+                        # for example because an action step tried to finish without a
+                        # recorded change on the target. Repeating the identical request
+                        # cannot change that answer, so keep the reason for the model.
+                        settlement_refusal = settlement["error"]
+                        break
+                    if attempt == 0:
+                        continue
                 if not isinstance(settlement, dict) or settlement.get("recorded") is not True:
                     raise ValueError("the host did not record the plan step result")
                 updated_plan = settlement.get("plan")
@@ -1821,10 +1978,42 @@ class ModelDrivenAgent:
         }
         update.update(settlement_update)
         if settlement_failed:
+            # The tool ran. The host only failed to record the plan step, which is
+            # bookkeeping — not an outcome of the work. Killing the run here threw a
+            # completed read away, left the task terminal, and handed the operator a
+            # failure with no way forward. Keep the successful result, keep the plan
+            # binding untouched, and ask the model for one diagnostic read so a
+            # person still sees what the target looks like before anything else runs.
+            # The same call id keeps a later settlement retry idempotent at the host.
+            #
+            # A deliberate refusal is different from a lost reply: the host named a
+            # reason, so repeat it and point at the tool the step actually needed
+            # instead of asking for another read that cannot satisfy the step.
+            refusal_message = ""
+            if isinstance(settlement_refusal, dict):
+                refusal_message = str(settlement_refusal.get("message") or "").strip()
+            diagnosis = (
+                "The host refused to record that plan step: " + refusal_message +
+                " The tool result above is still valid. Run the tool this step is meant to "
+                "execute — the approved action tool for an action step, or the verification "
+                "read for a verification step — and report that result, then settle again."
+            ) if refusal_message else (
+                "The host did not record that plan step, but the tool itself already "
+                "ran and its result is above. Do not repeat that call. Read the target "
+                "with a different allowed read-only tool to confirm what it actually "
+                "shows, then continue the task from that evidence."
+            )
             update.update({
                 "calls": [],
-                "status": "failed",
-                "error_code": "plan_step_settlement_failed",
+                "call_index": 0,
+                "status": "running",
+                "error_code": None,
+                "recovery_read_required": not refusal_message,
+                "recovery_diagnosis_required": not refusal_message,
+                "messages": [
+                    *update["messages"],
+                    SystemMessage(content=diagnosis),
+                ],
             })
         if (self._auto_approval
                 and _effective_risk(spec, state.get("calls", ()), call_id) != "read"
@@ -1836,6 +2025,15 @@ class ModelDrivenAgent:
             update["recovery_read_required"] = False
         if state.get("recovery_diagnosis_required") and spec is not None and spec.risk_level == "read":
             update["recovery_diagnosis_required"] = False
+        if state.get("confirm_after_change") and spec is not None and spec.risk_level == "read":
+            # The confirmation turn exists so a person sees what the change actually
+            # did before anything else is modified. A successful read *is* that
+            # confirmation: keeping the flag up turned every later verification read
+            # in a durable task into a refused proposal, and three refusals killed a
+            # run that had done nothing wrong. The next change still needs its own
+            # approval, so clearing here drops no protection.
+            update["confirm_after_change"] = False
+            update["confirm_refusals"] = 0
         if request["name"] == "investigation.plan" and isinstance(result.value, dict):
             plan_id = result.value.get("planId")
             plan_step_id = result.value.get("currentStepId")
@@ -1901,6 +2099,8 @@ class ModelDrivenAgent:
         if state.get("status") == "running" and state.get("recovery_diagnosis_required") and not state.get("calls"):
             return "continue"
         if state.get("status") == "running" and state.get("confirm_after_change") and not state.get("calls"):
+            return "continue"
+        if state.get("status") == "running" and state.get("call_repair_pending") and not state.get("calls"):
             return "continue"
         if state.get("status") != "running" or not state.get("calls"):
             return "finish"
@@ -2325,6 +2525,47 @@ def _approval_wait_ms(started_at: str, execution_ms: int) -> int:
     return max(0, _duration_ms_since(started_at) - max(0, execution_ms))
 
 
+def _current_plan_binding(state: _AgentState) -> dict[str, Any] | None:
+    """The plan step that is current *now*, in the shape the host binds tickets to.
+
+    The binding captured when the run started goes stale the moment the model
+    records its first plan or replans, so an action approval must describe the live
+    step instead. Without it the host refuses to mint the one-shot ticket at all.
+    """
+    task_id = state.get("host_task_id")
+    plan_id = state.get("plan_id")
+    step_id = state.get("plan_step_id")
+    if not (isinstance(task_id, str) and task_id):
+        return None
+    if not (isinstance(plan_id, str) and plan_id):
+        return None
+    if not (isinstance(step_id, str) and step_id):
+        return None
+    evidence = [item for item in state.get("evidence_ids", ()) if isinstance(item, str)]
+    return {"taskId": task_id, "planId": plan_id, "planStepId": step_id, "evidenceIds": evidence}
+
+
+def _decision_brief_published(state: _AgentState) -> bool:
+    """True once this run recorded a decision brief the user has to answer.
+
+    A brief is the product's approval surface for a plan: the operator selects an
+    option and the host starts the continuation. When the completion reviewer then
+    reports the goal as blocked *because* that choice is still pending, the run must
+    finish as a normal pause instead of a failure — a failed run makes the task
+    terminal, and a terminal task can no longer be resumed from the brief.
+    """
+    for item in state.get("tool_results", ()):
+        if item.get("status") != "succeeded":
+            continue
+        if str(item.get("tool", "")).replace("__", ".") != "investigation.brief":
+            continue
+        value = item.get("result")
+        brief = value.get("brief") if isinstance(value, dict) else None
+        if isinstance(brief, dict) and isinstance(brief.get("id"), str) and brief["id"]:
+            return True
+    return False
+
+
 def _approval_from_state(item: dict[str, Any]) -> ApprovalRequest:
     return ApprovalRequest(
         fingerprint=item["fingerprint"],
@@ -2335,6 +2576,7 @@ def _approval_from_state(item: dict[str, Any]) -> ApprovalRequest:
         host_input=item.get("host_input"),
         remote_evidence=bool(item.get("remote_evidence", False)),
         expires_at_ms=item.get("expires_at_ms"),
+        plan_binding=item.get("plan_binding"),
     )
 
 

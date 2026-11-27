@@ -86,6 +86,12 @@ export type AgentContextSource = AgentMemorySource | AgentKnowledgeSource;
 export interface AgentMemory extends AgentMemorySource {
   content: string;
   createdAt: string;
+  /** Retrieval deadline; absent means the memory never expires. */
+  expiresAt?: string;
+  /** The memory this row replaced, so a correction keeps its history. */
+  supersedes?: string;
+  /** `user` wrote it directly; `model` means the operator approved a proposal. */
+  origin?: "user" | "model";
 }
 
 export interface AgentMemoryListInput {
@@ -101,6 +107,10 @@ export interface AgentMemorySaveInput {
   serverId?: string;
   title: string;
   content: string;
+  /** A time zone is mandatory: a naive instant would silently never expire. */
+  expiresAt?: string;
+  supersedes?: string;
+  origin?: "user" | "model";
 }
 
 export interface AgentMemoryDeleteInput {

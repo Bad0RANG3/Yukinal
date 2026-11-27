@@ -9,7 +9,7 @@ from typing import Any
 from jsonschema import Draft202012Validator, ValidationError
 
 from .host_rpc import HostRpcClient
-from .read_commands import READ_COMMANDS, exists_command, validate_exists_path
+from .investigation_tools import RECORD_TOOLS, record_handler, validate_record_output
 from .tools import ExecutionContext, ToolCallError, ToolRegistry, ToolSpec, approval_fingerprint
 
 _BASE_SCHEMA = {"type": "object", "additionalProperties": False, "properties": {}}
@@ -791,74 +791,28 @@ def register_host_tools(
         for name, description, schema, host_method, result_key, output_validator in evidence_tools
         if name not in excluded_names
     ])
-
-    # Fixed read-only commands. Each is a constant in `read_commands`; the model
-    # supplies no shell text, which is why these are reads with no approval while
-    # `server.exec` stays destructive and approved. See that module for why the
-    # catalog is deliberately tiny: everything else still goes through a person.
     registry.register_many([
         ToolSpec(
-            name=spec.tool,
-            description=spec.summary,
-            input_schema=spec.input_schema,
+            name=name,
+            description=description,
+            input_schema=schema,
+            # Recording a finding, brief or artifact writes only the local
+            # investigation store the user is already looking at; it never
+            # touches the target. That is why it is a read-level tool: it needs
+            # no approval, and it stays available in plan and readonly modes,
+            # where the model still has to explain itself.
             risk_level="read",
             requires_approval=False,
-            handler=_fixed_read_handler(host, spec.tool, spec.command),
-            parallel_safe=True,
+            handler=_record_tool_handler(host, name, output_validator, result_key),
             target_id_argument=None,
-            target_required=True,
+            target_required=False,
             origin={"kind": "builtin"},
             timeout_ms=15_000,
             cancellable=True,
         )
-        for spec in READ_COMMANDS
-        if spec.tool not in excluded_names
+        for name, description, schema, output_validator, result_key in RECORD_TOOLS
+        if name not in excluded_names
     ])
-
-
-def _fixed_read_handler(host: HostRpcClient, tool_name: str, command: str):
-    """Run one constant read through the same bounded `server.exec` route.
-
-    Reusing `server.exec` means the existing output caps, timeouts and
-    redaction apply unchanged; what changes is that no approval is requested and
-    the command cannot be influenced by the caller.
-    """
-
-    async def execute(arguments: dict[str, Any], context: ExecutionContext) -> dict[str, Any]:
-        resolved = command
-        if tool_name == "filesystem.exists":
-            try:
-                path = validate_exists_path(arguments.get("path"))
-            except ValueError as error:
-                raise ToolCallError("invalid_arguments", str(error)) from None
-            resolved = exists_command(path)
-        output = await _execute_on_host(
-            host,
-            "server.exec",
-            {
-                "command": "set -e\n" + resolved,
-                "purpose": f"Read-only health probe: {tool_name}",
-                "timeoutMs": 10_000,
-                "maxOutputBytes": 32_768,
-            },
-            context,
-            timeout_seconds=20.0,
-        )
-        if not isinstance(output, dict) or output.get("state") != "completed":
-            raise ToolCallError("execution_failed", "The fixed read did not complete")
-        if output.get("exitCode") != 0:
-            raise ToolCallError(
-                "execution_failed",
-                "The fixed read exited non-zero; the target does not support this probe",
-            )
-        return {
-            "tool": tool_name,
-            "command": resolved,
-            "stdout": output.get("stdout", ""),
-            "truncated": bool(output.get("stdoutTruncated")),
-        }
-
-    return execute
 
 
 def register_mcp_catalog(registry: ToolRegistry, host: HostRpcClient, catalog: object) -> list[str]:
@@ -1123,6 +1077,22 @@ def _evidence_tool_handler(
             output_validator.validate(result)
         except ValidationError:
             raise ToolCallError("invalid_host_response", "The desktop host returned invalid or unbounded evidence metadata") from None
+        return result
+
+    return execute
+
+
+def _record_tool_handler(
+    host: HostRpcClient,
+    tool_name: str,
+    output_validator: Draft202012Validator,
+    result_key: str,
+):
+    record = record_handler(host, tool_name)
+
+    async def execute(arguments: dict[str, Any], context: ExecutionContext) -> dict[str, Any]:
+        result = await record(arguments, context)
+        validate_record_output(result_key, output_validator, result)
         return result
 
     return execute

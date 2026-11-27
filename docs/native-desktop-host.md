@@ -21,7 +21,7 @@ The Rust/Tauri desktop host and the legacy Node agent have been removed. The C++
 host is the only desktop host; capabilities that have not moved yet return a stable
 error instead of falling back to a host that no longer exists. Packaging/installers
 are not implemented yet; the command-level gap list and implementation order are in
-[the C++ takeover and Rust removal plan](./rust-removal-plan.md).
+[the architecture and build plan](./architecture-and-build-plan.md).
 
 ## Native WebView and IPC
 

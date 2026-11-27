@@ -112,7 +112,7 @@ const composerProps: ComponentProps<typeof AgentComposer> = {
   prompt: "检查连接", attachments: [], onPromptChange: () => {}, onAttachmentsChange: () => {},
   onSubmit: () => {}, onStop: () => {}, running: false, stopping: false, canSend: true, canStop: false,
   permissionMode: "ask", onPermissionModeChange: () => {}, runMode: "goal", onRunModeChange: () => {},
-  delivery: "async", onDeliveryChange: () => {}, runPolicy: null, onRunPolicyChange: () => {}, targetEnvironment: "unknown",
+  delivery: "async", onDeliveryChange: () => {},
   models: [{ key: "provider:model", label: "vendor/model" }], selectedModelKey: "provider:model", selectedModelLabel: "Provider · model", onSelectModel: () => {},
   mentions: [],
   commandContext: { running: false, archived: false, desktop: true },

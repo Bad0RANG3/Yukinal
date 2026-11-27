@@ -157,6 +157,38 @@ bool valid_sftp_path(const std::string& value) {
   return safe_sftp_path(value);
 }
 
+// A read-probe id names one fixed entry in `toolkit_catalog.json`'s
+// `readProbes`. It is an identifier, never a command: the remote shell text is
+// compiled into the service from that catalog.
+bool valid_read_probe_id(const std::string& value) {
+  if (value.size() < 3 || value.size() > 64) return false;
+  const auto is_lower_alphanumeric = [](unsigned char character) {
+    return (character >= 'a' && character <= 'z') || (character >= '0' && character <= '9');
+  };
+  if (!is_lower_alphanumeric(static_cast<unsigned char>(value.front()))) return false;
+  return std::all_of(value.begin() + 1, value.end(), [&](unsigned char character) {
+    return is_lower_alphanumeric(character) || character == '.' || character == '_' ||
+           character == '-';
+  });
+}
+
+// A read-probe parameter is always one absolute path. Metacharacters, control
+// bytes and parent segments are refused here so only a plain path can reach the
+// catalog template; the SSH service re-checks the catalog's own prefix list.
+bool valid_read_probe_path(const std::string& value) {
+  if (value.empty() || value.size() > 512 || value.front() != '/') return false;
+  static const std::string forbidden = "'\"\\`$&|;<>*?()[]{}! \t\r\n";
+  if (value.find_first_of(forbidden) != std::string::npos) return false;
+  for (std::size_t start = 0; start <= value.size();) {
+    const auto end = value.find('/', start);
+    const auto segment = value.substr(start, end == std::string::npos ? std::string::npos : end - start);
+    if (segment == ".." || segment == ".") return false;
+    if (end == std::string::npos) break;
+    start = end + 1;
+  }
+  return true;
+}
+
 bool valid_snapshot_nonce(const std::string& value) {
   return value.size() == 32 && std::all_of(value.begin(), value.end(), [](unsigned char byte) {
     return (byte >= '0' && byte <= '9') || (byte >= 'a' && byte <= 'f');
@@ -194,6 +226,7 @@ bool parse_exec_request(const nlohmann::json& value, ExecRequest* request, ApiEr
   std::string destination_path;
   std::string nonce;
   std::string command;
+  std::string probe;
   std::string workdir;
   std::map<std::string, std::string> environment;
   std::string package_manager;
@@ -422,6 +455,30 @@ bool parse_exec_request(const nlohmann::json& value, ExecRequest* request, ApiEr
     if (!parameters_it->empty()) {
       set_error(error, 422, "invalid_parameters", "disk_usage accepts no parameters");
       return false;
+    }
+  } else if (operation == "read_probe") {
+    // One catalog probe id plus, for the few probes declared with a parameter,
+    // one absolute path. The command text never appears in a request, so a
+    // caller can only select a reviewed constant.
+    if (!has_only_keys(*parameters_it, {"probe", "path"})) {
+      set_error(error, 422, "invalid_parameters",
+                "read_probe accepts only probe and path parameters");
+      return false;
+    }
+    const auto probe_it = parameters_it->find("probe");
+    if (probe_it == parameters_it->end() || !probe_it->is_string() ||
+        !valid_read_probe_id(probe_it->get<std::string>())) {
+      set_error(error, 422, "invalid_parameters", "probe must be a valid read probe id");
+      return false;
+    }
+    probe = probe_it->get<std::string>();
+    if (const auto path_it = parameters_it->find("path"); path_it != parameters_it->end()) {
+      if (!path_it->is_string() || !valid_read_probe_path(path_it->get<std::string>())) {
+        set_error(error, 422, "invalid_parameters",
+                  "path must be an absolute path without metacharacters or parent segments");
+        return false;
+      }
+      path = path_it->get<std::string>();
     }
   } else if (operation == "host_key_probe") {
     if (!parameters_it->empty()) {
@@ -792,6 +849,7 @@ bool parse_exec_request(const nlohmann::json& value, ExecRequest* request, ApiEr
   request->destination_path = std::move(destination_path);
   request->nonce = std::move(nonce);
   request->command = std::move(command);
+  request->probe = std::move(probe);
   request->workdir = std::move(workdir);
   request->environment = std::move(environment);
   request->package_manager = std::move(package_manager);

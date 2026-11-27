@@ -1,4 +1,4 @@
-"""The fixed, read-only JSON-RPC commands the Agent may run on a host.
+"""The fixed, read-only probes the Agent may run on a host.
 
 Why this exists
 ---------------
@@ -6,29 +6,37 @@ A health check used to cost three `server.exec` approvals. The live acceptance
 run showed it: `server.info` already reported CPU, memory and disk, but it has no
 swap field, no inode counts and no "does this path exist" question, so the Agent
 fell back to `grep /proc/meminfo`, `df -i` and `test -e` — three destructive-risk
-approvals for three reads. Each `server.exec` also costs a human decision, a
-one-shot ticket and roughly 1.3 s of round-trip overhead.
+approvals for three reads.
 
-Every command below is a constant in this file. **The model supplies no shell
-text for any of them**, so the safety argument is different from `server.exec`:
-there is nothing to inject into, and the command cannot be widened by an
-argument. Each one reads a file or runs a fixed program with a fixed argument
-vector.
+The command text for every probe is a reviewed constant in
+``yukinal_ssh/toolkit_catalog.json`` (``readProbes``). That same JSON file is
+compiled into the C++ SSH service, so the Agent and the transport agree on one
+list: the model supplies no shell text for any probe, and the SSH service
+resolves the shell text from its own compiled copy rather than trusting the
+request. There is nothing to inject into and no way to widen a probe with an
+argument.
 
 They are also *not* a general escape hatch. If a question cannot be answered by
 one of these constants, the Agent still has `server.exec` and a person still
 approves it. That is the intended fallback, not a gap to be filled one command at
-a time: a growing command catalog would become a second, less-reviewed shell.
+a time: a growing probe list would become a second, less-reviewed shell.
 
 Approval policy
 ---------------
 These are registered as read-only (`risk_level="read"`, `requires_approval=False`)
-because the command is a constant here, not because the Agent or the model claims
-it is safe. They never write, and the host still checks the resolved target.
+because the command is a constant in the bundled catalog, not because the Agent
+or the model claims it is safe. They never write, and both sides still check the
+resolved target.
 """
 from __future__ import annotations
 
 from dataclasses import dataclass
+
+from yukinal_ssh.toolkit_catalog import (
+    READ_PROBE_COMMANDS,
+    READ_PROBE_PATH_PREFIXES,
+    READ_PROBE_SUMMARIES,
+)
 
 
 @dataclass(frozen=True)
@@ -46,69 +54,54 @@ class ReadCommand:
 #: Paths a caller may ask about. The allowlist is a directory prefix, and the
 #: handler additionally refuses any path containing a shell metacharacter or a
 #: `..` segment, so a future handler bug cannot become command injection.
-EXISTS_ALLOWED_PREFIXES = (
-    "/etc/", "/opt/", "/srv/", "/var/log/", "/var/lib/", "/usr/local/",
-    "/home/", "/root/", "/tmp/", "/run/",
-)
+EXISTS_ALLOWED_PREFIXES = READ_PROBE_PATH_PREFIXES["filesystem.exists"]
+
+_EXISTS_TEMPLATE = READ_PROBE_COMMANDS["filesystem.exists"]
+
+_PATH_INPUT_SCHEMA: dict[str, object] = {
+    "type": "object",
+    "properties": {
+        "path": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 512,
+            "pattern": "^/[^\\u0000-\\u001f\\\\]*$",
+        },
+    },
+    "required": ["path"],
+    "additionalProperties": False,
+}
+
+_NO_INPUT_SCHEMA: dict[str, object] = {
+    "type": "object",
+    "properties": {},
+    "additionalProperties": False,
+}
+
+
+def _read_command(tool: str, summary: str, input_schema: dict[str, object]) -> ReadCommand:
+    return ReadCommand(
+        tool=tool,
+        summary=summary or READ_PROBE_SUMMARIES.get(tool, tool),
+        command=READ_PROBE_COMMANDS[tool],
+        input_schema=input_schema,
+    )
+
 
 #: Commands whose output is small enough to return whole inside the tool budget.
 READ_COMMANDS: tuple[ReadCommand, ...] = (
-    ReadCommand(
-        tool="system.swap",
-        summary=(
-            "Read total, used and free swap from /proc/meminfo. The health snapshot has "
-            "no swap field, and a host with no swap configured is a real finding."
-        ),
-        command="grep -E '^(SwapTotal|SwapFree|SwapCached):' /proc/meminfo",
-        input_schema={"type": "object", "properties": {}, "additionalProperties": False},
+    _read_command("system.swap", READ_PROBE_SUMMARIES.get("system.swap", ""), dict(_NO_INPUT_SCHEMA)),
+    _read_command(
+        "filesystem.inodes", READ_PROBE_SUMMARIES.get("filesystem.inodes", ""), dict(_NO_INPUT_SCHEMA)
     ),
-    ReadCommand(
-        tool="filesystem.inodes",
-        summary=(
-            "Read inode usage for every mounted filesystem with a fixed `df -i`. The health "
-            "snapshot reports byte usage only, so inode exhaustion is invisible without this."
-        ),
-        command="df -i -x tmpfs -x devtmpfs -x squashfs",
-        input_schema={"type": "object", "properties": {}, "additionalProperties": False},
+    _read_command(
+        "filesystem.mounts", READ_PROBE_SUMMARIES.get("filesystem.mounts", ""), dict(_NO_INPUT_SCHEMA)
     ),
-    ReadCommand(
-        tool="filesystem.mounts",
-        summary=(
-            "Read the real filesystem table with a fixed `df -hT`, excluding only virtual "
-            "filesystems. The health snapshot lists its own collector's subset."
-        ),
-        command="df -hT -x tmpfs -x devtmpfs -x squashfs",
-        input_schema={"type": "object", "properties": {}, "additionalProperties": False},
-    ),
-    ReadCommand(
-        tool="system.time",
-        summary=(
-            "Read the target's current time and timezone with a fixed `date`. Use this instead "
-            "of assuming the caller's clock when stamping anything on the host."
-        ),
-        command="date -Is",
-        input_schema={"type": "object", "properties": {}, "additionalProperties": False},
-    ),
-    ReadCommand(
-        tool="filesystem.exists",
-        summary=(
-            "Report whether one path exists, printing only PRESENT or ABSENT. Reads no file "
-            "content. This is the read that a delete needs to verify itself without a shell."
-        ),
-        command="",  # built per call from a validated path; see the handler
-        input_schema={
-            "type": "object",
-            "properties": {
-                "path": {
-                    "type": "string",
-                    "minLength": 1,
-                    "maxLength": 512,
-                    "pattern": "^/[^\\u0000-\\u001f\\\\]*$",
-                },
-            },
-            "required": ["path"],
-            "additionalProperties": False,
-        },
+    _read_command("system.time", READ_PROBE_SUMMARIES.get("system.time", ""), dict(_NO_INPUT_SCHEMA)),
+    _read_command(
+        "filesystem.exists",
+        "Report whether one path exists, printing only PRESENT or ABSENT.",
+        dict(_PATH_INPUT_SCHEMA),
     ),
 )
 
@@ -118,9 +111,10 @@ def exists_command(path: str) -> str:
 
     `path` reaches here already validated by the schema and by
     `validate_exists_path`. It is single-quoted, and the validator refuses quotes
-    and metacharacters, so the result is still one fixed `test` invocation.
+    and metacharacters, so the result is still one fixed `test` invocation. The
+    C++ SSH service performs the identical substitution from the same template.
     """
-    return f"if [ -e '{path}' ]; then echo PRESENT; else echo ABSENT; fi"
+    return _EXISTS_TEMPLATE.replace("{path}", f"'{path}'")
 
 
 def validate_exists_path(path: object) -> str:

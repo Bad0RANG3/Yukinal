@@ -269,7 +269,7 @@ function resolveHostExecutable(options) {
   if (found === undefined) {
     fail(
       `The C++ desktop host was not found in any known build directory.\n` +
-        `  Build it first (see docs/cpp-desktop-handoff.md) or pass --host-exe.`,
+        `  Build it first (see docs/native-desktop-host.md) or pass --host-exe.`,
     );
   }
   return found;

@@ -1,7 +1,12 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 
-import { shouldAutoStartRecoveredTask } from "../src/features/investigations/recovery.js";
+import {
+  canStartTaskNow,
+  isActiveRunConflict,
+  shouldAutoStartRecoveredTask,
+  taskHasActiveRun,
+} from "../src/features/investigations/recovery.js";
 import { LOCAL_TASK_TARGET, resolveInvestigationTaskTarget } from "../src/features/investigations/task-target.js";
 import { describeInvestigationFailure } from "../src/features/investigations/error-display.js";
 import {
@@ -49,6 +54,33 @@ test("retry-like recovery auto-starts only after the host clears the active run"
   assert.equal(shouldAutoStartRecoveredTask({ status: "investigating", activeRunId: "run_old" }), false);
   assert.equal(shouldAutoStartRecoveredTask({ status: "waiting_user", activeRunId: undefined }), false);
   assert.equal(shouldAutoStartRecoveredTask({ status: "stopped", activeRunId: undefined }), false);
+});
+
+test("a start is deferred while the task still owns a live run", () => {
+  const idleRun = { status: "completed" as const, endedAt: "2026-11-27T03:06:34Z" };
+  const liveRun = { status: "running" as const };
+  assert.equal(canStartTaskNow({ status: "waiting_user", activeRunId: undefined }, [idleRun]), true);
+  // The pointer is the host's own fence: it stays set until the run row is closed.
+  assert.equal(taskHasActiveRun({ activeRunId: "run_live" }, [idleRun]), true);
+  assert.equal(canStartTaskNow({ status: "waiting_user", activeRunId: "run_live" }, [idleRun]), false);
+  // A run row that has not ended yet also keeps the task busy, even without the pointer.
+  assert.equal(taskHasActiveRun({ activeRunId: undefined }, [liveRun]), true);
+  assert.equal(canStartTaskNow({ status: "investigating", activeRunId: undefined }, [liveRun]), false);
+  // Completed, failed and stopped tasks are not startable at all.
+  assert.equal(canStartTaskNow({ status: "completed", activeRunId: undefined }, [idleRun]), false);
+  assert.equal(canStartTaskNow({ status: "failed", activeRunId: undefined }, [idleRun]), false);
+});
+
+test("only the single-live-run refusal is treated as a race", () => {
+  assert.equal(
+    isActiveRunConflict(new Error("investigation task already has an active Agent run (INVALID_STATE)")),
+    true,
+  );
+  assert.equal(isActiveRunConflict("investigation task already has an active Agent run"), true);
+  // Everything else must stay a visible error instead of being silently retried.
+  assert.equal(isActiveRunConflict(new Error("investigation task is not startable")), false);
+  assert.equal(isActiveRunConflict(new Error("The IPC bridge is unavailable")), false);
+  assert.equal(isActiveRunConflict(undefined), false);
 });
 
 test("a failure is presented by its category, not its message text", () => {

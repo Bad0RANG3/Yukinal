@@ -99,6 +99,7 @@ class FixedReadCommandTests(unittest.TestCase):
 
     def test_fixed_reads_are_registered_as_approval_free_reads(self) -> None:
         from yukinal_agent.host_tools import register_host_tools
+        from yukinal_agent.ssh_tools import register_desktop_ssh_tools
 
         class Host:
             async def request(self, *_args: Any, **_kwargs: Any) -> dict[str, Any]:
@@ -108,7 +109,10 @@ class FixedReadCommandTests(unittest.TestCase):
                 }}
 
         registry = ToolRegistry(MemoryAuditSink())
-        register_host_tools(registry, Host())  # type: ignore[arg-type]
+        # The five probes now ride the C++ SSH read route, the same one
+        # `ssh.disk_usage` uses: no approval ticket, and no `server.exec`.
+        direct = register_desktop_ssh_tools(registry, Host(), Path("yukinal-ssh-service"))  # type: ignore[arg-type]
+        register_host_tools(registry, Host(), excluded_names=direct)  # type: ignore[arg-type]
         specs = {spec.name: spec for spec in registry.list()}
         for name in ("system.swap", "filesystem.inodes", "filesystem.mounts", "system.time", "filesystem.exists"):
             with self.subTest(name=name):

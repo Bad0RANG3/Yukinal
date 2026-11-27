@@ -7,8 +7,8 @@ import { ConversationSettings, type ConversationSettingsProps } from "../src/fea
 const base: ConversationSettingsProps = {
   id: "conversation-settings", open: true, closing: false, running: false, panelRef: { current: null },
   onAnimationEnd: () => {}, onClose: () => {}, runMode: "goal", onRunModeChange: () => {},
-  permissionMode: "ask", onPermissionModeChange: () => {}, runPolicy: null, onRunPolicyChange: () => {},
-  targetEnvironment: "unknown", delivery: "async", onDeliveryChange: () => {},
+  permissionMode: "ask", onPermissionModeChange: () => {},
+  delivery: "async", onDeliveryChange: () => {},
 };
 type Element = ReactElement<Record<string, any>>;
 function find(node: ReactNode, match: (element: Element) => boolean): Element {
@@ -22,27 +22,23 @@ function find(node: ReactNode, match: (element: Element) => boolean): Element {
   return result;
 }
 const named = (tree: ReactNode, label: string) => find(tree, (element) => element.props["aria-label"] === label);
-function buttons(node: ReactNode): Element[] {
-  if (Array.isArray(node)) return node.flatMap(buttons);
-  if (!isValidElement<Record<string, any>>(node)) return [];
-  return [...(node.type === "button" ? [node] : []), ...buttons(node.props.children)];
-}
 
-test("settings expose all real run modes and keep policy mismatch visible before advanced disclosure", () => {
-  const markup = renderToStaticMarkup(<ConversationSettings {...base} runMode="plan" runPolicy="policy.development" targetEnvironment="production" />);
+test("settings expose every real run mode and approval choice without a policy control the node cannot honour", () => {
+  const markup = renderToStaticMarkup(<ConversationSettings {...base} runMode="plan" />);
   assert.match(markup, /<option value="goal">目标模式<\/option>/);
   assert.match(markup, /<option value="plan" selected="">计划模式<\/option>/);
   assert.match(markup, /<option value="readonly">只读模式<\/option>/);
-  assert.ok(markup.indexOf('role="status"') < markup.indexOf('<details'), "policy mismatch must not be hidden in advanced settings");
-  assert.match(markup, /目标环境是生产，但选择了开发策略/);
-  assert.doesNotMatch(markup, /<details[^>]+open=/);
+  // 策略选择在这条链路上从不生效（sidecar 以 -32602 拒绝任何 policyId），
+  // 所以它不该在界面上留下一个永远点不动的按钮组。
+  assert.doesNotMatch(markup, /目标策略/);
+  assert.doesNotMatch(markup, /<details/);
   assert.doesNotMatch(markup, /<optgroup/);
 });
 
 test("closed and running settings reject late events without changing the next request", () => {
   for (const state of [{ open: false, closing: true, running: false }, { open: true, closing: false, running: true }]) {
     const calls: unknown[] = [];
-    const tree = ConversationSettings({ ...base, ...state, onRunModeChange: (v) => calls.push(v), onPermissionModeChange: (v) => calls.push(v), onRunPolicyChange: (v) => calls.push(v), onDeliveryChange: (v) => calls.push(v) });
+    const tree = ConversationSettings({ ...base, ...state, onRunModeChange: (v) => calls.push(v), onPermissionModeChange: (v) => calls.push(v), onDeliveryChange: (v) => calls.push(v) });
     // Role routing is gone from the single-agent UI: only run mode, approval and
     // delivery remain, and all of them refuse input while closed or running.
     for (const [label, value] of [["运行方式", "goal"], ["批准方式", "auto"]]) {
@@ -51,9 +47,6 @@ test("closed and running settings reject late events without changing the next r
       control.props.onChange({ target: { value } });
     }
     assert.doesNotMatch(renderToStaticMarkup(<ConversationSettings {...base} {...state} />), /aria-label="处理角色"/);
-    const policyButtons = buttons(named(tree, "目标策略").props.children);
-    assert.ok(policyButtons.length > 0);
-    assert.ok(policyButtons.every((button) => button.props.disabled), "the current Agent Node cannot accept policy IDs");
     find(tree, (e) => e.type === "button" && e.props.children === "等待完成").props.onClick();
     assert.deepEqual(calls, []);
   }
@@ -61,13 +54,10 @@ test("closed and running settings reject late events without changing the next r
   assert.match(closed, /aria-hidden="true" inert=""/);
 });
 
-test("editable settings preserve mode, approval and delivery semantics while unsupported policies stay disabled", () => {
+test("editable settings preserve mode, approval and delivery semantics", () => {
   const calls: unknown[] = [];
-  const tree = ConversationSettings({ ...base, onRunModeChange: (v) => calls.push(["mode", v]), onPermissionModeChange: (v) => calls.push(["approval", v]), onRunPolicyChange: (v) => calls.push(["policy", v]), onDeliveryChange: (v) => calls.push(["delivery", v]) });
+  const tree = ConversationSettings({ ...base, onRunModeChange: (v) => calls.push(["mode", v]), onPermissionModeChange: (v) => calls.push(["approval", v]), onDeliveryChange: (v) => calls.push(["delivery", v]) });
   for (const [label, value] of [["运行方式", "plan"], ["批准方式", "auto"]]) named(tree, label!).props.onChange({ target: { value } });
-  const policyButtons = buttons(named(tree, "目标策略").props.children);
-  assert.ok(policyButtons.length > 0);
-  assert.ok(policyButtons.every((button) => button.props.disabled), "the current Agent Node cannot accept policy IDs");
   find(tree, (e) => e.type === "button" && e.props.children === "等待完成").props.onClick();
   assert.deepEqual(calls, [["mode", "plan"], ["approval", "auto"], ["delivery", "sync"]]);
 });

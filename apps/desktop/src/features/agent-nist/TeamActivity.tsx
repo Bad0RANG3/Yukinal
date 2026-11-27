@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState, type MouseEvent, type FocusEvent } from "react";
-import { useTeamRuntimeStore, TEAM_STAGE_LABEL, teamRunActive, type TeamCue } from "./team-runtime-store.js";
+import { useTeamRuntimeStore, teamRunActive, type TeamCue } from "./team-runtime-store.js";
 import { nextHeartbeatAt, toolSurface } from "./team-operations.js";
 import type { WorkpageTool } from "../workpages/workpage-model.js";
 
@@ -52,21 +52,6 @@ export function TeamActionCueView({ cues, ...target }: OperationTarget & { cues:
   return <span className={`team-action-cue team-color-blue ${cue.finished ? "is-recent" : "is-working"}`} title={title}><span aria-hidden="true" />{cue.preview ? "演示 · " : "运维 Agent"}{matches.length > 1 ? ` · ${matches.length} 项操作` : cue.finished ? " · 刚刚" : ""}</span>;
 }
 
-/** The left navigation also signals work when the board is not in view. */
-export function TeamBoardNavFeedback() {
-  const runs = useTeamRuntimeStore((state) => state.runs);
-  const cues = useTeamRuntimeStore((state) => state.cues);
-  const updates = useTeamRuntimeStore((state) => state.watchUpdates);
-  const working = runs.filter((run) => run.source !== "coordinator" && ["starting", "thinking", "running_tool"].includes(run.stage));
-  const previews = cues.filter((cue) => cue.preview && !cue.finished && cue.until > Date.now());
-  const recent = cues.find((cue) => cue.finished && cue.until > Date.now());
-  const count = working.length + previews.length;
-  const active = working.length > 0 || previews.length > 0;
-  const recentActivity = Boolean(recent);
-  const unread = updates.length ? <span className="team-watch-unread" title="值守有最新状态" aria-label="值守有最新状态">新</span> : null;
-  if (!active && !recentActivity) return unread;
-  return <><span key={count ? "agent:active" : `${recent?.runId}:${recent?.callId}:recent`} aria-hidden="true" className="team-operation-outline team-color-blue" data-operation={count ? "working" : "recent"} />{count ? <span className="team-board-nav-count team-color-blue" title={previews.length ? "模拟操作反馈" : `${count} 项任务正在处理`} aria-label={previews.length ? `${count} 项模拟操作` : `${count} 项任务正在处理`}>{count}</span> : null}{unread}</>;
-}
 
 /** Explicit fixture-only preview: no connection, tool call, transcript or token record. */
 export function TeamFeedbackPreview({ serverId }: { serverId: string | null }) {
@@ -94,12 +79,6 @@ export function TeamFeedbackPreview({ serverId }: { serverId: string | null }) {
   }}>{previewing ? "正在演示并行提示…" : "预览并行操作反馈"}<span>模拟</span></button>;
 }
 
-export function TeamRunStrip({ sessionId }: { sessionId: string | null }) {
-  const runs = useTeamRuntimeStore((state) => state.runs);
-  const run = [...runs].reverse().find((item) => teamRunActive(item) && item.sessionId === sessionId);
-  if (!run) return null;
-  return <div className="team-run-strip team-color-blue" role="status"><span className="team-run-indicator" aria-hidden="true" /><strong>运维 Agent</strong><span>{TEAM_STAGE_LABEL[run.stage]}</span><span className="team-run-goal" title={run.goal}>{run.goal}</span></div>;
-}
 
 export function recordTeamAttention(event: MouseEvent<HTMLElement> | FocusEvent<HTMLElement>) {
   if (!(event.target instanceof Element)) return;

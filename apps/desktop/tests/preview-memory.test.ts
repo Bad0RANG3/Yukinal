@@ -17,3 +17,20 @@ test("mock memory scopes use the real contract and cannot leak another server", 
   assert.equal(IPC_SCHEMAS.agent_memory_delete.response.parse(previewMemoryResponse(IPC_COMMANDS.agentMemoryDelete, { id: memory.id, scope: "server", serverId: "srv_previewapi" })).deleted, false);
   assert.equal(IPC_SCHEMAS.agent_memory_delete.response.parse(previewMemoryResponse(IPC_COMMANDS.agentMemoryDelete, { id: memory.id, scope: "server", serverId: "srv_previewdb" })).deleted, true);
 });
+
+test("mock memory honours expiry, version links and proposal provenance", () => {
+  const list = (params: unknown) => IPC_SCHEMAS.agent_memory_list.response.parse(previewMemoryResponse(IPC_COMMANDS.agentMemoryList, IPC_SCHEMAS.agent_memory_list.params.parse(params))).memories;
+  const future = new Date(Date.now() + 60 * 60 * 1000).toISOString();
+  const past = new Date(Date.now() - 60 * 1000).toISOString();
+  const saved = (input: unknown) => IPC_SCHEMAS.agent_memory_save.response.parse(previewMemoryResponse(IPC_COMMANDS.agentMemorySave, IPC_SCHEMAS.agent_memory_save.params.parse(input))).memory;
+
+  const expiring = saved({ scope: "global", title: "过期预览", content: "预览过期内容", expiresAt: past });
+  assert.equal(expiring.expiresAt, past);
+  assert.ok(!list({ scope: "global" }).some((item) => item.id === expiring.id), "an expired memory must leave the listing");
+  const lasting = saved({ scope: "global", title: "有效预览", content: "预览有效内容", expiresAt: future, supersedes: expiring.id, origin: "model" });
+  assert.equal(lasting.origin, "model");
+  assert.equal(lasting.supersedes, expiring.id);
+  assert.ok(list({ scope: "global" }).some((item) => item.id === lasting.id));
+  // The RPC surface refuses a naive instant before the mock ever stores it.
+  assert.equal(IPC_SCHEMAS.agent_memory_save.params.safeParse({ scope: "global", title: "t", content: "c", expiresAt: "2030-01-01T00:00:00" }).success, false);
+});

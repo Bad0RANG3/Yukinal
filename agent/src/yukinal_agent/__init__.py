@@ -3,6 +3,7 @@
 from .audit import AuditEvent, AuditSink, JsonlAuditSink, MemoryAuditSink
 from .mcp_manager import MCPClientManager, MCPManagerError, MCPServerConfig
 from .model_agent import AgentBudget, ApprovalRequest, ModelAgentResult, ModelDrivenAgent
+from .memory_tools import register_memory_tools
 from .models import ModelConfig, ModelFactory, ModelFactoryError
 from .policy import PolicyEngine, PrincipalScope
 from .ssh_tools import register_ssh_tools
@@ -44,5 +45,6 @@ __all__ = [
     "ToolSpec",
     "WorkflowResult",
     "approval_fingerprint",
+    "register_memory_tools",
     "register_ssh_tools",
 ]

@@ -713,5 +713,209 @@ class ModelLoopTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(result.error_code, "model_round_limit_exceeded")
 
 
+    async def test_unparseable_tool_call_is_repaired_without_ending_the_run(self) -> None:
+        seen: list[dict[str, Any]] = []
+
+        async def handler(arguments: dict[str, Any], _context: ExecutionContext) -> dict[str, str]:
+            seen.append(arguments)
+            return {"state": "active"}
+
+        # A provider sometimes returns a call whose argument JSON is truncated. The
+        # run must ask once more instead of discarding the work already done.
+        broken = AIMessage(content="", tool_calls=[], invalid_tool_calls=[
+            {"name": "ops.read", "args": "{not json", "id": "call-broken", "type": "invalid_tool_call"}
+        ])
+        model = ScriptedModel([
+            broken,
+            AIMessage(content="", tool_calls=[{
+                "name": "ops.read", "args": {"target_id": "stage-1"}, "id": "call-1", "type": "tool_call"
+            }]),
+            AIMessage(content="Service is active."),
+        ])
+        result = await ModelDrivenAgent(_registry(handler), model, AgentBudget(max_model_rounds=4)).run(
+            task_id="task-repair", tenant_id="tenant-1", user_id="user-1", prompt="Check service status.",
+            allowed_tools={"ops.read"}, allowed_target_ids={"stage-1"},
+        )
+
+        self.assertEqual(result.status, "succeeded")
+        self.assertEqual(result.answer, "Service is active.")
+        self.assertEqual(seen, [{"target_id": "stage-1"}])
+        repair_notice = model.seen_messages[1][-1]
+        self.assertEqual(repair_notice.type, "system")
+        self.assertIn("not a valid JSON object", repair_notice.content)
+
+    async def test_unparseable_tool_calls_fail_closed_after_the_repair_budget(self) -> None:
+        async def handler(_arguments: dict[str, Any], _context: ExecutionContext) -> str:
+            raise AssertionError("an unparseable call must never reach the registry")
+
+        broken = AIMessage(content="", tool_calls=[], invalid_tool_calls=[
+            {"name": "ops.read", "args": "{not json", "id": "call-broken", "type": "invalid_tool_call"}
+        ])
+        model = ScriptedModel([broken, broken, broken, broken])
+        result = await ModelDrivenAgent(_registry(handler), model, AgentBudget(max_model_rounds=8)).run(
+            task_id="task-repair-limit", tenant_id="tenant-1", user_id="user-1", prompt="Read.",
+            allowed_tools={"ops.read"}, allowed_target_ids={"stage-1"},
+        )
+
+        self.assertEqual(result.status, "failed")
+        self.assertEqual(result.error_code, "invalid_model_tool_call")
+        self.assertEqual(len(model.seen_messages), 4)
+
+
+    async def test_a_schema_rejection_is_repaired_even_when_the_round_had_siblings(self) -> None:
+        # One bad argument must not cost the whole batch: the model gets the exact
+        # schema back and can re-issue that call, while the siblings keep their place.
+        calls: list[dict[str, Any]] = []
+
+        async def handler(arguments: dict[str, Any], _context: ExecutionContext) -> dict[str, str]:
+            calls.append(arguments)
+            return {"state": "recorded"}
+
+        registry = ToolRegistry(MemoryAuditSink(), _scope())
+        registry.register(ToolSpec(
+            name="ops.read",
+            description="Read a safe value.",
+            input_schema={
+                "type": "object",
+                "properties": {"kind": {"type": "string", "enum": ["summary", "detail"]}},
+                "required": ["kind"],
+                "additionalProperties": False,
+            },
+            risk_level="read",
+            requires_approval=False,
+            handler=handler,
+            target_id_argument=None,
+        ))
+        model = ScriptedModel([
+            AIMessage(content="", tool_calls=[{
+                "name": "ops.read", "args": {"kind": "a readable description"}, "id": "call-a", "type": "tool_call",
+            }, {
+                "name": "ops.read", "args": {"kind": "summary"}, "id": "call-b", "type": "tool_call",
+            }]),
+            AIMessage(content="", tool_calls=[{
+                "name": "ops.read", "args": {"kind": "detail"}, "id": "call-c", "type": "tool_call",
+            }]),
+            AIMessage(content="Checked both."),
+        ])
+        result = await ModelDrivenAgent(registry, model, AgentBudget(max_model_rounds=4)).run(
+            task_id="task-schema-batch", tenant_id="tenant-1", user_id="user-1", prompt="Check both.",
+            allowed_tools={"ops.read"}, allowed_target_ids={"stage-1"},
+        )
+
+        self.assertEqual(result.status, "succeeded")
+        self.assertEqual(result.error_code, None)
+        # The rejected call never ran; its sibling and the repaired retry did.
+        self.assertEqual(calls, [{"kind": "summary"}, {"kind": "detail"}])
+        notice = next(message for message in model.seen_messages[1] if message.type == "tool"
+                      and "not_executed" in str(message.content))
+        self.assertIn("allowedFields", str(notice.content))
+
+    async def test_a_durable_task_does_not_offer_an_approval_it_cannot_honour(self) -> None:
+        # The host refuses `server.exec` outside a recorded plan step and cannot mint
+        # the approval ticket, so a prompt shown here could never be answered. The
+        # model must be told what is missing instead of the person being asked.
+        executed: list[dict[str, Any]] = []
+
+        async def handler(arguments: dict[str, Any], _context: ExecutionContext) -> dict[str, str]:
+            executed.append(arguments)
+            return {"ok": "true"}
+
+        registry = _server_exec_registry(handler)
+        model = ScriptedModel([
+            AIMessage(content="", tool_calls=[{
+                "name": "server.exec", "args": {"command": "set -e\ntrue"}, "id": "call-planless", "type": "tool_call",
+            }]),
+            AIMessage(content="Collected with reads instead."),
+        ])
+        result = await ModelDrivenAgent(registry, model, AgentBudget(max_model_rounds=4)).run(
+            task_id="task-planless", tenant_id="tenant-1", user_id="user-1",
+            prompt="Inspect the target.", allowed_tools={"server.exec"},
+            allowed_target_ids={"srv_stage1"},
+            host_task_id="task_durable_1", host_target={"host": "remote", "serverId": "srv_stage1", "environment": "staging"},
+        )
+
+        self.assertEqual(executed, [])
+        self.assertIsNone(result.approval_requests or None)
+        self.assertEqual(result.status, "succeeded")
+        notice = next(message for message in model.seen_messages[1] if message.type == "tool")
+        self.assertIn("durable_plan_required", str(notice.content))
+        self.assertIn("investigation.plan", str(notice.content))
+
+    async def test_a_successful_read_closes_the_confirmation_turn(self) -> None:
+        # A durable task alternates changes and verification reads. The confirmation
+        # turn exists so a person sees the first change land; leaving it up after the
+        # read that confirmed the change turned every later verification into a
+        # refused proposal until the run died with `confirmation_turn_required`.
+        executions: list[str] = []
+
+        async def handler(arguments: dict[str, Any], _context: ExecutionContext) -> str:
+            executions.append(str(arguments.get("value") or arguments.get("target_id")))
+            return "changed" if "value" in arguments else "reads 0"
+
+        registry = _registry(handler, write=True)
+        registry.register(ToolSpec(
+            name="ops.read",
+            description="A controlled read.",
+            input_schema={
+                "type": "object",
+                "properties": {"target_id": {"type": "string"}},
+                "required": ["target_id"],
+                "additionalProperties": False,
+            },
+            risk_level="read",
+            requires_approval=False,
+            handler=handler,
+            target_required=True,
+        ))
+        write_call = {"name": "ops.write", "args": {"target_id": "stage-1", "value": "blue"}, "id": "write-1", "type": "tool_call"}
+        read_call = {"name": "ops.read", "args": {"target_id": "stage-1"}, "id": "read-1", "type": "tool_call"}
+        granted = approval_fingerprint("ops.write", "stage-1", write_call["args"],
+                                       task_id="task-confirm", tenant_id="tenant-1", user_id="user-1")
+        model = ScriptedModel([
+            AIMessage(content="", tool_calls=[write_call]),
+            AIMessage(content="", tool_calls=[read_call]),
+            AIMessage(content="", tool_calls=[write_call]),
+        ])
+        result = await ModelDrivenAgent(registry, model, auto_approval=True).run(
+            task_id="task-confirm", tenant_id="tenant-1", user_id="user-1", prompt="Change then verify.",
+            allowed_tools={"ops.write", "ops.read"}, allowed_target_ids={"stage-1"},
+            approved_actions={granted: "approval-ref-1"},
+        )
+
+        # The write ran, the read confirmed it, and the next write is a fresh decision
+        # instead of a refusal loop.
+        self.assertEqual(executions, ["blue", "stage-1"])
+        self.assertEqual(result.status, "awaiting_approval")
+        self.assertEqual(result.error_code, "approval_required")
+        self.assertEqual(result.approval_requests[0].tool_name, "ops.write")
+
+    async def test_unparseable_call_is_dropped_while_valid_calls_still_run(self) -> None:
+        seen: list[dict[str, Any]] = []
+
+        async def handler(arguments: dict[str, Any], _context: ExecutionContext) -> dict[str, str]:
+            seen.append(arguments)
+            return {"state": "active"}
+
+        # A provider may mix one mangled call with well-formed ones in a single round.
+        # The mangled one never ran, so it is dropped and reported; the rest execute.
+        model = ScriptedModel([
+            AIMessage(content="", tool_calls=[
+                {"name": "ops.read", "args": {"target_id": "stage-1"}, "id": "call-good", "type": "tool_call"},
+            ], invalid_tool_calls=[
+                {"name": "ops.read", "args": "{not json", "id": "call-broken", "type": "invalid_tool_call"},
+            ]),
+            AIMessage(content="Service is active."),
+        ])
+        result = await ModelDrivenAgent(_registry(handler), model, AgentBudget(max_model_rounds=4)).run(
+            task_id="task-mixed", tenant_id="tenant-1", user_id="user-1", prompt="Check service status.",
+            allowed_tools={"ops.read"}, allowed_target_ids={"stage-1"},
+        )
+
+        self.assertEqual(result.status, "succeeded")
+        self.assertEqual(seen, [{"target_id": "stage-1"}])
+        notices = [message for message in model.seen_messages[1] if message.type == "system"]
+        self.assertTrue(any("dropped without running" in message.content for message in notices))
+
+
 if __name__ == "__main__":
     unittest.main()

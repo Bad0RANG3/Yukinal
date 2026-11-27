@@ -2971,6 +2971,27 @@ void DesktopDatabase::finish_host_tool_call(const std::string& trace_id,
   }
 }
 
+std::optional<std::string> DesktopDatabase::host_tool_step_effect(
+    const std::string& task_id, const std::string& plan_id,
+    const std::string& plan_step_id) const {
+  std::lock_guard lock(mutex_);
+  if (connection_ == nullptr || task_id.empty() || plan_id.empty() || plan_step_id.empty()) {
+    return std::nullopt;
+  }
+  Statement statement(connection_, R"SQL(
+      SELECT tool_name FROM host_tool_calls
+       WHERE task_id = ?1 AND plan_id = ?2 AND plan_step_id = ?3 AND status = 'success'
+       ORDER BY started_at DESC LIMIT 1
+    )SQL");
+  bind_text(connection_, statement.get(), 1, task_id);
+  bind_text(connection_, statement.get(), 2, plan_id);
+  bind_text(connection_, statement.get(), 3, plan_step_id);
+  const auto result = sqlite3_step(statement.get());
+  if (result == SQLITE_DONE) return std::nullopt;
+  if (result != SQLITE_ROW) throw std::runtime_error(sqlite3_errmsg(connection_));
+  return column_text(statement.get(), 0);
+}
+
 nlohmann::json DesktopDatabase::list_investigation_tasks(
     const std::optional<std::string>& status, int limit) const {
   std::lock_guard lock(mutex_);
@@ -3144,15 +3165,23 @@ std::optional<nlohmann::json> DesktopDatabase::set_investigation_task_status(
     const std::optional<std::string>& completed_at, const std::string& updated_at) const {
   std::lock_guard lock(mutex_);
   if (connection_ == nullptr) return std::nullopt;
+  // A finished task keeps the phase it was working in unless this write says
+  // otherwise, so a plan the host verified leaves the board showing "investigating"
+  // for a task that is done. Settle the phase together with the status.
+  const auto phase = status == "completed"   ? std::optional<std::string>("completed")
+                     : status == "failed"    ? std::optional<std::string>("recovery")
+                                             : std::nullopt;
   Statement update(connection_, R"SQL(
       UPDATE investigation_tasks
-         SET status = ?2, completed_at = ?3, updated_at = ?4
+         SET status = ?2, completed_at = ?3, updated_at = ?4,
+             phase = COALESCE(?5, phase)
        WHERE id = ?1
     )SQL");
   bind_text(connection_, update.get(), 1, task_id);
   bind_text(connection_, update.get(), 2, status);
   bind_optional_text(connection_, update.get(), 3, completed_at);
   bind_text(connection_, update.get(), 4, updated_at);
+  bind_optional_text(connection_, update.get(), 5, phase);
   if (sqlite3_step(update.get()) != SQLITE_DONE) {
     throw std::runtime_error(sqlite3_errmsg(connection_));
   }
@@ -3524,9 +3553,175 @@ void DesktopDatabase::upsert_investigation_artifact(const nlohmann::json& artifa
   }
 }
 
-nlohmann::json DesktopDatabase::list_investigation_artifacts(const std::string& task_id,
-                                                            int limit) const {
+namespace {
+
+// Shared validation for the two investigation step writers. A step row may only be
+// written while a real run exists, because `investigation_steps.run_id` is NOT NULL
+// with a foreign key to `investigation_runs`.
+void require_investigation_step_identity(const nlohmann::json& step, std::string* step_id,
+                                         std::string* task_id, std::string* run_id) {
+  *step_id = step.value("id", std::string());
+  *task_id = step.value("taskId", std::string());
+  *run_id = step.value("runId", std::string());
+  if (step_id->empty() || task_id->empty() || run_id->empty()) {
+    throw std::invalid_argument("investigation step id, taskId and runId are required");
+  }
+  const auto ordinal = step.value("ordinal", std::int64_t{-1});
+  if (ordinal < 0) throw std::invalid_argument("investigation step ordinal must not be negative");
+  const auto attempt = step.value("attempt", std::int64_t{0});
+  if (attempt <= 0) throw std::invalid_argument("investigation step attempt must be positive");
+  if (step.value("kind", std::string()).empty()) {
+    throw std::invalid_argument("investigation step kind is required");
+  }
+  if (step.value("status", std::string()).empty()) {
+    throw std::invalid_argument("investigation step status is required");
+  }
+  if (step.value("title", std::string()).empty()) {
+    throw std::invalid_argument("investigation step title is required");
+  }
+}
+
+}  // namespace
+
+void DesktopDatabase::ensure_investigation_step(const nlohmann::json& step) const {
   std::lock_guard lock(mutex_);
+  if (connection_ == nullptr) throw std::runtime_error("the local database is unavailable");
+  std::string step_id;
+  std::string task_id;
+  std::string run_id;
+  require_investigation_step_identity(step, &step_id, &task_id, &run_id);
+  {
+    Statement existing(connection_, "SELECT task_id FROM investigation_steps WHERE id = ?1");
+    bind_text(connection_, existing.get(), 1, step_id);
+    const auto result = sqlite3_step(existing.get());
+    if (result == SQLITE_ROW) {
+      if (std::string(column_text(existing.get(), 0)) != task_id) {
+        throw std::invalid_argument("investigation step id belongs to another task");
+      }
+      return;
+    }
+    if (result != SQLITE_DONE) throw std::runtime_error(sqlite3_errmsg(connection_));
+  }
+  const auto optional_text = [&step](const char* key) -> std::optional<std::string> {
+    const auto found = step.find(key);
+    if (found == step.end() || !found->is_string()) return std::nullopt;
+    return found->get<std::string>();
+  };
+  Statement insert(connection_, R"SQL(
+      INSERT INTO investigation_steps (
+        id, task_id, run_id, ordinal, kind, title, status, attempt, tool_name, target,
+        input_summary, output_summary, evidence_ids, started_at, ended_at, failure,
+        plan_id, plan_step_id
+      ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18)
+      ON CONFLICT(id) DO NOTHING
+    )SQL");
+  bind_text(connection_, insert.get(), 1, step_id);
+  bind_text(connection_, insert.get(), 2, task_id);
+  bind_text(connection_, insert.get(), 3, run_id);
+  bind_int64(connection_, insert.get(), 4, step.value("ordinal", std::int64_t{0}));
+  bind_text(connection_, insert.get(), 5, step.value("kind", std::string()));
+  bind_text(connection_, insert.get(), 6, step.value("title", std::string()));
+  bind_text(connection_, insert.get(), 7, step.value("status", std::string("running")));
+  bind_int64(connection_, insert.get(), 8, step.value("attempt", std::int64_t{1}));
+  bind_optional_text(connection_, insert.get(), 9, optional_text("toolName"));
+  bind_optional_text(connection_, insert.get(), 10,
+                     step.contains("target") && !step.at("target").is_null()
+                         ? std::optional<std::string>(step.at("target").dump())
+                         : std::nullopt);
+  bind_optional_text(connection_, insert.get(), 11, optional_text("inputSummary"));
+  bind_optional_text(connection_, insert.get(), 12, optional_text("outputSummary"));
+  bind_text(connection_, insert.get(), 13,
+            step.contains("evidenceIds") ? step.at("evidenceIds").dump() : "[]");
+  bind_optional_text(connection_, insert.get(), 14, optional_text("startedAt"));
+  bind_optional_text(connection_, insert.get(), 15, optional_text("endedAt"));
+  bind_optional_text(connection_, insert.get(), 16,
+                     step.contains("failure") && !step.at("failure").is_null()
+                         ? std::optional<std::string>(step.at("failure").dump())
+                         : std::nullopt);
+  bind_optional_text(connection_, insert.get(), 17, optional_text("planId"));
+  bind_optional_text(connection_, insert.get(), 18, optional_text("planStepId"));
+  if (sqlite3_step(insert.get()) != SQLITE_DONE) {
+    throw std::runtime_error(sqlite3_errmsg(connection_));
+  }
+}
+
+void DesktopDatabase::upsert_investigation_step(const nlohmann::json& step) const {
+  std::lock_guard lock(mutex_);
+  if (connection_ == nullptr) throw std::runtime_error("the local database is unavailable");
+  std::string step_id;
+  std::string task_id;
+  std::string run_id;
+  require_investigation_step_identity(step, &step_id, &task_id, &run_id);
+  {
+    Statement existing(connection_, "SELECT task_id FROM investigation_steps WHERE id = ?1");
+    bind_text(connection_, existing.get(), 1, step_id);
+    const auto result = sqlite3_step(existing.get());
+    if (result == SQLITE_ROW && std::string(column_text(existing.get(), 0)) != task_id) {
+      throw std::invalid_argument("investigation step id belongs to another task");
+    }
+    if (result != SQLITE_ROW && result != SQLITE_DONE) {
+      throw std::runtime_error(sqlite3_errmsg(connection_));
+    }
+  }
+  const auto optional_text = [&step](const char* key) -> std::optional<std::string> {
+    const auto found = step.find(key);
+    if (found == step.end() || !found->is_string()) return std::nullopt;
+    return found->get<std::string>();
+  };
+  Statement upsert(connection_, R"SQL(
+      INSERT INTO investigation_steps (
+        id, task_id, run_id, ordinal, kind, title, status, attempt, tool_name, target,
+        input_summary, output_summary, evidence_ids, started_at, ended_at, failure,
+        plan_id, plan_step_id
+      ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18)
+      ON CONFLICT(id) DO UPDATE SET
+        run_id = excluded.run_id, ordinal = excluded.ordinal, kind = excluded.kind,
+        title = excluded.title, status = excluded.status, attempt = excluded.attempt,
+        -- A step is opened by the call that starts it and settled by the result that
+        -- closes it; those two writes describe different things. The settle pass does
+        -- not know which tool ran, so keeping the first non-empty value here is what
+        -- stops the execution timeline from forgetting the tool the moment it succeeds.
+        tool_name = COALESCE(excluded.tool_name, investigation_steps.tool_name),
+        target = COALESCE(excluded.target, investigation_steps.target),
+        input_summary = COALESCE(excluded.input_summary, investigation_steps.input_summary),
+        output_summary = COALESCE(excluded.output_summary, investigation_steps.output_summary),
+        evidence_ids = excluded.evidence_ids,
+        started_at = COALESCE(excluded.started_at, investigation_steps.started_at),
+        ended_at = excluded.ended_at, failure = excluded.failure,
+        plan_id = excluded.plan_id, plan_step_id = excluded.plan_step_id
+    )SQL");
+  bind_text(connection_, upsert.get(), 1, step_id);
+  bind_text(connection_, upsert.get(), 2, task_id);
+  bind_text(connection_, upsert.get(), 3, run_id);
+  bind_int64(connection_, upsert.get(), 4, step.value("ordinal", std::int64_t{0}));
+  bind_text(connection_, upsert.get(), 5, step.value("kind", std::string()));
+  bind_text(connection_, upsert.get(), 6, step.value("title", std::string()));
+  bind_text(connection_, upsert.get(), 7, step.value("status", std::string("running")));
+  bind_int64(connection_, upsert.get(), 8, step.value("attempt", std::int64_t{1}));
+  bind_optional_text(connection_, upsert.get(), 9, optional_text("toolName"));
+  bind_optional_text(connection_, upsert.get(), 10,
+                     step.contains("target") && !step.at("target").is_null()
+                         ? std::optional<std::string>(step.at("target").dump())
+                         : std::nullopt);
+  bind_optional_text(connection_, upsert.get(), 11, optional_text("inputSummary"));
+  bind_optional_text(connection_, upsert.get(), 12, optional_text("outputSummary"));
+  bind_text(connection_, upsert.get(), 13,
+            step.contains("evidenceIds") ? step.at("evidenceIds").dump() : "[]");
+  bind_optional_text(connection_, upsert.get(), 14, optional_text("startedAt"));
+  bind_optional_text(connection_, upsert.get(), 15, optional_text("endedAt"));
+  bind_optional_text(connection_, upsert.get(), 16,
+                     step.contains("failure") && !step.at("failure").is_null()
+                         ? std::optional<std::string>(step.at("failure").dump())
+                         : std::nullopt);
+  bind_optional_text(connection_, upsert.get(), 17, optional_text("planId"));
+  bind_optional_text(connection_, upsert.get(), 18, optional_text("planStepId"));
+  if (sqlite3_step(upsert.get()) != SQLITE_DONE) {
+    throw std::runtime_error(sqlite3_errmsg(connection_));
+  }
+}
+
+nlohmann::json DesktopDatabase::list_investigation_artifacts(const std::string& task_id,
+                                                            int limit) const {  std::lock_guard lock(mutex_);
   nlohmann::json items = nlohmann::json::array();
   if (connection_ == nullptr) return {{"artifacts", std::move(items)}};
   Statement rows(connection_, R"SQL(

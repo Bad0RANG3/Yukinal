@@ -9,6 +9,7 @@ state) *and* the terminal accounting on disk and in memory. Asserting only
 from __future__ import annotations
 
 import asyncio
+import json
 import unittest
 from typing import Any
 from unittest import mock
@@ -146,6 +147,20 @@ def recorded_events(sidecar: LocalSidecar, run_id: str) -> int:
     return sidecar._conversations._connection.execute(
         "SELECT count(*) FROM conversation_events WHERE run_id = ?", (run_id,)
     ).fetchone()[0]
+
+
+def recorded_event_log(sidecar: LocalSidecar, run_id: str) -> list[dict[str, Any]]:
+    """The durable audit log for a run, in write order.
+
+    `agent.admitted` is only observable here: it is an audit fact the host never sees,
+    so a regression that drops or reorders it is invisible to the notification sink.
+    """
+    return [
+        json.loads(row[0])
+        for row in sidecar._conversations._connection.execute(
+            "SELECT event_json FROM conversation_events WHERE run_id = ? ORDER BY ordinal", (run_id,)
+        )
+    ]
 
 
 def turn_status(sidecar: LocalSidecar, run_id: str) -> str | None:
@@ -625,6 +640,56 @@ class RunLifecycleTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(turn_status(sidecar, "run-cb-retry"), "cancelled")
         self.assertIn("run-cb-retry", sidecar._completed_runs)
         self.assertEqual(sidecar._undelivered_terminals, {})
+        store.close()
+
+    async def test_admission_authority_is_recorded_after_context_and_before_the_run_starts(self) -> None:
+        # Admission used to be a prompt regex nobody could audit afterwards: a run that
+        # stopped short of its goal looked identical to one that had never been admitted.
+        # The event has to land inside the prologue (after `context.loaded`, before
+        # `agent.started`) and it has to name the same authority the agent was built with.
+        store = ConversationStore()
+        model = ScriptedModel()
+        sidecar = LocalSidecar(model, store)
+        await sidecar.rpc("agent.run.start", run_payload("run-admitted", message_id="msg-admitted", resume=False))
+        long_budget = {"maxSteps": 600, "maxRunMs": 1_800_000, "maxAttempts": 3}
+        response = await sidecar.rpc(
+            "agent.run.start",
+            run_payload("run-admitted", message_id="msg-admitted", resume=True, delivery="sync")
+            | {"taskBudget": long_budget},
+        )
+        self.assertNotIn("error", response)
+
+        log = recorded_event_log(sidecar, "run-admitted")
+        types = [event["type"] for event in log]
+        self.assertIn("agent.admitted", types)
+        admitted = log[types.index("agent.admitted")]
+        self.assertEqual(admitted["sustainedGoal"], True)
+        self.assertEqual(admitted["source"], "budget")
+        self.assertEqual(admitted["declaredBudget"], long_budget)
+        # The prologue order is the contract: `context.loaded`, then the admission fact,
+        # then the announcement the UI reacts to. `agent.admitted` must not move above
+        # `context.loaded` either (the prologue once failed before any audit row landed).
+        self.assertEqual(types.index("agent.admitted"), types.index("context.loaded") + 1)
+        self.assertLess(types.index("agent.admitted"), types.index("agent.started"))
+        store.close()
+
+    async def test_admission_records_the_prompt_hint_when_the_host_declares_no_budget(self) -> None:
+        # The fallback is the half that needs auditing most, because it is the only path
+        # where the wording of a request still decides whether a loop starts.
+        store = ConversationStore()
+        model = ScriptedModel()
+        sidecar = LocalSidecar(model, store)
+        hint = "长任务：完整实现、部署、测试并修复网站"
+        await sidecar.rpc("agent.run.start", run_payload("run-hint", message_id="msg-hint", resume=False) | {"prompt": hint})
+        response = await sidecar.rpc(
+            "agent.run.start",
+            run_payload("run-hint", message_id="msg-hint", resume=True, delivery="sync") | {"prompt": hint},
+        )
+        self.assertNotIn("error", response)
+        log = recorded_event_log(sidecar, "run-hint")
+        admitted = [event for event in log if event["type"] == "agent.admitted"]
+        self.assertEqual([(event["sustainedGoal"], event["source"]) for event in admitted], [(True, "prompt")])
+        self.assertIsNone(admitted[0]["declaredBudget"])
         store.close()
 
 

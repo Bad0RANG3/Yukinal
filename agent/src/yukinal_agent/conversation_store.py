@@ -45,6 +45,10 @@ COMPACTION_TRIGGER_RATIO = 0.80
 COMPACTION_TARGET_RATIO = 0.60
 MAX_MEMORY_TITLE_CHARS = 200
 MAX_MEMORY_CONTENT_CHARS = 12_000
+#: Who authored an explicit memory. `user` is the operator through the save RPC,
+#: `model` is a proposal the operator approved. The value is provenance, never
+#: authority: retrieval treats both the same and neither can widen a tool budget.
+MEMORY_ORIGINS = ("user", "model")
 
 
 def _json(value: Any) -> str:
@@ -148,7 +152,16 @@ class ConversationStore:
                 title TEXT NOT NULL,
                 content TEXT NOT NULL,
                 created_at TEXT NOT NULL,
-                updated_at TEXT NOT NULL
+                updated_at TEXT NOT NULL,
+                -- NULL means the memory never expires. An ISO-8601 instant is a
+                -- retrieval deadline: once it passes the row stays on disk for the
+                -- audit trail but no longer enters `list_memories`/`memory_context`.
+                expires_at TEXT,
+                -- Version chain. A replacement names the memory it replaces so the
+                -- history of a claim survives the correction instead of being lost.
+                supersedes TEXT,
+                -- `user` (operator wrote it) or `model` (an approved proposal).
+                origin TEXT NOT NULL DEFAULT 'user'
             );
             CREATE INDEX IF NOT EXISTS saved_memories_scope ON saved_memories(scope, server_id, updated_at);
             CREATE TABLE IF NOT EXISTS knowledge_documents (
@@ -176,6 +189,16 @@ class ConversationStore:
         """)
         if "legacy_imported" not in {row["name"] for row in self._connection.execute("PRAGMA table_info(conversation_sessions)")}:
             self._connection.execute("ALTER TABLE conversation_sessions ADD COLUMN legacy_imported INTEGER NOT NULL DEFAULT 0")
+        # Databases written before memory expiry/versioning exist keep their rows:
+        # add the columns in place instead of recreating the table.
+        memory_columns = {row["name"] for row in self._connection.execute("PRAGMA table_info(saved_memories)")}
+        for column, definition in (
+            ("expires_at", "TEXT"),
+            ("supersedes", "TEXT"),
+            ("origin", "TEXT NOT NULL DEFAULT 'user'"),
+        ):
+            if column not in memory_columns:
+                self._connection.execute(f"ALTER TABLE saved_memories ADD COLUMN {column} {definition}")
         # `memory_search` is retained for compatibility with databases written by
         # older builds. New knowledge retrieval uses `knowledge_search` below.
         self._connection.execute("CREATE VIRTUAL TABLE IF NOT EXISTS memory_search USING fts5(id UNINDEXED, terms)")
@@ -513,12 +536,21 @@ class ConversationStore:
         return [{"runId": row["run_id"], "sessionId": row["session_id"],
                  "taskId": json.loads(row["metadata_json"]).get("taskId") or row["run_id"]} for row in rows]
 
-    def _memory_scope_sql(self, server_id: str | None, scope: str | None = None) -> tuple[str, list[Any]]:
+    def _memory_scope_sql(self, server_id: str | None, scope: str | None = None,
+                          *, now: str | None = None) -> tuple[str, list[Any]]:
+        """Scope + expiry predicate shared by `list_memories` and `_knowledge_records`.
+
+        Expiry is filtered in SQL, not in Python: retrieval must never see an expired
+        memory, and doing it here means a new caller cannot forget the filter. An
+        expired row keeps its `knowledge_chunks` so the audit trail stays complete.
+        """
         where = "(m.scope = 'global' OR (m.scope = 'server' AND m.server_id = ?))" if server_id else "m.scope = 'global'"
         arguments: list[Any] = [server_id] if server_id else []
         if scope:
             where += " AND m.scope = ?"
             arguments.append(scope)
+        where += " AND (m.expires_at IS NULL OR m.expires_at > ?)"
+        arguments.append(now or datetime.now(UTC).isoformat())
         return where, arguments
 
     def _knowledge_records(
@@ -675,7 +707,9 @@ class ConversationStore:
         )
         return [_memory_from_row(row) for row in rows]
 
-    def save_memory(self, *, scope: str, server_id: str | None, title: str, content: str, memory_id: str | None = None) -> dict[str, Any]:
+    def save_memory(self, *, scope: str, server_id: str | None, title: str, content: str,
+                    memory_id: str | None = None, expires_at: str | None = None,
+                    supersedes: str | None = None, origin: str = "user") -> dict[str, Any]:
         if scope not in ("global", "server"):
             raise ValueError("memory scope must be global or server")
         if scope == "server" and not server_id:
@@ -686,23 +720,43 @@ class ConversationStore:
             raise ValueError("memory title must be non-empty and at most 200 characters")
         if not isinstance(content, str) or not content.strip() or len(content) > MAX_MEMORY_CONTENT_CHARS:
             raise ValueError("memory content must be non-empty and at most 12000 characters")
+        if origin not in MEMORY_ORIGINS:
+            raise ValueError("memory origin must be user or model")
+        expires_at = _memory_expiry(expires_at)
         memory_id = memory_id or "mem_" + uuid.uuid4().hex
         existing = self._connection.execute("SELECT * FROM saved_memories WHERE id = ?", (memory_id,)).fetchone()
         if existing is not None and (existing["scope"] != scope or existing["server_id"] != (server_id or "")):
             raise ValueError("memory belongs to a different scope")
+        if supersedes is not None:
+            # A version link is only meaningful inside one scope, and only if the
+            # memory it names actually exists there — otherwise the chain dangles.
+            if not isinstance(supersedes, str) or not supersedes.strip() or len(supersedes) > 256:
+                raise ValueError("memory supersedes must name another memory id")
+            if supersedes == memory_id:
+                raise ValueError("a memory cannot supersede itself")
+            replaced = self._connection.execute(
+                "SELECT scope, server_id FROM saved_memories WHERE id = ?", (supersedes,)
+            ).fetchone()
+            if replaced is None or replaced["scope"] != scope or replaced["server_id"] != (server_id or ""):
+                raise ValueError("superseded memory must exist in the same scope")
         now = datetime.now(UTC).isoformat()
         created = existing["created_at"] if existing is not None else now
         with self._connection:
             self._connection.execute(
-                "INSERT INTO saved_memories(id, scope, server_id, title, content, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?) "
-                "ON CONFLICT(id) DO UPDATE SET title = excluded.title, content = excluded.content, updated_at = excluded.updated_at",
-                (memory_id, scope, server_id or "", title, content, created, now),
+                "INSERT INTO saved_memories(id, scope, server_id, title, content, created_at, updated_at, expires_at, supersedes, origin) "
+                "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?) "
+                "ON CONFLICT(id) DO UPDATE SET title = excluded.title, content = excluded.content, "
+                "updated_at = excluded.updated_at, expires_at = excluded.expires_at, "
+                "supersedes = excluded.supersedes, origin = excluded.origin",
+                (memory_id, scope, server_id or "", title, content, created, now, expires_at, supersedes, origin),
             )
             self._connection.execute("DELETE FROM memory_search WHERE id = ?", (memory_id,))
             self._connection.execute("INSERT INTO memory_search(id, terms) VALUES (?, ?)", (memory_id, " ".join(_search_terms(title + " " + content))))
             self._index_memory_chunks(memory_id, title=title, content=content, updated_at=now)
         return {"id": memory_id, "scope": scope, **({"serverId": server_id} if server_id else {}),
-                "title": title, "content": content, "createdAt": created, "updatedAt": now}
+                "title": title, "content": content, "createdAt": created, "updatedAt": now,
+                **({"expiresAt": expires_at} if expires_at else {}),
+                **({"supersedes": supersedes} if supersedes else {}), "origin": origin}
 
     def delete_memory(self, memory_id: str, *, scope: str, server_id: str | None) -> bool:
         with self._connection:
@@ -1127,9 +1181,35 @@ def _search_terms(text: str) -> list[str]:
     return sorted(terms)
 
 
+def _memory_expiry(value: str | None) -> str | None:
+    """Normalize a memory expiry instant, or reject it.
+
+    Retrieval compares `expires_at` lexicographically against an ISO-8601 UTC
+    instant, so the stored text has to be normalized here rather than trusted from
+    the caller. A naive local string would silently never expire.
+    """
+    if value is None:
+        return None
+    if not isinstance(value, str) or not value.strip():
+        raise ValueError("memory expiresAt must be an ISO-8601 instant")
+    try:
+        parsed = datetime.fromisoformat(value.strip().replace("Z", "+00:00"))
+    except ValueError:
+        raise ValueError("memory expiresAt must be an ISO-8601 instant") from None
+    if parsed.tzinfo is None:
+        raise ValueError("memory expiresAt must include a time zone")
+    return parsed.astimezone(UTC).isoformat()
+
+
 def _memory_from_row(row: sqlite3.Row) -> dict[str, Any]:
+    keys = row.keys()
+    expires_at = row["expires_at"] if "expires_at" in keys else None
+    supersedes = row["supersedes"] if "supersedes" in keys else None
     return {"id": row["id"], "scope": row["scope"], **({"serverId": row["server_id"]} if row["server_id"] else {}),
-            "title": row["title"], "content": row["content"], "createdAt": row["created_at"], "updatedAt": row["updated_at"]}
+            "title": row["title"], "content": row["content"], "createdAt": row["created_at"], "updatedAt": row["updated_at"],
+            **({"expiresAt": expires_at} if expires_at else {}),
+            **({"supersedes": supersedes} if supersedes else {}),
+            "origin": (row["origin"] if "origin" in keys and row["origin"] else "user")}
 
 
 def _project_messages(raw: list[dict[str, Any]], metadata: dict[str, Any], status: str) -> list[Any]:

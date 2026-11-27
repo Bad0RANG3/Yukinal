@@ -682,3 +682,73 @@ select option { color: var(--text); background: var(--surface-2); }
   .terminal-shell { padding: 8px; }
   .terminal-toolbar { gap: 6px 12px; }
 }
+
+/*
+ * SSH 失败的说明块。
+ *
+ * 结构固定成三层（出了什么事 / 下一步做什么 / 原始报文可折叠），所以样式只需
+ * 保证这三层的阅读顺序不会被颜色打断：标题用危险色、建议用正文色、码与报文用
+ * 等宽弱化。`.form-error` 仍会带进来，用于继承字号与上边距。
+ */
+.ssh-failure {
+  display: grid;
+  gap: 6px;
+}
+
+.ssh-failure .ssh-failure-title {
+  margin: 0;
+  color: var(--danger);
+  font-size: var(--text-caption);
+  font-weight: 600;
+}
+
+.ssh-failure .ssh-failure-hint {
+  margin: 0;
+  color: var(--muted);
+  font-size: var(--text-caption);
+  line-height: 1.6;
+}
+
+.ssh-failure .ssh-failure-detail {
+  margin: 0;
+  color: var(--faint);
+  font-size: var(--text-caption);
+}
+
+.ssh-failure .ssh-failure-detail > summary {
+  cursor: pointer;
+  list-style: none;
+  color: var(--faint);
+}
+
+.ssh-failure .ssh-failure-detail > summary::-webkit-details-marker {
+  display: none;
+}
+
+.ssh-failure .ssh-failure-detail > summary:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 2px;
+  border-radius: var(--radius-badge);
+}
+
+.ssh-failure .ssh-failure-detail code {
+  color: var(--muted);
+  font: 10px var(--font-terminal);
+}
+
+.ssh-failure .ssh-failure-detail pre {
+  margin: 6px 0 0;
+  padding: 8px 10px;
+  border-radius: var(--radius-card);
+  background: var(--surface-2);
+  color: var(--muted);
+  font: 11px var(--font-terminal);
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+
+/* 概览页把说明放进 notice 里，那里已有自己的间距。 */
+.overview-connection-notice .overview-connection-error .ssh-failure {
+  margin-top: 4px;
+  text-align: left;
+}

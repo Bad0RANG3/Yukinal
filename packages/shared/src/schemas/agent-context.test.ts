@@ -37,6 +37,28 @@ test("saved memory scope is explicit and cannot silently cross servers", () => {
   assert.equal(IPC_SCHEMAS.chat_session_list.params.safeParse({ serverId: null }).success, true);
 });
 
+test("memory expiry needs an instant with a time zone and versions name a predecessor", () => {
+  const save = IPC_SCHEMAS.agent_memory_save.params;
+  const base = { scope: "global", title: "Pool size", content: "48" };
+  assert.equal(save.safeParse({ ...base, expiresAt: "2030-01-01T00:00:00Z" }).success, true);
+  assert.equal(save.safeParse({ ...base, expiresAt: "2030-01-01T08:00:00+08:00" }).success, true);
+  // A naive local instant would compare wrongly against the stored UTC deadline.
+  assert.equal(save.safeParse({ ...base, expiresAt: "2030-01-01T00:00:00" }).success, false);
+  assert.equal(save.safeParse({ ...base, expiresAt: "tomorrow" }).success, false);
+  assert.equal(save.safeParse({ ...base, supersedes: "mem_previous" }).success, true);
+  assert.equal(save.safeParse({ ...base, origin: "model" }).success, true);
+  assert.equal(save.safeParse({ ...base, origin: "system" }).success, false);
+
+  const memory = IPC_SCHEMAS.agent_memory_save.response;
+  const stored = { id: "mem_1", scope: "global", title: "Pool size", content: "48",
+    createdAt: "2026-10-17T00:00:00Z", updatedAt: "2026-10-17T00:00:00Z",
+    expiresAt: "2030-01-01T00:00:00+00:00", supersedes: "mem_0", origin: "model" };
+  assert.equal(memory.safeParse({ memory: stored }).success, true);
+  // Older rows predate the columns, so every new field stays optional.
+  assert.equal(memory.safeParse({ memory: { id: "mem_2", scope: "global", title: "t", content: "c",
+    createdAt: "2026-10-17T00:00:00Z", updatedAt: "2026-10-17T00:00:00Z" } }).success, true);
+});
+
 test("restored messages keep speaker and model metadata without a persona prompt", () => {
   const message = { id: "msg-1", sessionId: "session-1", role: "assistant", content: "Reviewed.",
     participant: { id: "reviewer", label: "Reviewer", kind: "agent" }, model: "test-model", createdAt: "2026-10-17T00:00:00Z" };
