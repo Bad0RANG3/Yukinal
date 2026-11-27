@@ -71,7 +71,7 @@ Section "Yukinal" SecMain
   WriteRegStr HKCU "${PRODUCT_KEY}" "Publisher" "Yukinal Project"
   WriteRegStr HKCU "${PRODUCT_KEY}" "InstallLocation" "$INSTDIR"
   WriteRegStr HKCU "${PRODUCT_KEY}" "DisplayIcon" "$INSTDIR\yukinal-desktop-host.exe"
-  WriteRegStr HKCU "${PRODUCT_KEY}" "UninstallString" '$"$INSTDIR\Uninstall.exe$"'
+  WriteRegStr HKCU "${PRODUCT_KEY}" "UninstallString" '"$INSTDIR\Uninstall.exe"'
   WriteRegDWORD HKCU "${PRODUCT_KEY}" "NoModify" 1
   WriteRegDWORD HKCU "${PRODUCT_KEY}" "NoRepair" 1
 SectionEnd
