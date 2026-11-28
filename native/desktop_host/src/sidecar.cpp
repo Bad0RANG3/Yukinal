@@ -81,10 +81,14 @@ struct SidecarClient::Impl {
 
   mutable std::mutex mutex;
   std::condition_variable exited_cv;
+  std::mutex lifecycle_mutex;
+  std::mutex supervisor_mutex;
+  std::condition_variable supervisor_cv;
   std::mutex io_mutex;
   std::mutex log_mutex;
 
   SidecarLaunch launch;
+  SidecarRestartPolicy restart_policy;
   HostHandler host_handler;
   NotificationSink notification_sink;
 
@@ -92,6 +96,12 @@ struct SidecarClient::Impl {
   bool exited = true;
   bool host_shutdown = false;
   bool process_started = false;
+  bool ready_once = false;
+  bool manual_stop = false;
+  bool supervisor_shutdown = false;
+  bool restart_requested = false;
+  std::uint32_t restart_attempts = 0;
+  std::chrono::steady_clock::time_point last_started_steady{};
   std::uint32_t pid = 0;
   std::string entry;
   std::string protocol_version;
@@ -99,6 +109,7 @@ struct SidecarClient::Impl {
   std::size_t tool_count = 0;
   std::string started_at;
   std::optional<SidecarExitInfo> last_exit;
+  std::optional<SidecarRestartInfo> restart;
 
   long long next_request_id = 1;
   std::map<long long, std::shared_ptr<PendingRequest>> pending;
@@ -125,12 +136,23 @@ struct SidecarClient::Impl {
   pid_t child_pid = -1;
 #endif
 
+  std::thread supervisor_thread;
   std::thread monitor_thread;
   std::thread stdout_thread;
   std::thread stderr_thread;
   std::vector<std::thread> host_workers;
 
-  ~Impl() { reset(); }
+  ~Impl() {
+    {
+      std::lock_guard lock(supervisor_mutex);
+      supervisor_shutdown = true;
+      manual_stop = true;
+      restart_requested = false;
+    }
+    supervisor_cv.notify_all();
+    if (supervisor_thread.joinable()) supervisor_thread.join();
+    reset();
+  }
 
   // --- framing and I/O -----------------------------------------------------
 
@@ -404,14 +426,24 @@ struct SidecarClient::Impl {
       }
     }
 #endif
+    bool should_supervise = false;
     {
       std::lock_guard lock(mutex);
       running = false;
       if (exit_info.has_value()) last_exit = exit_info;
       exited = true;
+      should_supervise = ready_once;
     }
     exited_cv.notify_all();
     notify_pending_of_exit();
+    if (should_supervise) {
+      std::lock_guard lock(supervisor_mutex);
+      if (!supervisor_shutdown && !manual_stop && restart_policy.enabled &&
+          restart_policy.max_attempts > 0) {
+        restart_requested = true;
+        supervisor_cv.notify_one();
+      }
+    }
   }
 
   // Handles one `host.tool.cancel`: cancel the matching in-flight request and
@@ -560,10 +592,20 @@ struct SidecarClient::Impl {
   }
 };
 
-SidecarClient::SidecarClient() : impl_(std::make_unique<Impl>()) {}
+SidecarClient::SidecarClient() : impl_(std::make_unique<Impl>()) {
+  impl_->supervisor_thread = std::thread([this] { supervisor_loop(); });
+}
 SidecarClient::~SidecarClient() = default;
 
-void SidecarClient::configure(SidecarLaunch launch) { impl_->launch = std::move(launch); }
+void SidecarClient::configure(SidecarLaunch launch) {
+  std::lock_guard lock(impl_->mutex);
+  impl_->launch = std::move(launch);
+}
+
+void SidecarClient::set_restart_policy(SidecarRestartPolicy policy) {
+  std::lock_guard lock(impl_->supervisor_mutex);
+  impl_->restart_policy = std::move(policy);
+}
 
 void SidecarClient::set_host_handler(HostHandler handler) {
   std::lock_guard lock(impl_->mutex);
@@ -586,6 +628,7 @@ SidecarStatus SidecarClient::status() const {
   if (!impl_->started_at.empty()) result.started_at = impl_->started_at;
   result.tool_count = impl_->tool_count;
   result.last_exit = impl_->last_exit;
+  result.restart = impl_->restart;
   return result;
 }
 
@@ -596,7 +639,103 @@ std::vector<std::string> SidecarClient::log_lines() const {
 
 std::size_t SidecarClient::log_capacity() const { return kLogCapacity; }
 
-SidecarStartResult SidecarClient::start(std::chrono::milliseconds timeout) {
+void SidecarClient::supervisor_loop() {
+  for (;;) {
+    SidecarRestartPolicy policy;
+    {
+      std::unique_lock lock(impl_->supervisor_mutex);
+      impl_->supervisor_cv.wait(lock, [this] {
+        return impl_->supervisor_shutdown || (!impl_->manual_stop && impl_->restart_requested);
+      });
+      if (impl_->supervisor_shutdown) return;
+      impl_->restart_requested = false;
+      policy = impl_->restart_policy;
+    }
+
+    if (!policy.enabled || policy.max_attempts == 0) continue;
+
+    {
+      std::lock_guard lock(impl_->mutex);
+      if (impl_->last_started_steady != std::chrono::steady_clock::time_point{} &&
+          std::chrono::steady_clock::now() - impl_->last_started_steady >=
+              policy.stability_window) {
+        impl_->restart_attempts = 0;
+      }
+    }
+
+    for (;;) {
+      std::uint32_t attempt = 0;
+      {
+        std::lock_guard lock(impl_->mutex);
+        if (impl_->running) break;
+        if (impl_->restart_attempts >= policy.max_attempts) {
+          impl_->restart = SidecarRestartInfo{impl_->restart_attempts, policy.max_attempts, true,
+                                              iso8601_now()};
+          break;
+        }
+        attempt = impl_->restart_attempts + 1;
+      }
+
+      auto delay = policy.initial_backoff;
+      for (std::uint32_t step = 1; step < attempt && delay < policy.max_backoff; ++step) {
+        delay = std::min(policy.max_backoff, delay * 2);
+      }
+      {
+        std::unique_lock lock(impl_->supervisor_mutex);
+        if (impl_->supervisor_cv.wait_for(
+                lock, delay,
+                [this] { return impl_->supervisor_shutdown || impl_->manual_stop; })) {
+          break;
+        }
+        policy = impl_->restart_policy;
+      }
+      if (!policy.enabled || policy.max_attempts == 0) break;
+
+      std::lock_guard lifecycle_lock(impl_->lifecycle_mutex);
+      {
+        std::lock_guard lock(impl_->supervisor_mutex);
+        if (impl_->supervisor_shutdown || impl_->manual_stop) break;
+      }
+      {
+        std::lock_guard lock(impl_->mutex);
+        if (impl_->running) break;
+        impl_->restart_attempts = attempt;
+      }
+      try {
+        (void)start_process_locked(policy.start_timeout, /*preserve_last_exit=*/true);
+        std::lock_guard lock(impl_->mutex);
+        impl_->ready_once = true;
+        impl_->last_started_steady = std::chrono::steady_clock::now();
+        impl_->restart =
+            SidecarRestartInfo{attempt, policy.max_attempts, false, iso8601_now()};
+        break;
+      } catch (const std::exception& error) {
+        impl_->append_log(std::string("automatic sidecar restart attempt ") +
+                          std::to_string(attempt) + "/" +
+                          std::to_string(policy.max_attempts) + " failed: " + error.what());
+        if (attempt >= policy.max_attempts) {
+          std::lock_guard lock(impl_->mutex);
+          impl_->restart =
+              SidecarRestartInfo{attempt, policy.max_attempts, true, iso8601_now()};
+          break;
+        }
+      } catch (...) {
+        impl_->append_log(std::string("automatic sidecar restart attempt ") +
+                          std::to_string(attempt) + "/" +
+                          std::to_string(policy.max_attempts) + " failed");
+        if (attempt >= policy.max_attempts) {
+          std::lock_guard lock(impl_->mutex);
+          impl_->restart =
+              SidecarRestartInfo{attempt, policy.max_attempts, true, iso8601_now()};
+          break;
+        }
+      }
+    }
+  }
+}
+
+SidecarStartResult SidecarClient::start_process_locked(std::chrono::milliseconds timeout,
+                                                       bool preserve_last_exit) {
   {
     std::lock_guard lock(impl_->mutex);
     if (impl_->running) {
@@ -605,7 +744,7 @@ SidecarStartResult SidecarClient::start(std::chrono::milliseconds timeout) {
     }
   }
   if (impl_->process_started || impl_->monitor_thread.joinable()) {
-    stop();
+    stop_process_locked(std::chrono::milliseconds(3000));
   }
 
   SidecarLaunch launch;
@@ -621,7 +760,7 @@ SidecarStartResult SidecarClient::start(std::chrono::milliseconds timeout) {
     std::lock_guard lock(impl_->host_mutex);
     impl_->host_queue.clear();
   }
-  {
+  if (!preserve_last_exit) {
     std::lock_guard lock(impl_->log_mutex);
     impl_->logs.clear();
     impl_->stderr_partial.clear();
@@ -631,7 +770,7 @@ SidecarStartResult SidecarClient::start(std::chrono::milliseconds timeout) {
   // spawn (missing program, CreateProcess failure, invalid UTF-8) therefore
   // leaves the client stopped, with no monitor thread that stop() would wait
   // on forever. Any later failure in thread creation tears the child down via
-  // stop() before the exception escapes.
+  // stop_process_locked() before the exception escapes.
   bool spawned = false;
   try {
     spawn_process(launch);
@@ -640,7 +779,7 @@ SidecarStartResult SidecarClient::start(std::chrono::milliseconds timeout) {
       std::lock_guard lock(impl_->mutex);
       impl_->running = true;
       impl_->exited = false;
-      impl_->last_exit.reset();
+      if (!preserve_last_exit) impl_->last_exit.reset();
       impl_->host_shutdown = false;
       impl_->process_started = true;
     }
@@ -687,13 +826,39 @@ SidecarStartResult SidecarClient::start(std::chrono::milliseconds timeout) {
     }
   } catch (...) {
     if (spawned) {
-      stop();
+      stop_process_locked(std::chrono::milliseconds(3000));
     } else {
       impl_->abort_start();
     }
     throw;
   }
   return status_to_start_result();
+}
+
+SidecarStartResult SidecarClient::start(std::chrono::milliseconds timeout) {
+  {
+    std::lock_guard lock(impl_->supervisor_mutex);
+    impl_->manual_stop = false;
+    impl_->restart_requested = false;
+  }
+  std::lock_guard lifecycle_lock(impl_->lifecycle_mutex);
+  {
+    std::lock_guard lock(impl_->mutex);
+    if (impl_->running) {
+      return SidecarStartResult{true, impl_->pid, impl_->protocol_version, impl_->agent_version,
+                                impl_->entry, impl_->tool_count};
+    }
+    impl_->ready_once = false;
+    impl_->restart_attempts = 0;
+    impl_->restart.reset();
+  }
+  auto result = start_process_locked(timeout, /*preserve_last_exit=*/false);
+  {
+    std::lock_guard lock(impl_->mutex);
+    impl_->ready_once = true;
+    impl_->last_started_steady = std::chrono::steady_clock::now();
+  }
+  return result;
 }
 
 SidecarStartResult SidecarClient::ensure_started(std::chrono::milliseconds timeout) {
@@ -713,7 +878,7 @@ SidecarStartResult SidecarClient::status_to_start_result() const {
                             impl_->entry, impl_->tool_count};
 }
 
-void SidecarClient::stop(std::chrono::milliseconds timeout) {
+void SidecarClient::stop_process_locked(std::chrono::milliseconds timeout) {
   if (!impl_->process_started) {
     // Still join any lingering threads and clear the handles.
     impl_->reset();
@@ -760,6 +925,23 @@ void SidecarClient::stop(std::chrono::milliseconds timeout) {
     impl_->running = false;
     impl_->pid = 0;
   }
+}
+
+void SidecarClient::stop(std::chrono::milliseconds timeout) {
+  {
+    std::lock_guard lock(impl_->supervisor_mutex);
+    impl_->manual_stop = true;
+    impl_->restart_requested = false;
+  }
+  impl_->supervisor_cv.notify_all();
+  std::lock_guard lifecycle_lock(impl_->lifecycle_mutex);
+  {
+    std::lock_guard lock(impl_->mutex);
+    impl_->ready_once = false;
+    impl_->restart_attempts = 0;
+    impl_->restart.reset();
+  }
+  stop_process_locked(timeout);
 }
 
 void SidecarClient::cancel_timed_out_run(

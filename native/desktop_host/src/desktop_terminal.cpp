@@ -249,6 +249,12 @@ struct TerminalManager::Impl {
   std::size_t live_sessions = 0;
   // Guarded by `mutex`, like `sessions`.
   AuthChallenges challenges;
+  TerminalOutputQueue output_queue;
+  std::thread output_dispatcher;
+
+  Impl() {
+    output_dispatcher = std::thread([this] { dispatch_output_loop(); });
+  }
 
   ~Impl() {
     std::map<std::string, std::shared_ptr<Session>> snapshot;
@@ -257,6 +263,14 @@ struct TerminalManager::Impl {
       snapshot.swap(sessions);
     }
     for (auto& [id, session] : snapshot) stop_session(session);
+    output_queue.close();
+    if (output_dispatcher.joinable()) output_dispatcher.join();
+  }
+
+  void dispatch_output_loop() {
+    while (auto item = output_queue.pop()) {
+      emit(item->event, item->payload);
+    }
   }
 
   void emit(const std::string& event, const nlohmann::json& payload) {
@@ -410,7 +424,10 @@ struct TerminalManager::Impl {
         start = newline + 1;
       }
       if (start > 0) buffer.erase(0, start);
-      if (buffer.size() > kMaxFrameBytes) buffer.clear();
+      if (buffer.size() > kMaxFrameBytes) {
+        buffer.clear();
+        output_queue.record_dropped(1);
+      }
     }
     if (!buffer.empty()) handle_frame(session, buffer);
 
@@ -449,7 +466,7 @@ struct TerminalManager::Impl {
       exit_payload = session->remote_exit.payload(session_id);
     }
     session->closed.store(true);
-    emit("terminal.closed", std::move(exit_payload));
+    output_queue.push_lifecycle("terminal.closed", std::move(exit_payload));
   }
 
   std::string session_id_of(const std::shared_ptr<Session>& session) {
@@ -461,7 +478,11 @@ struct TerminalManager::Impl {
   }
 
   void handle_frame(const std::shared_ptr<Session>& session, const std::string& line) {
-    if (line.empty() || line.size() > kMaxFrameBytes) return;
+    if (line.empty()) return;
+    if (line.size() > kMaxFrameBytes) {
+      output_queue.record_dropped(1);
+      return;
+    }
     nlohmann::json frame;
     try {
       frame = nlohmann::json::parse(line);
@@ -474,15 +495,15 @@ struct TerminalManager::Impl {
     const auto session_id = session_id_of(session);
     if (session_id.empty()) return;
     if (type == "ready") {
-      emit("terminal.opened", {{"terminalSessionId", session_id},
-                               {"serverId", session->server_id},
-                               {"cols", session->cols},
-                               {"rows", session->rows}});
+      output_queue.push_lifecycle("terminal.opened", {{"terminalSessionId", session_id},
+                                                      {"serverId", session->server_id},
+                                                      {"cols", session->cols},
+                                                      {"rows", session->rows}});
       return;
     }
     if (type == "output" && frame.contains("data") && frame.at("data").is_string()) {
       const auto bytes = base64_decode(frame.at("data").get<std::string>());
-      emit("terminal.data", {{"terminalSessionId", session_id}, {"data", utf8_lossy(bytes)}});
+      (void)output_queue.push_data(session_id, utf8_lossy(bytes));
       return;
     }
     if (type == "closed") {

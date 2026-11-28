@@ -12,7 +12,7 @@ from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 
 from fastapi import Depends, FastAPI, Header, HTTPException, Request, WebSocket
-from fastapi.responses import JSONResponse
+from fastapi.responses import JSONResponse, PlainTextResponse
 from sqlalchemy import inspect, text
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncEngine, AsyncSession
@@ -132,6 +132,16 @@ def create_app(settings: Settings, *, engine: AsyncEngine | None = None) -> Fast
         session: AsyncSession = Depends(get_session), _actor: str = Depends(current_actor)
     ) -> dict:
         return await service.metrics(session)
+
+    @app.get("/v1/metrics/prometheus", response_class=PlainTextResponse)
+    async def metrics_prometheus(
+        session: AsyncSession = Depends(get_session), _actor: str = Depends(current_actor)
+    ) -> PlainTextResponse:
+        snapshot = await service.metrics(session)
+        return PlainTextResponse(
+            service.format_prometheus_metrics(snapshot),
+            media_type="text/plain; version=0.0.4; charset=utf-8",
+        )
 
     # ── tenants ──────────────────────────────────────────────────────────────
 
@@ -553,7 +563,12 @@ def create_app(settings: Settings, *, engine: AsyncEngine | None = None) -> Fast
     @app.websocket("/v1/node/channel")
     async def node_channel(websocket: WebSocket) -> None:
         """The node's outbound channel: assignment, status and disconnect recovery."""
-        await channel.run_channel(websocket, session_factory)
+        await channel.run_channel(
+            websocket,
+            session_factory,
+            ping_interval_seconds=settings.channel_ping_interval_seconds,
+            pong_timeout_seconds=settings.channel_pong_timeout_seconds,
+        )
 
     return app
 

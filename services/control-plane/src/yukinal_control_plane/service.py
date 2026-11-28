@@ -1608,6 +1608,46 @@ async def metrics(session: AsyncSession) -> dict:
     }
 
 
+def _prometheus_label(value: str) -> str:
+    return value.replace("\\", "\\\\").replace("\n", "\\n").replace('"', '\\"')
+
+
+def format_prometheus_metrics(snapshot: dict) -> str:
+    """Render a :func:`metrics` snapshot in Prometheus text exposition format (0.0.4)."""
+    lines = [
+        "# HELP yukinal_control_plane_tenants Total registered tenants.",
+        "# TYPE yukinal_control_plane_tenants gauge",
+        f"yukinal_control_plane_tenants {int(snapshot.get('tenants', 0))}",
+        "# HELP yukinal_control_plane_nodes Total registered nodes.",
+        "# TYPE yukinal_control_plane_nodes gauge",
+        f"yukinal_control_plane_nodes {int(snapshot.get('nodes', 0))}",
+        "# HELP yukinal_control_plane_tasks Current tasks grouped by status.",
+        "# TYPE yukinal_control_plane_tasks gauge",
+    ]
+    for status, count in sorted((snapshot.get("tasks_by_status") or {}).items()):
+        lines.append(
+            f'yukinal_control_plane_tasks{{status="{_prometheus_label(str(status))}"}} {int(count)}'
+        )
+    lines.extend(
+        [
+            "# HELP yukinal_control_plane_approvals Current approvals grouped by state.",
+            "# TYPE yukinal_control_plane_approvals gauge",
+        ]
+    )
+    for state, count in sorted((snapshot.get("approvals_by_state") or {}).items()):
+        lines.append(
+            f'yukinal_control_plane_approvals{{state="{_prometheus_label(str(state))}"}} {int(count)}'
+        )
+    lines.extend(
+        [
+            "# HELP yukinal_control_plane_pending_approvals Approvals currently waiting for a decision.",
+            "# TYPE yukinal_control_plane_pending_approvals gauge",
+            f"yukinal_control_plane_pending_approvals {int(snapshot.get('pending_approvals', 0))}",
+        ]
+    )
+    return "\n".join(lines) + "\n"
+
+
 # Re-exported so callers do not import the model module for constants.
 __all__ = [
     "ACTIVE_TASK_STATUSES",

@@ -33,4 +33,12 @@ test("mock memory honours expiry, version links and proposal provenance", () => 
   assert.ok(list({ scope: "global" }).some((item) => item.id === lasting.id));
   // The RPC surface refuses a naive instant before the mock ever stores it.
   assert.equal(IPC_SCHEMAS.agent_memory_save.params.safeParse({ scope: "global", title: "t", content: "c", expiresAt: "2030-01-01T00:00:00" }).success, false);
+
+  // Superseded active memories leave the active listing once replaced by a live successor.
+  const replaced = saved({ scope: "global", title: "旧版本", content: "旧内容" });
+  assert.ok(list({ scope: "global" }).some((item) => item.id === replaced.id));
+  const successor = saved({ scope: "global", title: "新版本", content: "新内容", supersedes: replaced.id });
+  const visibleIds = list({ scope: "global" }).map((item) => item.id);
+  assert.ok(visibleIds.includes(successor.id));
+  assert.ok(!visibleIds.includes(replaced.id), "a superseded memory must not appear alongside its live successor");
 });

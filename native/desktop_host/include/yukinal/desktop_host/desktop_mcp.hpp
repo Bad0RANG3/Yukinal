@@ -28,6 +28,10 @@ class McpSupervisor {
   // Explicit lifecycle for the settings UI.
   [[nodiscard]] nlohmann::json start(const std::string& server_id);
   [[nodiscard]] nlohmann::json stop(const std::string& server_id);
+  // Stops any live session for `server_id` without requiring the database row
+  // to still exist (used when deleting an MCP server). Returns true iff a live
+  // child session was stopped.
+  [[nodiscard]] bool stop_if_running(const std::string& server_id);
   // Read-only status of one server, in the shared `McpServerStatus` shape. Only a
   // live session has a status: a server that was never started, was stopped, or
   // whose child already exited reports `nullopt`, so the caller answers with the

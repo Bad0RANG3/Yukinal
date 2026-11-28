@@ -422,8 +422,12 @@ deliberate:
   decision only because a tenant declared it safe; there is no catalogue that
   resolves it from the MCP server the way the host's supervisor does, so the
   declaration is the whole answer.
-- **Liveness.** There is no server-initiated ping timer; a node's `last_seen_at`
-  is refreshed by its own messages, and a quiet node is noticed when its socket
-  drops.
-- **Metrics export.** `/v1/metrics` is a small JSON summary, not a Prometheus
-  exporter.
+- **Liveness.** Server-initiated WebSocket `ping`/`pong` probing is implemented
+  (configured by `YUKINAL_CONTROL_CHANNEL_PING_INTERVAL_SECONDS` and
+  `YUKINAL_CONTROL_CHANNEL_PONG_TIMEOUT_SECONDS`), closing silent peers with
+  `4408` and marking running tasks `unknown` (`node_liveness_timeout`). It has
+  been exercised in SQLite unit tests, not over a WAN/load-balanced deployment.
+- **Metrics export.** `/v1/metrics` returns a JSON summary and
+  `/v1/metrics/prometheus` exports the same counters in Prometheus text
+  exposition format (0.0.4), protected by the operator bearer token; histogram
+  latencies and per-tenant labels are not exported.

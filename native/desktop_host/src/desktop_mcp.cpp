@@ -1293,6 +1293,10 @@ nlohmann::json McpSupervisor::start(const std::string& server_id) {
   return {{"config", *row}, {"status", impl_->status_for(session)}, {"tools", nlohmann::json::array()}};
 }
 
+bool McpSupervisor::stop_if_running(const std::string& server_id) {
+  return impl_->stop_server(server_id);
+}
+
 nlohmann::json McpSupervisor::stop(const std::string& server_id) {
   const bool was_running = impl_->stop_server(server_id);
   const auto row = impl_->database->get_mcp_server(server_id);

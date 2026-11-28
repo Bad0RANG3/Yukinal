@@ -178,6 +178,9 @@ test("every event the UI subscribes to has a gate", () => {
     "terminal.data",
     "terminal.closed",
     "terminal.output_lost",
+    "server.connected",
+    "server.disconnected",
+    "server.updated",
     "server.auth_challenge",
     // 设备码流程的 user_code 在请求还没返回时就到达界面，所以它必须是订阅得到的频道。
     "mcp.oauth_device_code",

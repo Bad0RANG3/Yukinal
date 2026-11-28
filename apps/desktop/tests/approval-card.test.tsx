@@ -49,3 +49,25 @@ test("non-command calls keep complete input, unknown reasons and safe escaping",
   assert.doesNotMatch(html, /<script>/);
   assert.match(html, /本次运行批准/);
 });
+
+test("memory.propose renders a structured preview while preserving full parameters", () => {
+  const html = render({
+    ...request,
+    toolName: "memory.propose",
+    input: {
+      scope: "server",
+      title: "Nginx 上游超时约定",
+      content: "upstream_read_timeout 设为 60s",
+      expiresAt: "2030-01-01T00:00:00Z",
+      supersedes: "mem_old_1",
+    },
+    sessionGrantable: false,
+  });
+  assert.match(html, /记忆提议/);
+  assert.match(html, /Nginx 上游超时约定/);
+  assert.match(html, /当前服务器/);
+  assert.match(html, /upstream_read_timeout 设为 60s/);
+  assert.match(html, /2030-01-01T00:00:00Z/);
+  assert.match(html, /mem_old_1/);
+  assert.match(html, /全部参数/);
+});

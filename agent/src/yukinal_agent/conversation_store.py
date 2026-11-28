@@ -537,20 +537,32 @@ class ConversationStore:
                  "taskId": json.loads(row["metadata_json"]).get("taskId") or row["run_id"]} for row in rows]
 
     def _memory_scope_sql(self, server_id: str | None, scope: str | None = None,
-                          *, now: str | None = None) -> tuple[str, list[Any]]:
-        """Scope + expiry predicate shared by `list_memories` and `_knowledge_records`.
+                          *, now: str | None = None, include_superseded: bool = False) -> tuple[str, list[Any]]:
+        """Scope + expiry + active-version predicate shared by `list_memories` and `_knowledge_records`.
 
-        Expiry is filtered in SQL, not in Python: retrieval must never see an expired
-        memory, and doing it here means a new caller cannot forget the filter. An
-        expired row keeps its `knowledge_chunks` so the audit trail stays complete.
+        Expiry and supersession are filtered in SQL, not in Python: retrieval must never
+        see an expired memory or an older revision that a live successor has superseded.
+        Both expired and superseded rows keep their records on disk so the audit and
+        version trail stay complete.
         """
         where = "(m.scope = 'global' OR (m.scope = 'server' AND m.server_id = ?))" if server_id else "m.scope = 'global'"
         arguments: list[Any] = [server_id] if server_id else []
         if scope:
             where += " AND m.scope = ?"
             arguments.append(scope)
+        now_iso = now or datetime.now(UTC).isoformat()
         where += " AND (m.expires_at IS NULL OR m.expires_at > ?)"
-        arguments.append(now or datetime.now(UTC).isoformat())
+        arguments.append(now_iso)
+        if not include_superseded:
+            where += (
+                " AND NOT EXISTS ("
+                "SELECT 1 FROM saved_memories newer "
+                "WHERE newer.supersedes = m.id "
+                "AND newer.scope = m.scope AND newer.server_id = m.server_id "
+                "AND (newer.expires_at IS NULL OR newer.expires_at > ?)"
+                ")"
+            )
+            arguments.append(now_iso)
         return where, arguments
 
     def _knowledge_records(
@@ -702,7 +714,7 @@ class ConversationStore:
             by_id = {row["id"]: _memory_from_row(row) for row in rows}
             return [by_id[memory_id] for memory_id in order[:limit] if memory_id in by_id]
         rows = self._connection.execute(
-            "SELECT * FROM saved_memories m WHERE " + where + " ORDER BY m.updated_at DESC, m.id LIMIT ?",
+            "SELECT * FROM saved_memories m WHERE " + where + " ORDER BY m.updated_at DESC, m.rowid DESC LIMIT ?",
             (*arguments, limit),
         )
         return [_memory_from_row(row) for row in rows]
@@ -723,6 +735,21 @@ class ConversationStore:
         if origin not in MEMORY_ORIGINS:
             raise ValueError("memory origin must be user or model")
         expires_at = _memory_expiry(expires_at)
+        now = datetime.now(UTC).isoformat()
+        if memory_id is None and supersedes is None:
+            # Exact-content deduplication inside the same scope: saving or importing the
+            # same active memory twice updates it in place instead of creating duplicates.
+            expected_hash = self._memory_hash(title, content)
+            where, arguments = self._memory_scope_sql(server_id if scope == "server" else None, scope, now=now)
+            duplicate = self._connection.execute(
+                "SELECT m.id FROM saved_memories m "
+                "JOIN knowledge_documents d ON d.memory_id = m.id "
+                "WHERE " + where + " AND d.content_hash = ? "
+                "ORDER BY m.updated_at DESC, m.rowid DESC LIMIT 1",
+                (*arguments, expected_hash),
+            ).fetchone()
+            if duplicate is not None:
+                memory_id = duplicate["id"]
         memory_id = memory_id or "mem_" + uuid.uuid4().hex
         existing = self._connection.execute("SELECT * FROM saved_memories WHERE id = ?", (memory_id,)).fetchone()
         if existing is not None and (existing["scope"] != scope or existing["server_id"] != (server_id or "")):
@@ -735,11 +762,23 @@ class ConversationStore:
             if supersedes == memory_id:
                 raise ValueError("a memory cannot supersede itself")
             replaced = self._connection.execute(
-                "SELECT scope, server_id FROM saved_memories WHERE id = ?", (supersedes,)
+                "SELECT scope, server_id, supersedes FROM saved_memories WHERE id = ?", (supersedes,)
             ).fetchone()
             if replaced is None or replaced["scope"] != scope or replaced["server_id"] != (server_id or ""):
                 raise ValueError("superseded memory must exist in the same scope")
-        now = datetime.now(UTC).isoformat()
+            # Guard against cycles when updating an existing row's supersedes link.
+            cursor = replaced["supersedes"]
+            seen = {supersedes}
+            while cursor:
+                if cursor == memory_id:
+                    raise ValueError("memory supersedes cannot form a cycle")
+                if cursor in seen:
+                    break
+                seen.add(cursor)
+                parent = self._connection.execute(
+                    "SELECT supersedes FROM saved_memories WHERE id = ?", (cursor,)
+                ).fetchone()
+                cursor = parent["supersedes"] if parent is not None else None
         created = existing["created_at"] if existing is not None else now
         with self._connection:
             self._connection.execute(

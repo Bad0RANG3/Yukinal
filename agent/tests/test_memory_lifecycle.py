@@ -86,7 +86,23 @@ class MemoryLifecycleTest(unittest.TestCase):
                                           supersedes=original["id"], origin="model")
         self.assertEqual(revised["supersedes"], original["id"])
         self.assertEqual(revised["origin"], "model")
-        self.assertEqual(self.store.list_memories()[0]["supersedes"], original["id"])
+        # Superseded predecessor leaves active listing and model retrieval while
+        # remaining on disk for audit and version history.
+        active = self.store.list_memories()
+        self.assertEqual([memory["id"] for memory in active], [revised["id"]])
+        self.assertEqual(active[0]["supersedes"], original["id"])
+        searched = self.store.list_memories(query="连接池")
+        self.assertEqual([memory["id"] for memory in searched], [revised["id"]])
+        messages, sources = self.store.memory_context(None, "连接池")
+        self.assertIn("上限 48", str(messages))
+        self.assertNotIn("上限 32", str(messages))
+        self.assertEqual([source["id"] for source in sources], [revised["id"]])
+        stored_count = self.store._connection.execute("SELECT COUNT(*) FROM saved_memories WHERE scope = 'global'").fetchone()[0]
+        self.assertEqual(stored_count, 2)
+        with self.assertRaises(ValueError) as cycle_error:
+            self.store.save_memory(scope="global", server_id=None, title="连接池", content="回环",
+                                   memory_id=original["id"], supersedes=revised["id"])
+        self.assertEqual(str(cycle_error.exception), "memory supersedes cannot form a cycle")
         with self.assertRaises(ValueError):
             self.store.save_memory(scope="global", server_id=None, title="bad", content="bad", supersedes="mem_missing")
         with self.assertRaises(ValueError) as self_link:
@@ -98,6 +114,15 @@ class MemoryLifecycleTest(unittest.TestCase):
             self.store.save_memory(scope="server", server_id="srv_alpha", title="连接池", content="上限 64",
                                     supersedes=original["id"])
         self.assertEqual(str(error.exception), "superseded memory must exist in the same scope")
+
+    def test_exact_duplicate_save_deduplicates_in_place_within_same_scope(self) -> None:
+        first = self.store.save_memory(scope="global", server_id=None, title="巡检约定", content="先查磁盘再查日志")
+        second = self.store.save_memory(scope="global", server_id=None, title="巡检约定", content="先查磁盘再查日志")
+        self.assertEqual(second["id"], first["id"])
+        self.assertEqual(len(self.store.list_memories(scope="global")), 1)
+        # Same content in a different scope remains distinct.
+        scoped = self.store.save_memory(scope="server", server_id="srv_alpha", title="巡检约定", content="先查磁盘再查日志")
+        self.assertNotEqual(scoped["id"], first["id"])
 
     def test_origin_is_provenance_only(self) -> None:
         with self.assertRaises(ValueError):

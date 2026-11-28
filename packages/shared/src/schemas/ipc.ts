@@ -25,7 +25,13 @@
 import { z } from "zod";
 
 import type { IpcCommandMap, IpcCommandName } from "../ipc/index.js";
-import { AddServerInputSchema, ServerSchema, UpdateServerInputSchema, WorkspaceListResponseSchema } from "./server.js";
+import {
+  AddServerInputSchema,
+  ServerSchema,
+  ServerStatusSchema,
+  UpdateServerInputSchema,
+  WorkspaceListResponseSchema,
+} from "./server.js";
 import { ActivitySchema, ToolExecutionListResponseSchema } from "./activity.js";
 import { ServerSnapshotSchema } from "./collector.js";
 import { ServerServicesResponseSchema } from "./service.js";
@@ -389,21 +395,9 @@ export const AgentStatusSchema = z.strictObject({
   startedAt: z.string().min(1).nullable(),
   lastExit: SidecarExitSchema.nullable(),
   /**
-   * **Declared, but with no producer yet.**
-   *
-   * The shape is the recovery record ADR 0010 describes, and it is optional rather than
-   * nullable so a status without recovery stays byte-identical to the older fixture. But
-   * nothing in this repository emits it: `agent_status` is composed field by field by the
-   * C++ host (`native/desktop_host/src/ipc_router.cpp:9010-9037`) and that branch never
-   * sets `restart`, because the C++ host has no supervisor that could restart a sidecar
-   * (R1-desktop H-1). It was previously documented as `skip_serializing_if` "on the Rust
-   * side" — a host that no longer exists, which is how the absence went unnoticed.
-   *
-   * Kept rather than deleted: `ipc/index.ts` declares it on `AgentStatus`, and four UI
-   * call sites branch on it (`features/agent/AgentPanel.tsx:117,476`,
-   * `features/agent/AgentNotices.tsx:32`, `features/settings/RuntimeSettings.tsx:92-95`).
-   * Removing the field would delete those branches instead of the missing producer, so the
-   * field stays and the day a supervisor lands it has a contract to fill.
+   * Bounded automatic restart record populated by the C++ sidecar supervisor
+   * (`native/desktop_host/src/sidecar.cpp` / `ipc_router.cpp`) after an unexpected
+   * sidecar exit. Optional so a clean, un-restarted status omits the field.
    */
   restart: RestartRecordSchema.optional(),
 });
@@ -1021,6 +1015,22 @@ export const EVENT_SCHEMAS = {
    */
   "terminal.output_lost": z.strictObject({
     missedEvents: z.number().int().nonnegative(),
+  }),
+  "server.connected": z.strictObject({
+    serverId: IpcServerIdSchema,
+    status: z.literal("connected"),
+    at: z.string().min(1).max(80),
+  }),
+  "server.disconnected": z.strictObject({
+    serverId: IpcServerIdSchema,
+    reason: z.enum(["user", "transport", "keepalive", "error"]),
+    at: z.string().min(1).max(80),
+  }),
+  "server.updated": z.strictObject({
+    serverId: IpcServerIdSchema,
+    status: ServerStatusSchema,
+    capabilitiesChanged: z.boolean(),
+    at: z.string().min(1).max(80),
   }),
   "server.auth_challenge": z.strictObject({
     authId: z.string().trim().min(1).max(256),

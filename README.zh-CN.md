@@ -124,16 +124,16 @@ Token 用量在按钮旁展开，不挤动状态行；模型与设置菜单受�
 | 主机密钥校验（`known_hosts`、SHA-256 pin 或 Host CA + KRL） | ✅ 已实现 |
 | 代理路由（HTTP/HTTPS CONNECT、SOCKS5/SOCKS5H）与 bypass 规则 | ✅ 已实现 |
 | 有界 SFTP 列举/元数据/读取/写入/备份、守卫式原子替换 | ✅ 已实现 |
-| C++ 桌面宿主：窗口、IPC 路由、SQLite、凭据、审批 | ✅ 已实现 |
+| C++ 桌面宿主：窗口、IPC 路由、SQLite、凭据、审批 | ✅ 已实现 · 含 sidecar 有界自动重启监督（`agent_status.restart`）、删除 MCP 时停止运行中进程，以及实时事件推送（`activity.created`、`server.*`、`terminal.output_lost`） |
 | Python Agent：LangGraph 循环、Tool Registry、策略、脱敏审计 | ✅ 已实现 · 部分验收通过；真实多目标长时覆盖仍待补齐，见[交付与发布](./docs/release.md) |
 | 长任务（goal 循环）：准入判定、中途复核、进度停滞收束 | ⚠️ 部分实现 · 准入以 host 声明的 `taskBudget` 为权威（`maxRunMs ≥ 10min` 或 `maxSteps ≥ 40`），无预算时回退提示词正则；`mode`/`toolAccess`/无工具回合先于任何预算否决；每次准入把 `sustainedGoal`/`source`/`declaredBudget` 写成 `agent.admitted` 审计事件。`goal` 模式默认**无**工具调用/模型轮次上限（只有总时长与输出字节）；逐轮复核解析失败会先做一次有界修复重试 |
 | MCP 客户端（stdio + Streamable HTTP），默认需要审批 | ✅ 已实现 |
 | 模型工厂：OpenAI 兼容、Anthropic、Gemini | ✅ 已实现 |
 | 本地 RAG 知识索引与显式记忆 hybrid 检索 | ✅ 已实现 · 适用于小型 curated 语料；无神经 embedding 或 ANN 索引 |
-| 记忆作用域与写入 | ⚠️ 部分实现 · 作用域仍是 `global`/`server`（无 tenant/user 维度）；模型可经 `memory.search`（只读）与 `memory.propose`（write，逐次人工审批后才入库，`origin=model`）参与，`agent.memory.*` RPC 仍是操作员通道；支持 `expiresAt` 过期（SQL 侧过滤，过期行保留供审计）与 `supersedes` 版本链；无自动去重与冲突消解 |
+| 记忆作用域与写入 | ⚠️ 部分实现 · 作用域仍是 `global`/`server`（无 tenant/user 维度）；模型可经 `memory.search`（只读）与 `memory.propose`（write，逐次人工审批后才入库、带结构化审批预览，`origin=model`）参与，`agent.memory.*` RPC 仍是操作员通道；`expiresAt` 过期与 `supersedes` 活跃版本均在 SQL 侧过滤（过期和被替代行保留供审计），同作用域完全相同内容自动原地去重，桌面记忆库界面支持有效期、来源标记与版本替代保存 |
 | 检查点恢复（`turn:<digest>` 定位、跨重启续挂起审批） | ✅ 已实现 · 显式注入严格 msgpack 反序列化；Windows 目录与库文件按当前用户独占 DACL；`budget_binding` 不含逐轮推断的输出预算 |
 | 持久审批：逐次调用指纹绑定与有效期 | ✅ 已实现 |
-| 控制平面：租户、节点、任务、审批、策略、审计 | ✅ 已实现（SQLite 验证） |
+| 控制平面：租户、节点、任务、审批、策略、审计 | ✅ 已实现（SQLite 验证） · 含节点 WebSocket 心跳 `ping`/`pong` 超时探测与 `/v1/metrics/prometheus` 指标导出 |
 | 任务/计划持久恢复 | ✅ 已验证保存、桌面重启恢复及 `plan.step_result` 步骤结算；2.1.0 另由真实目标上的完整闭环验证（证据 → 方案 → 审批 → 执行 → 验证 → 计划完成）；真实多目标长时覆盖仍待补齐 |
 | 决策摘要与计划审批 | ✅ 已实现 · Agent 可记录证据/结论/决策摘要，发布方案后停在等待用户，选择方案即批准计划并由界面续跑 |
 | 免审批固定读（`read_probe`） | ✅ 已实现 · 命令文本来自共享工具目录并编译进 C++，模型不提供 shell 文本 |

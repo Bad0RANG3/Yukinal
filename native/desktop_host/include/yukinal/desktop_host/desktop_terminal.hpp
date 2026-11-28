@@ -1,12 +1,15 @@
 #pragma once
 
 #include <chrono>
+#include <condition_variable>
 #include <cstddef>
 #include <cstdint>
+#include <deque>
 #include <functional>
 #include <iterator>
 #include <map>
 #include <memory>
+#include <mutex>
 #include <nlohmann/json.hpp>
 #include <optional>
 #include <string>
@@ -109,6 +112,116 @@ class AuthChallenges {
  private:
   std::map<std::string, Entry> entries_;
   std::uint64_t sequence_ = 0;
+};
+
+// Bounded broadcast queue for terminal output frames (`terminal.data`) and
+// ordered lifecycle frames (`terminal.opened`, `terminal.closed`).
+//
+// When remote output arrives faster than the UI sink drains it, excess
+// `terminal.data` frames are dropped once `max_data_frames` are already queued
+// and the dropped count is coalesced into a `terminal.output_lost` event rather
+// than blocking the PTY reader or growing memory without bound. Lifecycle frames
+// are never dropped so a session never loses its open/close boundary under load.
+class TerminalOutputQueue {
+ public:
+  enum class Kind { Event, OutputLost };
+
+  struct Item {
+    Kind kind = Kind::Event;
+    std::string event;
+    nlohmann::json payload;
+    std::uint64_t missed_events = 0;
+  };
+
+  static constexpr std::size_t kDefaultCapacity = 512;
+
+  explicit TerminalOutputQueue(std::size_t capacity = kDefaultCapacity)
+      : capacity_(capacity > 0 ? capacity : 1) {}
+
+  // Enqueues one `terminal.data` frame. Returns false and increments the lost
+  // frame counter when the queue already holds `capacity_` data frames.
+  bool push_data(const std::string& session_id, std::string data) {
+    {
+      std::lock_guard lock(mutex_);
+      if (closed_) return false;
+      if (queued_data_frames_ >= capacity_) {
+        ++missed_events_;
+        cv_.notify_one();
+        return false;
+      }
+      queue_.push_back(QueuedEntry{
+          true, "terminal.data", {{"terminalSessionId", session_id}, {"data", std::move(data)}}});
+      ++queued_data_frames_;
+    }
+    cv_.notify_one();
+    return true;
+  }
+
+  // Enqueues an ordered lifecycle event (`terminal.opened` / `terminal.closed`)
+  // without ever dropping it on backpressure.
+  void push_lifecycle(std::string event, nlohmann::json payload) {
+    {
+      std::lock_guard lock(mutex_);
+      if (closed_) return;
+      queue_.push_back(QueuedEntry{false, std::move(event), std::move(payload)});
+    }
+    cv_.notify_one();
+  }
+
+  // Records externally dropped output frames (for example an oversized PTY line
+  // that exceeded the per-frame limit) so the UI still receives `terminal.output_lost`.
+  void record_dropped(std::uint64_t count = 1) {
+    if (count == 0) return;
+    {
+      std::lock_guard lock(mutex_);
+      if (closed_) return;
+      missed_events_ += count;
+    }
+    cv_.notify_one();
+  }
+
+  // Blocks until the next item is ready, or returns `std::nullopt` once closed
+  // and completely drained. Coalesced `OutputLost` notices are emitted ahead of
+  // subsequent queued frames so the user sees the gap immediately.
+  [[nodiscard]] std::optional<Item> pop() {
+    std::unique_lock lock(mutex_);
+    cv_.wait(lock, [this] { return closed_ || missed_events_ > 0 || !queue_.empty(); });
+    if (missed_events_ > 0) {
+      const auto missed = missed_events_;
+      missed_events_ = 0;
+      return Item{Kind::OutputLost, "terminal.output_lost", {{"missedEvents", missed}}, missed};
+    }
+    if (queue_.empty()) return std::nullopt;
+    auto next = std::move(queue_.front());
+    queue_.pop_front();
+    if (next.is_data && queued_data_frames_ > 0) --queued_data_frames_;
+    return Item{Kind::Event, std::move(next.event), std::move(next.payload), 0};
+  }
+
+  void close() {
+    {
+      std::lock_guard lock(mutex_);
+      closed_ = true;
+    }
+    cv_.notify_all();
+  }
+
+  [[nodiscard]] std::size_t capacity() const noexcept { return capacity_; }
+
+ private:
+  struct QueuedEntry {
+    bool is_data = false;
+    std::string event;
+    nlohmann::json payload;
+  };
+
+  const std::size_t capacity_;
+  std::mutex mutex_;
+  std::condition_variable cv_;
+  std::deque<QueuedEntry> queue_;
+  std::size_t queued_data_frames_ = 0;
+  std::uint64_t missed_events_ = 0;
+  bool closed_ = false;
 };
 
 // Owns the SSH PTY children backing the UI terminal. Each session spawns the

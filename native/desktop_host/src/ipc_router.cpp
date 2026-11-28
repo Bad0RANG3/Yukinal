@@ -6902,17 +6902,35 @@ void IpcRouter::set_native_window(void* window) {
   native_window_ = window;
 }
 
-void IpcRouter::emit_local_drop(std::vector<std::filesystem::path> paths) {
-  const auto registration = local_paths_.register_paths(paths);
+void IpcRouter::emit_event(const std::string& event, const nlohmann::json& payload) {
   std::function<void(const std::string&, const nlohmann::json&)> sink;
   {
     std::lock_guard lock(mutex_);
     sink = event_sink_;
   }
   if (!sink) return;
-  sink("file.local_dropped",
-       {{"handles", local_handles_json(registration.handles)},
-        {"rejectedCount", registration.rejected}});
+  try {
+    sink(event, payload);
+  } catch (...) {
+    // Event delivery is best-effort and must never undo a committed write.
+  }
+}
+
+void IpcRouter::emit_recorded_activity(const std::string& activity_id) {
+  if (database_ == nullptr || activity_id.empty()) return;
+  try {
+    const auto activity = database_->get_activity(activity_id);
+    if (activity.has_value()) emit_event("activity.created", *activity);
+  } catch (...) {
+    // Activity rows are already durable; a read failure must not break the caller.
+  }
+}
+
+void IpcRouter::emit_local_drop(std::vector<std::filesystem::path> paths) {
+  const auto registration = local_paths_.register_paths(paths);
+  emit_event("file.local_dropped",
+             {{"handles", local_handles_json(registration.handles)},
+              {"rejectedCount", registration.rejected}});
 }
 
 std::shared_ptr<RemoteDragProbe> IpcRouter::ensure_remote_drag_probe() {
@@ -7746,11 +7764,13 @@ IpcReply IpcRouter::invoke(const std::string& method, nlohmann::json params) {
       normalized_items.push_back({{"id", *item_id}, {"kind", kind}});
     }
     try {
+      const auto audit_id = next_id("retention");
       auto result = database_->investigation_retention_prune(
-          *task_id, cutoff, normalized_items, next_id("retention"), iso8601_now());
+          *task_id, cutoff, normalized_items, audit_id, iso8601_now());
       if (!result.has_value()) {
         return failure("NOT_FOUND", "The investigation task was not found");
       }
+      emit_recorded_activity(audit_id);
       return {true, {{"result", std::move(*result)}}};
     } catch (const std::invalid_argument& invalid) {
       return failure("INVALID_PARAMS", invalid.what());
@@ -9093,14 +9113,21 @@ IpcReply IpcRouter::server_command(const std::string& method,
       return failure("INVALID_PARAMS", "server_delete serverId is invalid");
     }
     std::optional<std::string> identity_id;
+    const auto activity_id = next_id("act");
+    const auto deleted_at = iso8601_now();
     try {
-      identity_id = database_->delete_server(server_id, next_id("act"), iso8601_now());
+      identity_id = database_->delete_server(server_id, activity_id, deleted_at);
     } catch (const std::exception& error) {
       if (std::string_view(error.what()) == "Server was not found") {
         return failure("NOT_FOUND", "The server was not found");
       }
       return failure("STORAGE_ERROR", "The local server database could not delete the server");
     }
+    emit_recorded_activity(activity_id);
+    emit_event("server.updated", {{"serverId", server_id},
+                                  {"status", "disconnected"},
+                                  {"capabilitiesChanged", false},
+                                  {"at", deleted_at}});
     if (identity_id.has_value() && !identity_id->empty()) {
       try {
         const auto references = database_->delete_identity_if_unshared(*identity_id, server_id);
@@ -9261,9 +9288,10 @@ IpcReply IpcRouter::server_command(const std::string& method,
     connection.erase("hostCertificateAuthority");
   }
 
+  const auto activity_id = next_id("act");
   try {
-    if (add) database_->add_server(server, new_identity, next_id("act"));
-    else (void)database_->update_server(server, new_identity, next_id("act"));
+    if (add) database_->add_server(server, new_identity, activity_id);
+    else (void)database_->update_server(server, new_identity, activity_id);
   } catch (const std::exception&) {
     std::string cleanup_error;
     const bool cleaned = clean_credential_references(
@@ -9272,6 +9300,11 @@ IpcReply IpcRouter::server_command(const std::string& method,
         ? "The local database could not save the server"
         : "The server was not saved and staged credentials could not be queued for cleanup");
   }
+  emit_recorded_activity(activity_id);
+  emit_event("server.updated", {{"serverId", server_id},
+                                {"status", server.value("status", std::string("disconnected"))},
+                                {"capabilitiesChanged", false},
+                                {"at", timestamp}});
 
   if (!add && authentication_present) {
     if (!old_identity_id.empty() && old_identity_id != selected_identity_id) {
@@ -9749,15 +9782,19 @@ IpcReply IpcRouter::connection_command(const std::string& method,
 
   if (method == "server_disconnect") {
     // Idempotent: a stale UI may ask to disconnect twice.
+    const auto now = iso8601_now();
+    const auto activity_id = next_id("act");
     try {
-      const auto now = iso8601_now();
       database_->set_server_status(server_id, "disconnected", now);
-      database_->record_connection_activity(next_id("act"), server_id, "已断开服务器",
+      database_->record_connection_activity(activity_id, server_id, "已断开服务器",
                                             std::nullopt, "success", now);
     } catch (...) {
       return failure("STORAGE_ERROR",
                      "The local server database could not update the connection state");
     }
+    emit_recorded_activity(activity_id);
+    emit_event("server.disconnected",
+               {{"serverId", server_id}, {"reason", "user"}, {"at", now}});
     return {true, nlohmann::json::object()};
   }
 
@@ -9770,24 +9807,38 @@ IpcReply IpcRouter::connection_command(const std::string& method,
   const auto now = iso8601_now();
   if (!result.error_code.empty()) {
     const auto message = result.error_message.empty() ? result.error_code : result.error_message;
+    const auto activity_id = next_id("act");
+    bool recorded = false;
     try {
       database_->set_server_status(server_id, "error", now);
-      database_->record_connection_activity(next_id("act"), server_id, "连接服务器失败",
+      database_->record_connection_activity(activity_id, server_id, "连接服务器失败",
                                             message, "failure", now);
+      recorded = true;
     } catch (...) {
       // The connection error is the answer the user needs; a failed status write
       // must not replace it.
     }
+    if (recorded) {
+      emit_recorded_activity(activity_id);
+      emit_event("server.updated", {{"serverId", server_id},
+                                    {"status", "error"},
+                                    {"capabilitiesChanged", false},
+                                    {"at", now}});
+    }
     return ssh_failure(result);
   }
+  const auto activity_id = next_id("act");
   try {
     database_->set_server_status(server_id, "connected", now);
-    database_->record_connection_activity(next_id("act"), server_id, "已连接服务器", std::nullopt,
+    database_->record_connection_activity(activity_id, server_id, "已连接服务器", std::nullopt,
                                           "success", now);
   } catch (...) {
     return failure("STORAGE_ERROR",
                    "The local server database could not update the connection state");
   }
+  emit_recorded_activity(activity_id);
+  emit_event("server.connected",
+             {{"serverId", server_id}, {"status", "connected"}, {"at", now}});
   return {true, {{"status", "connected"}}};
 }
 
@@ -10036,6 +10087,13 @@ IpcReply IpcRouter::agent_command(const std::string& method, const nlohmann::jso
           {"signal", status.last_exit->signal.empty() ? nlohmann::json(nullptr)
                                                        : nlohmann::json(status.last_exit->signal)},
           {"at", status.last_exit->at}};
+    }
+    if (status.restart.has_value()) {
+      response["restart"] = {
+          {"attempt", status.restart->attempt},
+          {"maxAttempts", status.restart->max_attempts},
+          {"exhausted", status.restart->exhausted},
+          {"at", status.restart->at}};
     }
     return {true, std::move(response)};
   }
@@ -10697,6 +10755,25 @@ IpcReply IpcRouter::mcp_command(const std::string& method, const nlohmann::json&
   try {
     auto removed = database_->delete_mcp_server(server_id);
     if (!removed.has_value()) return failure("NOT_FOUND", "The MCP server was not found");
+    // Cancel any in-flight OAuth flow and stop any running child session so
+    // deleting a server never leaves an orphaned process or polling loop behind.
+    {
+      std::shared_ptr<std::atomic<bool>> cancel;
+      {
+        std::lock_guard lock(oauth_flows_mutex_);
+        const auto found = oauth_flows_.find(server_id);
+        if (found != oauth_flows_.end()) cancel = found->second;
+      }
+      if (cancel != nullptr) cancel->store(true);
+    }
+    bool stopped = false;
+    if (mcp_ != nullptr) {
+      try {
+        stopped = mcp_->stop_if_running(server_id);
+      } catch (...) {
+        stopped = false;
+      }
+    }
     std::vector<std::string> references;
     for (const auto& header : removed->value("httpAuthHeaders", nlohmann::json::array())) {
       if (header.is_object() && header.contains("credentialRef") &&
@@ -10714,7 +10791,7 @@ IpcReply IpcRouter::mcp_command(const std::string& method, const nlohmann::json&
     }
     std::string cleanup_error;
     (void)clean_credential_references(database_, *credentials_, references, cleanup_error);
-    return {true, {{"deleted", true}, {"stopped", false}}};
+    return {true, {{"deleted", true}, {"stopped", stopped}}};
   } catch (...) {
     return failure("STORAGE_ERROR", "The local MCP database could not delete the server");
   }

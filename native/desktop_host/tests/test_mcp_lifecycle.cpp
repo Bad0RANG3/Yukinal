@@ -1,6 +1,7 @@
 #include "yukinal/desktop_host/credential_store.hpp"
 #include "yukinal/desktop_host/database.hpp"
 #include "yukinal/desktop_host/desktop_mcp.hpp"
+#include "yukinal/desktop_host/ipc_router.hpp"
 
 #include <chrono>
 #include <filesystem>
@@ -307,6 +308,30 @@ void exited_child_can_restart(const std::filesystem::path& executable) {
   check(count(control / "exited") == 2, "the exited session's threads were not cleaned up");
 }
 
+void delete_stops_running_server_through_router(const std::filesystem::path& executable) {
+  World world(executable);
+  const auto control = world.add("deleteme", true);
+  yukinal::desktop_host::IpcRouter router(&world.database, &world.credentials);
+
+  const auto started = router.invoke("mcp_server_start", {{"serverId", "deleteme"}});
+  check(started.ok && started.value.at("status").at("running") == true,
+        "mcp_server_start through router must launch the fixture server");
+  check(count(control / "started") == 1, "fixture should have started once");
+
+  const auto deleted = router.invoke("mcp_server_delete", {{"serverId", "deleteme"}});
+  check(deleted.ok && deleted.value.at("deleted") == true && deleted.value.at("stopped") == true,
+        "mcp_server_delete must stop a running server and report stopped=true");
+  check(wait_until([&] { return count(control / "exited") == 1; }),
+        "deleting a running MCP server must terminate its child process");
+
+  // Deleting an idle (never-started) server reports stopped=false.
+  (void)world.add("idle-delete", true);
+  const auto deleted_idle = router.invoke("mcp_server_delete", {{"serverId", "idle-delete"}});
+  check(deleted_idle.ok && deleted_idle.value.at("deleted") == true &&
+            deleted_idle.value.at("stopped") == false,
+        "mcp_server_delete on an idle server must report stopped=false");
+}
+
 }  // namespace
 
 int main(int argc, char** argv) {
@@ -320,6 +345,7 @@ int main(int argc, char** argv) {
     stop_during_start(executable);
     restart_waits_for_stop_cleanup(executable);
     exited_child_can_restart(executable);
+    delete_stops_running_server_through_router(executable);
     std::cout << "6 MCP lifecycle tests passed\n";
     return 0;
   } catch (const std::exception& error) {

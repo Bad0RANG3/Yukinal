@@ -336,6 +336,17 @@ class ControlPlaneTests(ControlPlaneTestCase):
         self.assertEqual(metrics["tasks_by_status"], {"running": 1})
         self.assertEqual(metrics["pending_approvals"], 1)
 
+        prom = self.client.get("/v1/metrics/prometheus", headers=AUTH)
+        self.assertEqual(prom.status_code, 200)
+        self.assertIn("text/plain", prom.headers["content-type"])
+        self.assertIn("yukinal_control_plane_tenants 1", prom.text)
+        self.assertIn("yukinal_control_plane_nodes 1", prom.text)
+        self.assertIn('yukinal_control_plane_tasks{status="running"} 1', prom.text)
+        self.assertIn('yukinal_control_plane_approvals{state="pending"} 1', prom.text)
+        self.assertIn("yukinal_control_plane_pending_approvals 1", prom.text)
+        # Unauthenticated Prometheus scrapes are refused just like JSON metrics.
+        self.assertEqual(self.client.get("/v1/metrics/prometheus").status_code, 401)
+
     # ── migration ────────────────────────────────────────────────────────────
 
     def test_migration_matches_the_models(self) -> None:

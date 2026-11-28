@@ -650,6 +650,123 @@ for line in sys.stdin:
     timeout_client.stop(std::chrono::milliseconds(5000));
   }
 
+  // SUPERVISED AUTO-RESTART TEST: an unexpected sidecar crash must trigger
+  // bounded automatic recovery and surface `restart` (`attempt`, `maxAttempts`,
+  // `exhausted`, `at`) alongside `lastExit`, while an explicit stop never restarts.
+  {
+    const auto crash_source = directory.path / "crash-probe";
+    std::filesystem::create_directories(crash_source / "yukinal_agent");
+    std::ofstream(crash_source / "yukinal_agent" / "__init__.py").close();
+    const auto fail_flag = crash_source / "fail_handshake.flag";
+    {
+      std::ofstream script(crash_source / "yukinal_agent" / "sidecar.py");
+      script << R"PY(import json
+import os
+import sys
+
+fail_flag = os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "fail_handshake.flag")
+
+def send(frame):
+    print(json.dumps(frame, separators=(",", ":")), flush=True)
+
+for line in sys.stdin:
+    frame = json.loads(line)
+    method = frame.get("method")
+    if method == "initialize":
+        if os.path.exists(fail_flag):
+            sys.exit(7)
+        send({"jsonrpc": "2.0", "id": frame["id"],
+              "result": {"protocolVersion": "1.0", "agentVersion": "crash-probe"}})
+    elif method == "tools.list":
+        send({"jsonrpc": "2.0", "id": frame["id"], "result": {"tools": []}})
+    elif method == "test.ping":
+        send({"jsonrpc": "2.0", "id": frame["id"], "result": {"pid": os.getpid()}})
+    elif method == "test.crash":
+        os._exit(9)
+    else:
+        send({"jsonrpc": "2.0", "id": frame["id"],
+              "error": {"code": -32601, "message": "unknown crash-probe method"}})
+)PY";
+    }
+
+    SidecarClient supervised;
+    SidecarLaunch supervised_launch;
+    supervised_launch.program = argv[1];
+    supervised_launch.args = {"-m", "yukinal_agent.sidecar"};
+    supervised_launch.environment.push_back({"PYTHONPATH", crash_source.string()});
+    supervised_launch.data_directory = (crash_source / "data").string();
+    supervised_launch.client_version = "crash-probe";
+    supervised.configure(supervised_launch);
+    yukinal::desktop_host::SidecarRestartPolicy policy;
+    policy.enabled = true;
+    policy.max_attempts = 2;
+    policy.initial_backoff = std::chrono::milliseconds(30);
+    policy.max_backoff = std::chrono::milliseconds(60);
+    policy.stability_window = std::chrono::minutes(10);
+    policy.start_timeout = std::chrono::milliseconds(10000);
+    supervised.set_restart_policy(policy);
+
+    const auto first = supervised.start(std::chrono::milliseconds(15000));
+    check(first.pid != 0, "supervised sidecar should start cleanly");
+    check(!supervised.status().restart.has_value(),
+          "a freshly started sidecar must not carry a restart record");
+
+    // Trigger an unexpected crash. The pending RPC must fail cleanly and the
+    // supervisor must bring back a new child with attempt=1, exhausted=false.
+    bool crashed = false;
+    try {
+      (void)supervised.request("test.crash", json::object(), std::chrono::milliseconds(5000));
+    } catch (const std::exception&) {
+      crashed = true;
+    }
+    check(crashed, "a crashing sidecar must fail its in-flight request");
+
+    bool recovered = false;
+    const auto recover_deadline = std::chrono::steady_clock::now() + std::chrono::seconds(15);
+    while (std::chrono::steady_clock::now() < recover_deadline) {
+      const auto current = supervised.status();
+      if (current.running && current.pid.has_value() && *current.pid != first.pid &&
+          current.restart.has_value() && current.restart->attempt == 1 &&
+          current.restart->max_attempts == 2 && !current.restart->exhausted &&
+          current.last_exit.has_value()) {
+        recovered = true;
+        break;
+      }
+      std::this_thread::sleep_for(std::chrono::milliseconds(40));
+    }
+    check(recovered, "supervisor must automatically restart a crashed sidecar and record attempt 1/2");
+    const auto pong = supervised.request("test.ping", json::object(), std::chrono::milliseconds(5000));
+    check(pong.at("pid").get<std::uint32_t>() != first.pid,
+          "recovered sidecar must answer requests from its replacement process");
+
+    // Now make subsequent handshakes fail and crash again: attempt 2 fails and
+    // marks the recovery budget exhausted so automatic retries stop.
+    { std::ofstream flag(fail_flag); flag << "1"; }
+    try {
+      (void)supervised.request("test.crash", json::object(), std::chrono::milliseconds(5000));
+    } catch (const std::exception&) {
+    }
+    bool exhausted = false;
+    const auto exhaust_deadline = std::chrono::steady_clock::now() + std::chrono::seconds(15);
+    while (std::chrono::steady_clock::now() < exhaust_deadline) {
+      const auto current = supervised.status();
+      if (!current.running && current.restart.has_value() &&
+          current.restart->attempt == 2 && current.restart->max_attempts == 2 &&
+          current.restart->exhausted) {
+        exhausted = true;
+        break;
+      }
+      std::this_thread::sleep_for(std::chrono::milliseconds(40));
+    }
+    check(exhausted, "exhausting restart attempts must record exhausted=true and stop retrying");
+
+    // Manual stop clears the restart state and leaves the sidecar stopped.
+    supervised.stop(std::chrono::milliseconds(5000));
+    const auto stopped_status = supervised.status();
+    check(!stopped_status.running && !stopped_status.restart.has_value(),
+          "explicit stop must clear restart state and prevent further auto-restarts");
+  }
+
   return 0;
 }
 

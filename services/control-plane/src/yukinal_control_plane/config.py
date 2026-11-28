@@ -32,6 +32,11 @@ class Settings(BaseSettings):
     # Explicit, local-only opt-out of the token requirement. Never enable this in
     # a deployment reachable from a network.
     allow_anonymous: bool = False
+    # Server-initiated WebSocket liveness probe cadence. Set to 0 to disable.
+    channel_ping_interval_seconds: float = 30.0
+    # How long a silent node has to answer a server `ping` before the channel is
+    # closed as dead and its running tasks are marked `unknown`.
+    channel_pong_timeout_seconds: float = 15.0
 
     def require_token(self) -> str | None:
         """Return the configured token, or ``None`` when anonymous access is on.

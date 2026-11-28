@@ -101,6 +101,8 @@ class IpcRouter {
 
  private:
   IpcReply subscribe(const nlohmann::json& params, bool add);
+  void emit_event(const std::string& event, const nlohmann::json& payload);
+  void emit_recorded_activity(const std::string& activity_id);
   IpcReply server_command(const std::string& method,
                           const nlohmann::json& params);
   IpcReply network_proxy_command(const std::string& method,

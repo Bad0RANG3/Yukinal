@@ -6141,6 +6141,88 @@ int main(int argc, char** argv) {
           "the registry should be empty once every challenge was answered or dropped");
   }
 
+  // Bounded terminal output queue: backpressure drops excess `terminal.data` frames,
+  // coalesces their count into `terminal.output_lost`, and never drops lifecycle frames.
+  {
+    using yukinal::desktop_host::TerminalOutputQueue;
+    TerminalOutputQueue queue(2);
+    check(queue.push_data("term_1", "a"), "first data frame within capacity must enqueue");
+    check(queue.push_data("term_1", "b"), "second data frame within capacity must enqueue");
+    check(!queue.push_data("term_1", "c"), "overflow data frame must be dropped");
+    check(!queue.push_data("term_1", "d"), "second overflow data frame must be dropped");
+    queue.record_dropped(3);
+    queue.push_lifecycle("terminal.closed", {{"terminalSessionId", "term_1"}, {"exitCode", 0}});
+    queue.close();
+
+    const auto first = queue.pop();
+    check(first.has_value() && first->kind == TerminalOutputQueue::Kind::OutputLost &&
+              first->event == "terminal.output_lost" &&
+              first->payload == nlohmann::json{{"missedEvents", 5}},
+          "coalesced terminal.output_lost must report overflow plus externally dropped frames");
+    const auto second = queue.pop();
+    check(second.has_value() && second->event == "terminal.data" &&
+              second->payload.at("data") == "a",
+          "queued data frames must preserve FIFO order after output_lost");
+    const auto third = queue.pop();
+    check(third.has_value() && third->event == "terminal.data" &&
+              third->payload.at("data") == "b",
+          "second queued data frame must survive overflow");
+    const auto fourth = queue.pop();
+    check(fourth.has_value() && fourth->event == "terminal.closed" &&
+              fourth->payload.at("exitCode") == 0,
+          "lifecycle frames must never be dropped when output overflows");
+    check(!queue.pop().has_value(), "a closed and drained queue must terminate");
+  }
+
+  // Host event producers: server_add/update/disconnect/delete emit `activity.created`,
+  // `server.updated`, and `server.disconnected` with schema-valid payloads.
+  {
+    TemporaryDatabaseDirectory events_dir;
+    DesktopDatabase events_db(events_dir.path);
+    MemoryCredentialStore events_creds;
+    yukinal::desktop_host::IpcRouter events_router(&events_db, &events_creds);
+    std::vector<std::pair<std::string, nlohmann::json>> emitted;
+    events_router.set_event_sink([&emitted](const std::string& name, const nlohmann::json& payload) {
+      emitted.emplace_back(name, payload);
+    });
+
+    const auto added = events_router.invoke(
+        "server_add",
+        {{"name", "edge-events"},
+         {"host", "10.1.0.2"},
+         {"port", 22},
+         {"username", "ops"},
+         {"environment", "staging"},
+         {"authentication", {{"method", "agent"}}}});
+    check(added.ok, "server_add should succeed for event-emission test");
+    const auto server_id = added.value.at("server").at("id").get<std::string>();
+    check(emitted.size() == 2 && emitted[0].first == "activity.created" &&
+              emitted[0].second.at("serverId") == server_id &&
+              emitted[0].second.at("type") == "configuration" &&
+              emitted[1].first == "server.updated" &&
+              emitted[1].second.at("serverId") == server_id &&
+              emitted[1].second.at("status") == "disconnected",
+          "server_add must emit activity.created and server.updated");
+
+    emitted.clear();
+    const auto disconnected = events_router.invoke("server_disconnect", {{"serverId", server_id}});
+    check(disconnected.ok, "server_disconnect should succeed for event-emission test");
+    check(emitted.size() == 2 && emitted[0].first == "activity.created" &&
+              emitted[0].second.at("type") == "connection" &&
+              emitted[1].first == "server.disconnected" &&
+              emitted[1].second.at("serverId") == server_id &&
+              emitted[1].second.at("reason") == "user",
+          "server_disconnect must emit activity.created and server.disconnected");
+
+    emitted.clear();
+    const auto deleted = events_router.invoke("server_delete", {{"serverId", server_id}});
+    check(deleted.ok, "server_delete should succeed for event-emission test");
+    check(emitted.size() == 2 && emitted[0].first == "activity.created" &&
+              emitted[1].first == "server.updated" &&
+              emitted[1].second.at("serverId") == server_id,
+          "server_delete must emit activity.created and server.updated");
+  }
+
   sqlite3* readback = nullptr;
   const auto file = (temporary.path / "yukinal.db").string();
   check(sqlite3_open_v2(file.c_str(), &readback, SQLITE_OPEN_READONLY, nullptr) == SQLITE_OK,

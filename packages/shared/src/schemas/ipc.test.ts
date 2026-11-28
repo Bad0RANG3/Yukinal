@@ -64,10 +64,9 @@ test("the exited agent_status variant parses too", () => {
 });
 
 test("a status carrying an automatic-restart record parses, and the field stays optional", () => {
-  // The shape parses — but nothing produces it. `agent_status` is composed field by field
-  // by the C++ host, and that branch never sets `restart`; there is no supervisor in the
-  // host that could restart a sidecar. The field is kept because the UI branches on it,
-  // not because a producer exists; see the schema comment on `AgentStatusSchema.restart`.
+  // The C++ sidecar supervisor (`native/desktop_host/src/sidecar.cpp` / `ipc_router.cpp`)
+  // populates `restart` after an unexpected sidecar crash and omits it when idle or
+  // freshly started.
   //
   // Not covered by the per-command loop above: there is only one fixture per command
   // name, and `agent_status.json` is the shape an idle supervisor reports.

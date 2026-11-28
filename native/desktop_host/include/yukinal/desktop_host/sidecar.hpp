@@ -51,6 +51,22 @@ struct SidecarExitInfo {
   std::string at;
 };
 
+struct SidecarRestartPolicy {
+  bool enabled = true;
+  std::uint32_t max_attempts = 5;
+  std::chrono::milliseconds initial_backoff{250};
+  std::chrono::milliseconds max_backoff{4000};
+  std::chrono::milliseconds stability_window{60000};
+  std::chrono::milliseconds start_timeout{20000};
+};
+
+struct SidecarRestartInfo {
+  std::uint32_t attempt = 0;
+  std::uint32_t max_attempts = 0;
+  bool exhausted = false;
+  std::string at;
+};
+
 struct SidecarStartResult {
   bool already_running = false;
   std::uint32_t pid = 0;
@@ -69,6 +85,7 @@ struct SidecarStatus {
   std::string entry;
   std::optional<std::string> started_at;
   std::optional<SidecarExitInfo> last_exit;
+  std::optional<SidecarRestartInfo> restart;
 };
 
 // Owns the lifecycle of the Python Agent sidecar: process spawn, bounded NDJSON
@@ -95,6 +112,7 @@ class SidecarClient {
   SidecarClient& operator=(const SidecarClient&) = delete;
 
   void configure(SidecarLaunch launch);
+  void set_restart_policy(SidecarRestartPolicy policy);
   void set_host_handler(HostHandler handler);
   void set_notification_sink(NotificationSink sink);
 
@@ -113,6 +131,10 @@ class SidecarClient {
       std::chrono::milliseconds timeout = std::chrono::milliseconds(30000));
 
  private:
+  SidecarStartResult start_process_locked(std::chrono::milliseconds timeout,
+                                          bool preserve_last_exit);
+  void stop_process_locked(std::chrono::milliseconds timeout);
+  void supervisor_loop();
   void spawn_process(const SidecarLaunch& launch);
   bool read_stream(bool stdout_stream, std::string& chunk);
   [[nodiscard]] SidecarStartResult status_to_start_result() const;

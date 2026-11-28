@@ -13,6 +13,7 @@ server -> node
     ``assigned``  one task to run (``task`` is a task view)
     ``synced``    response to ``sync``; ``assigned`` is the task count
     ``ack``       a reported status was applied
+    ``ping``      server-initiated liveness probe; node replies with ``pong``
     ``bye``       a graceful ``close`` was recorded; ``marked`` lists the tasks
                   that became unknown
     ``error``     the message was rejected (``code``, ``message``)
@@ -26,10 +27,12 @@ node -> server
     ``status``    ``{taskId, status, outcome?, result?}``
     ``sync``      "assign me anything queued"
     ``close``     the node is shutting down; running work becomes unknown
-    ``pong``      refreshes liveness (reserved for a future server ``ping``)
+    ``pong``      refreshes liveness in answer to ``ping`` or proactively
 
-Liveness is refreshed on every node message; there is no server-side heartbeat
-timer yet, and a node that goes quiet is noticed when its socket drops.
+Liveness is refreshed on every node message. When ``ping_interval_seconds`` is
+positive, a quiet node receives a server ``ping`` and must answer within
+``pong_timeout_seconds`` or the socket is closed with ``4408`` and its running
+tasks become ``unknown`` (``node_liveness_timeout``).
 """
 
 from __future__ import annotations
@@ -48,6 +51,8 @@ logger = logging.getLogger("yukinal.control_plane.channel")
 
 # Close code used when the handshake cannot be authenticated.
 CLOSE_UNAUTHORIZED = 4401
+# Close code used when a silent node fails to answer a server liveness ping.
+CLOSE_LIVENESS_TIMEOUT = 4408
 # A node message larger than this is refused rather than buffered.
 MAX_MESSAGE_BYTES = 64 * 1024
 
@@ -55,6 +60,7 @@ MESSAGE_READY = "ready"
 MESSAGE_ASSIGNED = "assigned"
 MESSAGE_SYNCED = "synced"
 MESSAGE_ACK = "ack"
+MESSAGE_PING = "ping"
 MESSAGE_BYE = "bye"
 MESSAGE_ERROR = "error"
 
@@ -105,7 +111,11 @@ async def _authenticate(websocket: WebSocket, session_factory: async_sessionmake
 
 
 async def run_channel(
-    websocket: WebSocket, session_factory: async_sessionmaker[AsyncSession]
+    websocket: WebSocket,
+    session_factory: async_sessionmaker[AsyncSession],
+    *,
+    ping_interval_seconds: float = 0.0,
+    pong_timeout_seconds: float = 15.0,
 ) -> None:
     """Serve one node connection from handshake to disconnect."""
     try:
@@ -116,12 +126,19 @@ async def run_channel(
         return
 
     await websocket.accept()
+    disconnect_recorded = False
     try:
         ready, assigned = await _open(session_factory, node_id)
         await websocket.send_json(ready)
         for message in assigned:
             await websocket.send_json(message)
-        await _pump(websocket, session_factory, node_id)
+        disconnect_recorded = await _pump(
+            websocket,
+            session_factory,
+            node_id,
+            ping_interval_seconds=ping_interval_seconds,
+            pong_timeout_seconds=pong_timeout_seconds,
+        )
     except WebSocketDisconnect:
         pass
     except Exception:  # never let a channel error look like a clean close
@@ -130,8 +147,9 @@ async def run_channel(
         # Shielded on purpose: a server shutdown cancels this task, and running
         # exactly when the connection did *not* end cleanly is the whole point.
         # Without the shield the outcome-unknown marking would be cancelled away.
-        with anyio.CancelScope(shield=True):
-            await _record_disconnect(session_factory, node_id)
+        if not disconnect_recorded:
+            with anyio.CancelScope(shield=True):
+                await _record_disconnect(session_factory, node_id)
 
 
 async def _open(session_factory: async_sessionmaker[AsyncSession], node_id: str) -> tuple[dict, list[dict]]:
@@ -153,11 +171,54 @@ async def _open(session_factory: async_sessionmaker[AsyncSession], node_id: str)
     return ready, messages
 
 
-async def _pump(
-    websocket: WebSocket, session_factory: async_sessionmaker[AsyncSession], node_id: str
-) -> None:
-    while True:
+async def _receive_with_liveness(
+    websocket: WebSocket,
+    *,
+    ping_interval_seconds: float,
+    pong_timeout_seconds: float,
+) -> str | None:
+    """Wait for the next text frame, probing a quiet peer with ``ping`` first.
+
+    Returns ``None`` when the peer does not answer within ``pong_timeout_seconds``.
+    """
+    if ping_interval_seconds <= 0:
+        return await websocket.receive_text()
+
+    raw: str | None = None
+    with anyio.move_on_after(ping_interval_seconds) as idle_scope:
         raw = await websocket.receive_text()
+    if not idle_scope.cancelled_caught:
+        return raw
+
+    await websocket.send_json({"type": MESSAGE_PING})
+    wait_seconds = pong_timeout_seconds if pong_timeout_seconds > 0 else ping_interval_seconds
+    with anyio.move_on_after(wait_seconds) as pong_scope:
+        raw = await websocket.receive_text()
+    if pong_scope.cancelled_caught:
+        return None
+    return raw
+
+
+async def _pump(
+    websocket: WebSocket,
+    session_factory: async_sessionmaker[AsyncSession],
+    node_id: str,
+    *,
+    ping_interval_seconds: float = 0.0,
+    pong_timeout_seconds: float = 15.0,
+) -> bool:
+    while True:
+        raw = await _receive_with_liveness(
+            websocket,
+            ping_interval_seconds=ping_interval_seconds,
+            pong_timeout_seconds=pong_timeout_seconds,
+        )
+        if raw is None:
+            await _record_disconnect(
+                session_factory, node_id, reason="node_liveness_timeout"
+            )
+            await websocket.close(code=CLOSE_LIVENESS_TIMEOUT, reason="liveness timeout")
+            return True
         if len(raw.encode("utf-8")) > MAX_MESSAGE_BYTES:
             await websocket.send_json(_error("the message is too large", code="message_too_large"))
             continue
@@ -181,7 +242,7 @@ async def _pump(
             marked = await _record_disconnect(session_factory, node_id, reason="node_closed")
             await websocket.send_json({"type": MESSAGE_BYE, "marked": marked})
             await websocket.close(code=1000)
-            return
+            return True
         else:
             await websocket.send_json(
                 _error(f"unknown message type `{kind}`", code="unknown_message")

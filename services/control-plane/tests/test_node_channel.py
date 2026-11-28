@@ -226,5 +226,44 @@ class NodeChannelHandshakeTests(ControlPlaneTestCase):
         self.assertEqual(raised.exception.code, channel.CLOSE_UNAUTHORIZED)
 
 
+class NodeChannelLivenessTests(ControlPlaneTestCase):
+    def _configure_short_liveness(self) -> None:
+        self.app.state.settings.channel_ping_interval_seconds = 0.05
+        self.app.state.settings.channel_pong_timeout_seconds = 0.08
+
+    def test_quiet_node_receives_ping_and_survives_when_it_replies_pong(self) -> None:
+        self._configure_short_liveness()
+        tenant_id = self.create_tenant()
+        node_id, key = self.provision_node(tenant_id)
+
+        with self.node_socket(key, node_id) as socket:
+            self.assertEqual(socket.receive_json()["type"], channel.MESSAGE_READY)
+            # Stay silent past the ping interval; server must probe with `ping`.
+            probe = socket.receive_json()
+            self.assertEqual(probe, {"type": channel.MESSAGE_PING})
+            socket.send_json({"type": channel.MESSAGE_PONG})
+            # Connection remains healthy after answering pong.
+            socket.send_json({"type": channel.MESSAGE_SYNC})
+            self.assertEqual(socket.receive_json()["type"], channel.MESSAGE_SYNCED)
+
+    def test_unresponsive_node_is_closed_and_running_work_becomes_unknown(self) -> None:
+        self._configure_short_liveness()
+        tenant_id = self.create_tenant()
+        node_id, key = self.provision_node(tenant_id)
+        task_id = self.create_task(tenant_id, node_id)["body"]["id"]
+
+        with self.node_socket(key, node_id) as socket:
+            self.assertEqual(socket.receive_json()["assigned"], 1)
+            self.assertEqual(socket.receive_json()["task"]["id"], task_id)
+            self.assertEqual(socket.receive_json(), {"type": channel.MESSAGE_PING})
+            # Ignore the ping: server must close with CLOSE_LIVENESS_TIMEOUT.
+            with self.assertRaises(WebSocketDisconnect) as closed:
+                socket.receive_json()
+            self.assertEqual(closed.exception.code, channel.CLOSE_LIVENESS_TIMEOUT)
+
+        task = self.wait_for_task_status(tenant_id, task_id, "unknown")
+        self.assertEqual(task["outcome"], "node_liveness_timeout")
+
+
 if __name__ == "__main__":
     unittest.main()

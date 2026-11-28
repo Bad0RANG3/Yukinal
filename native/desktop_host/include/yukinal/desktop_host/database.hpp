@@ -61,6 +61,7 @@ class DesktopDatabase {
   void save_network_proxy_config(const DesktopNetworkProxyConfig& config) const;
   [[nodiscard]] nlohmann::json list_activities(
       const std::optional<std::string>& server_id, int limit) const;
+  [[nodiscard]] std::optional<nlohmann::json> get_activity(const std::string& id) const;
   [[nodiscard]] nlohmann::json list_tool_executions(
       const std::optional<std::string>& trace_id,
       const std::optional<std::string>& server_id, int limit) const;

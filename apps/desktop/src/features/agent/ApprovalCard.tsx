@@ -15,14 +15,25 @@ export function ApprovalCard({ approval, onApproval, busy, status }: {
   const input = approval.input && typeof approval.input === "object" && !Array.isArray(approval.input)
     ? approval.input as Record<string, unknown> : null;
   const command = typeof input?.command === "string" ? input.command : null;
-  const purpose = typeof input?.purpose === "string" && input.purpose.trim() ? input.purpose : approval.toolName;
+  const memoryProposal = approval.toolName === "memory.propose" && typeof input?.title === "string" && typeof input?.content === "string"
+    ? {
+        scope: input.scope === "server" ? "当前服务器" : "全局",
+        title: input.title,
+        content: input.content,
+        expiresAt: typeof input.expiresAt === "string" ? input.expiresAt : null,
+        supersedes: typeof input.supersedes === "string" ? input.supersedes : null,
+      }
+    : null;
+  const purpose = typeof input?.purpose === "string" && input.purpose.trim()
+    ? input.purpose
+    : memoryProposal ? memoryProposal.title : approval.toolName;
   const genericReason = approval.reason === `${approval.toolName} needs your approval before it can run.`;
   const facts = approval.factsSummary.map((fact) => approvalFactLabel(fact, Boolean(status)));
   const lineCount = command === null ? 0 : command.split("\n").length;
   return <div className={`approval-card${status ? " is-resolved" : " is-pending"}`} aria-busy={busy || undefined}>
     <div className="approval-heading">
       <span className="approval-icon"><Icon name="shield" size="sm" /></span>
-      <div className="approval-title"><span className="approval-caption">操作确认</span><strong>{purpose}</strong></div>
+      <div className="approval-title"><span className="approval-caption">{memoryProposal ? "记忆提议" : "操作确认"}</span><strong>{purpose}</strong></div>
       {status ? <span className="approval-resolved" role="status">{status}</span> : approval.autoApproved === true ? <span className="approval-state">自动批准</span> : <span className="approval-state">待审批</span>}
     </div>
     <div className="approval-target"><span>{targetLabel(approval.target)}</span><code>{approval.toolName}</code></div>
@@ -31,14 +42,25 @@ export function ApprovalCard({ approval, onApproval, busy, status }: {
       {facts.map((fact, index) => <li key={index}>{fact}</li>)}
     </ul> : null}
     <details key={`${approval.approvalId}:${Boolean(status)}`} className="approval-input" open={!status}>
-      <summary><span>{command === null ? "操作参数" : "执行命令"}</span>{lineCount > 1 ? <span className="approval-line-count">{lineCount} 行</span> : null}</summary>
-      {command === null
-        ? <pre className="approval-input-json">{printableContent(approval.input)}</pre>
-        : <>
+      <summary><span>{command !== null ? "执行命令" : memoryProposal ? "提议内容" : "操作参数"}</span>{lineCount > 1 ? <span className="approval-line-count">{lineCount} 行</span> : null}</summary>
+      {command !== null
+        ? <>
           <pre className="approval-input-json approval-command"><code>{command}</code></pre>
           <div className="approval-command-tools"><CopyButton text={command} label="复制命令" /></div>
           <details className="approval-parameters"><summary>全部参数</summary><pre className="approval-input-json">{printableContent(approval.input)}</pre></details>
-        </>}
+        </>
+        : memoryProposal
+          ? <>
+            <dl className="approval-memory-preview">
+              <div><dt>范围</dt><dd>{memoryProposal.scope}</dd></div>
+              <div><dt>标题</dt><dd>{memoryProposal.title}</dd></div>
+              {memoryProposal.expiresAt ? <div><dt>过期时间</dt><dd>{memoryProposal.expiresAt}</dd></div> : null}
+              {memoryProposal.supersedes ? <div><dt>替代版本</dt><dd><code>{memoryProposal.supersedes}</code></dd></div> : null}
+            </dl>
+            <pre className="approval-input-json">{memoryProposal.content}</pre>
+            <details className="approval-parameters"><summary>全部参数</summary><pre className="approval-input-json">{printableContent(approval.input)}</pre></details>
+          </>
+          : <pre className="approval-input-json">{printableContent(approval.input)}</pre>}
     </details>
     {approval.callId || approval.inputFingerprint ? <details className="approval-reference"><summary>审批标识</summary>
       {approval.callId ? <p>调用 <code>{approval.callId}</code></p> : null}

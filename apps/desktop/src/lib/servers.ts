@@ -1,6 +1,7 @@
+import { useEffect } from "react";
 import { queryOptions, useIsMutating, useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { IPC_COMMANDS } from "@yukinal/shared";
-import { callDesktop, isDesktopShell } from "./ipc.js";
+import { callDesktop, isDesktopShell, subscribeDesktop } from "./ipc.js";
 import { prepareServerSnapshot } from "./server-snapshot.js";
 
 /** Shared cache; only the persistent ServerList owns its polling timer. */
@@ -17,6 +18,19 @@ export function serverListQueryOptions({ enabled = true, poll = false }: { enabl
 }
 
 export function useServers(options: { enabled?: boolean; poll?: boolean } = {}) {
+  const queryClient = useQueryClient();
+  const enabled = options.enabled ?? true;
+  const poll = options.poll ?? false;
+  useEffect(() => {
+    if (!poll || !enabled || !isDesktopShell()) return;
+    const refresh = () => { void queryClient.invalidateQueries({ queryKey: SERVERS_QUERY_KEY }); };
+    const subscriptions = [
+      subscribeDesktop("server.connected", refresh),
+      subscribeDesktop("server.disconnected", refresh),
+      subscribeDesktop("server.updated", refresh),
+    ];
+    return () => { subscriptions.forEach((subscription) => subscription.stop()); };
+  }, [enabled, poll, queryClient]);
   return useQuery(serverListQueryOptions(options));
 }
 

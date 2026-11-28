@@ -30,12 +30,9 @@ import type { LocalFileDropEvent, TransferSnapshot } from "../types/file.js";
  * one below says why it is kept. `schemas/event-vocabulary.test.ts` pins the partition.
  */
 export const EVENT_NAMES = [
-  // 无生产者：`server_connect` / `server_disconnect` 只改数据库里的状态
-  // （`ipc_router.cpp:8837`、`:8807`），从不发事件。保留是因为宿主已经有这两个命令，
-  // 补发事件是增量改动；删掉会让将来接线变成契约破坏。
+  // 由 C++ 宿主 `ipc_router.cpp` 在服务器连接/断开/配置变更落库后发布，UI 订阅以即时刷新列表。
   "server.connected",
   "server.disconnected",
-  // 无生产者：全仓库没有任何 emit，`consistency.ts` 曾断言「Rust 在发」是错的。
   "server.updated",
   // 有生产者（C-1 的修复）：宿主在 keyboard-interactive 挑战到达时发这一帧
   // （`desktop_terminal.cpp` 的 `emit("server.auth_challenge", ...)`），UI 的挑战弹窗
@@ -62,12 +59,11 @@ export const EVENT_NAMES = [
   "terminal.opened",
   "terminal.data",
   "terminal.closed",
-  // 无生产者：`native/` 里没有 `output_lost`，终端的广播通道也没有任何 `Lagged`
-  // 处理，所以「丢帧要告知用户」这条语义目前只存在于类型和 UI 文案里。
+  // 由 C++ 宿主 `desktop_terminal.cpp` 的有界终端输出队列（`TerminalOutputQueue`）
+  // 在输出队列溢出或丢弃超长帧时发布，告知终端面板已丢失的帧数。
   "terminal.output_lost",
-  // 无生产者：宿主写入 `activity_list` 表，但从不发这条事件。UI 有 4 个订阅者
-  // （ActivityFeed / InfrastructureDashboard / ServerOverview / useWorkpageOperations），
-  // 它们各自轮询兜底，所以缺的不是消费者而是生产者。
+  // 由 C++ 宿主 `ipc_router.cpp` 在写入 `activities` 表并提交后发布，推送给
+  // ActivityFeed / InfrastructureDashboard / ServerOverview / useWorkpageOperations。
   "activity.created",
   // 原生值守调度器发布通知及操作元数据，正文留在独立巡检会话。
   "investigation.schedule_notification",

@@ -10,10 +10,17 @@ const memories: AgentMemory[] = [
 
 export function previewMemoryResponse(command: IpcCommandName, raw: unknown): unknown {
   const params = raw as Record<string, unknown>;
-  if (command === IPC_COMMANDS.agentMemoryList) return { memories: memories.filter((memory) =>
-    (!memory.expiresAt || memory.expiresAt > new Date().toISOString()) &&
-    (!params.scope || memory.scope === params.scope) && (memory.scope === "global" || memory.serverId === params.serverId) &&
-    (!params.query || `${memory.title} ${memory.content}`.toLowerCase().includes(String(params.query).toLowerCase()))) };
+  if (command === IPC_COMMANDS.agentMemoryList) {
+    const currentNow = new Date().toISOString();
+    const live = memories.filter((memory) => !memory.expiresAt || memory.expiresAt > currentNow);
+    const superseded = new Set(live.map((memory) => memory.supersedes).filter((id): id is string => Boolean(id)));
+    return {
+      memories: live.filter((memory) =>
+        !superseded.has(memory.id) &&
+        (!params.scope || memory.scope === params.scope) && (memory.scope === "global" || memory.serverId === params.serverId) &&
+        (!params.query || `${memory.title} ${memory.content}`.toLowerCase().includes(String(params.query).toLowerCase()))),
+    };
+  }
   if (command === IPC_COMMANDS.agentMemorySave) {
     const index = memories.findIndex((memory) => memory.id === params.id);
     const existing = memories[index];

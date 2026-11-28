@@ -40,6 +40,9 @@ const SUBSCRIBABLE = [
   "terminal.data",
   "terminal.closed",
   "terminal.output_lost",
+  "server.connected",
+  "server.disconnected",
+  "server.updated",
   "server.auth_challenge",
   "mcp.oauth_device_code",
   "activity.created",
@@ -50,41 +53,17 @@ const SUBSCRIBABLE = [
 ] as const;
 
 /**
- * Channels the UI actually subscribes to and no process emits — all nine of them.
+ * Channels declared in `EVENT_NAMES` that have no producer anywhere in this repository.
  *
- * The UI has a handler or a branch for each (so none is dead on the consumer side), but a
- * literal scan of every emitter in the repository — `native/**` and `agent/src/**`, which
- * are the only two — finds no emit for any of them. Six are gated (`SUBSCRIBABLE`) and
- * have a UI subscriber waiting; the three `server.*` names have neither a gate nor a
- * subscriber, so they are reserved vocabulary in the strictest sense.
- *
- * Kept, not deleted, and each one is annotated per name in `../events/index.ts`:
- *  - `server.connected` / `server.disconnected`: the host's `server_connect` /
- *    `server_disconnect` only write the status column (`ipc_router.cpp:8837`, `:8807`).
- *    The commands exist; emitting is an increment.
- *  - `server.updated`: no emitter at all. `consistency.ts` used to assert "Rust emits it",
- *    which was false when it was written and is unfalsifiable now.
- *  - `terminal.output_lost`: no `Lagged` handling exists in the host's broadcast path.
- *  - `activity.created`: four UI subscribers, none of which can receive; they poll instead.
- *
- * Two names left this list because a producer was added, not because the list was
- * edited to look better:
- *  - `agent.thinking` — `_public_content_parts` maps `thinking` / `reasoning` /
- *    `reasoning.summary` blocks to this type and `_stream_model` forwards each one.
- *  - `agent.usage` — `_record_model_update` emits it on every model round.
- *  - `server.auth_challenge` — `desktop_terminal.cpp` emits it from the
- *    keyboard-interactive challenge path.
- *
- * Deleting any of them would make the eventual fix a contract break rather than an
- * addition. What was wrong was pretending they were live.
+ * Every declared event now has a real producer in `native/**` or `agent/src/**`:
+ *  - `server.connected`, `server.disconnected`, `server.updated`, `activity.created` —
+ *    emitted by `native/desktop_host/src/ipc_router.cpp` after durable state commits.
+ *  - `terminal.output_lost` — emitted by `native/desktop_host/src/desktop_terminal.cpp`
+ *    through `TerminalOutputQueue` when output frames are dropped under backpressure or
+ *    oversized-frame rejection.
+ *  - `agent.thinking`, `agent.usage`, `server.auth_challenge` — landed earlier.
  */
-const NO_PRODUCER = [
-  "server.connected",
-  "server.disconnected",
-  "server.updated",
-  "terminal.output_lost",
-  "activity.created",
-] as const;
+const NO_PRODUCER = [] as const;
 
 /**
  * Declared and really emitted, but nothing in the UI listens.
@@ -138,23 +117,68 @@ test("the recorded event states partition EVENT_NAMES exactly", () => {
 });
 
 test("the names with no producer are exactly the ones recorded as such", () => {
-  // The count is the deliverable (C-2/B7). Pinning the number means a new gap cannot
-  // appear unnoticed, and a fix moves a name out of this list by *emitting* — not by
-  // editing the list. It went 9 -> 5 when three real producers landed
-  // (`agent.thinking`, `agent.usage`, `server.auth_challenge`) and one was mis-recorded
-  // (`investigation.schedule_notification` is emitted by the scheduler's notification
-  // sink at `ipc_router.cpp`).
-  assert.equal(NO_PRODUCER.length, 5);
+  // The count went 9 -> 5 -> 0 as real C++ and Python producers landed for every
+  // declared channel. Pinning zero ensures no new unproduced channel can slip in
+  // silently without an explicit record.
+  assert.equal(NO_PRODUCER.length, 0);
   assert.deepEqual(
     [...new Set([...NO_PRODUCER])].sort(),
-    [
-      "activity.created",
-      "server.connected",
-      "server.disconnected",
-      "server.updated",
-      "terminal.output_lost",
-    ],
+    [],
     "the zero-producer set changed; update the per-name note in ../events/index.ts too",
+  );
+});
+
+test("server lifecycle events enforce their strict wire schemas", () => {
+  assert.equal(
+    EVENT_SCHEMAS["server.connected"].safeParse({
+      serverId: "srv_1",
+      status: "connected",
+      at: "2026-11-29T00:00:00Z",
+    }).success,
+    true,
+  );
+  assert.equal(
+    EVENT_SCHEMAS["server.connected"].safeParse({
+      serverId: "srv_1",
+      status: "disconnected",
+      at: "2026-11-29T00:00:00Z",
+    }).success,
+    false,
+  );
+  assert.equal(
+    EVENT_SCHEMAS["server.disconnected"].safeParse({
+      serverId: "srv_1",
+      reason: "user",
+      at: "2026-11-29T00:00:00Z",
+    }).success,
+    true,
+  );
+  assert.equal(
+    EVENT_SCHEMAS["server.disconnected"].safeParse({
+      serverId: "srv_1",
+      reason: "other",
+      at: "2026-11-29T00:00:00Z",
+    }).success,
+    false,
+  );
+  assert.equal(
+    EVENT_SCHEMAS["server.updated"].safeParse({
+      serverId: "srv_1",
+      status: "error",
+      capabilitiesChanged: false,
+      at: "2026-11-29T00:00:00Z",
+    }).success,
+    true,
+  );
+  assert.equal(
+    EVENT_SCHEMAS["server.updated"].safeParse({
+      serverId: "srv_1",
+      status: "error",
+      capabilitiesChanged: false,
+      at: "2026-11-29T00:00:00Z",
+      extra: 1,
+    }).success,
+    false,
   );
 });
 

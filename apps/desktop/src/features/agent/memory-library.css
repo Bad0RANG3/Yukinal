@@ -12,10 +12,15 @@
 .memory-content ul { list-style: none; padding: 0; margin: 0; }
 .memory-content li { display: flex; gap: 8px; align-items: start; border-bottom: 1px solid var(--line); }
 .memory-record { flex: 1; min-width: 0; display: grid; gap: 5px; padding: 12px 0; text-align: left; background: transparent; border: 0; color: var(--text); }
-.memory-record span { color: var(--muted); font-size: 12px; overflow: hidden; display: -webkit-box; -webkit-line-clamp: 3; -webkit-box-orient: vertical; overflow-wrap: anywhere; }
+.memory-record-head { display: flex; align-items: center; flex-wrap: wrap; gap: 6px; }
+.memory-badge { font-size: 11px; line-height: 1.4; padding: 1px 6px; border-radius: 4px; border: 1px solid var(--line); color: var(--muted); background: #222; }
+.memory-badge-model { color: var(--text); border-color: var(--accent, var(--line)); }
+.memory-meta-row { display: flex; flex-wrap: wrap; gap: 6px; }
+.memory-expiry-row { display: grid; grid-template-columns: repeat(auto-fit, minmax(180px, 1fr)); gap: 10px; }
+.memory-record > span { color: var(--muted); font-size: 12px; overflow: hidden; display: -webkit-box; -webkit-line-clamp: 3; -webkit-box-orient: vertical; overflow-wrap: anywhere; }
 .memory-content form, .memory-content label { display: grid; gap: 8px; }
 .memory-content form { gap: 14px; }
-.memory-library input, .memory-library textarea { width: 100%; padding: 8px 10px; border: 1px solid var(--line); color: var(--text); background: #1d1d1d; border-radius: 5px; box-sizing: border-box; }
+.memory-library input, .memory-library textarea, .memory-library select { width: 100%; padding: 8px 10px; border: 1px solid var(--line); color: var(--text); background: #1d1d1d; border-radius: 5px; box-sizing: border-box; }
 .memory-actions { justify-content: flex-end; }
 .memory-library footer { padding-top: 10px; border-top: 1px solid var(--line); font-size: 12px; color: var(--muted); flex-wrap: wrap; }
 

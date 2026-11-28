@@ -146,12 +146,8 @@ import type { EventName } from "../events/index.js";
  * the contract does not admit, which is the direction that silently accepts payloads
  * nobody specified.
  *
- * Which declared names are actually produced is a separate, *measured* question, and this
- * comment used to answer it wrongly: it claimed `server.updated` and `terminal.opened`
- * were "on the wire and Rust emits them". `terminal.opened` is emitted
- * (`native/desktop_host/src/desktop_terminal.cpp:391`), but `server.updated` has no emitter
- * anywhere in this repository, and "Rust" as the emitter does not exist at all. The
- * per-name producer state is recorded in `../events/index.ts` and pinned by
+ * Which declared names are actually produced is a separate, *measured* question.
+ * The per-name producer state is recorded in `../events/index.ts` and pinned by
  * `event-vocabulary.test.ts`; this file deliberately makes no claim about it.
  *
  * `keyof typeof EVENT_SCHEMAS` also drives `AgentEventName` and `DesktopEventName`,

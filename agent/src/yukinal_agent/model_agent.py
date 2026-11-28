@@ -265,6 +265,7 @@ class ModelDrivenAgent:
         # a clean one: the effect happened and no snapshot describes it, so the
         # operator must be told the outcome is unknown rather than that it failed.
         self._tool_effects_committed = 0
+        self._run_deadline: float | None = None
         tool_specs = tuple(spec for spec in registry.list() if tool_names is None or spec.name in tool_names)
         provider_to_internal: dict[str, str] = {}
         for spec in tool_specs:
@@ -480,8 +481,10 @@ class ModelDrivenAgent:
         else:
             checkpoint_id = f"agent-{uuid.uuid4().hex}"
         config = self._graph_config(checkpoint_id)
+        previous_deadline = self._run_deadline
+        self._run_deadline = time.monotonic() + self._budget.max_total_seconds
         try:
-            async with asyncio.timeout(self._budget.max_total_seconds):
+            async with asyncio.timeout(self._budget.max_total_seconds) as run_timeout:
                 snapshot = await self._graph.aget_state(config)
                 saved_state = snapshot.values
                 if saved_state:
@@ -521,6 +524,8 @@ class ModelDrivenAgent:
                     return _failed_result(task_id, "checkpoint_missing")
                 else:
                     state = await self._graph.ainvoke(initial, config=config)
+            if run_timeout.expired():
+                raise TimeoutError("run total time budget expired")
         except TimeoutError:
             return self._aborted_result(task_id, "task_timeout", status="timed_out", reason="the run exceeded its total time budget")
         except _CHECKPOINT_WRITE_ERRORS as error:
@@ -531,6 +536,8 @@ class ModelDrivenAgent:
             return self._aborted_result(task_id, _CHECKPOINT_WRITE_CODE, reason=str(error))
         except Exception as error:
             return self._aborted_result(task_id, "agent_workflow_failed", reason=str(error))
+        finally:
+            self._run_deadline = previous_deadline
         if state.get("status") == "awaiting_approval":
             self._approval_checkpoints.add(checkpoint_id)
         return self._result_from_state(
@@ -539,7 +546,12 @@ class ModelDrivenAgent:
             checkpoint_id=checkpoint_id if state.get("status") == "awaiting_approval" else None,
         )
 
+    def _check_run_deadline(self) -> None:
+        if self._run_deadline is not None and time.monotonic() >= self._run_deadline:
+            raise TimeoutError("run total time budget expired")
+
     async def _call_model_recorded(self, state: _AgentState) -> dict[str, Any]:
+        self._check_run_deadline()
         self._request_timing = {}
         update = await self._call_model(state)
         return self._record_model_update(state, update)
@@ -594,6 +606,7 @@ class ModelDrivenAgent:
         })
 
     async def _review_goal_recorded(self, state: _AgentState) -> dict[str, Any]:
+        self._check_run_deadline()
         self._request_timing = {}
         update = await self._review_goal(state)
         response = update.pop("_review_response", None)
@@ -686,6 +699,7 @@ class ModelDrivenAgent:
                 "goal_stalls": stalls, "goal_last_tool_count": progress_count, "status": "running", "error_code": None}
 
     async def _execute_tool_recorded(self, state: _AgentState) -> dict[str, Any]:
+        self._check_run_deadline()
         # Keep host-created bindings per call, without changing the original
         # request/task scope used to verify a restored checkpoint.
         working = dict(state)
@@ -915,9 +929,16 @@ class ModelDrivenAgent:
                 rejection_codes = dict(state.get("rejection_codes", {}))
                 rejection_codes[call_id] = rejection_code
                 update["rejection_codes"] = rejection_codes
-            async with asyncio.timeout(self._budget.max_total_seconds):
-                await self._graph.aupdate_state(config, update, as_node="execute_tool")
-                resumed_state = await self._graph.ainvoke(None, config=config)
+            previous_deadline = self._run_deadline
+            self._run_deadline = time.monotonic() + self._budget.max_total_seconds
+            try:
+                async with asyncio.timeout(self._budget.max_total_seconds) as run_timeout:
+                    await self._graph.aupdate_state(config, update, as_node="execute_tool")
+                    resumed_state = await self._graph.ainvoke(None, config=config)
+                if run_timeout.expired():
+                    raise TimeoutError("run total time budget expired")
+            finally:
+                self._run_deadline = previous_deadline
         except TimeoutError:
             return self._aborted_result(str(state.get("task_id", "approval")), "task_timeout", status="timed_out", reason="the resume exceeded its total time budget")
         except _CHECKPOINT_WRITE_ERRORS as error:

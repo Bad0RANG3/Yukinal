@@ -1912,6 +1912,43 @@ void DesktopDatabase::save_network_proxy_config(
   }
 }
 
+namespace {
+
+nlohmann::json decode_activity_row(sqlite3_stmt* row) {
+  const std::string type = column_text(row, 3);
+  const std::string source = column_text(row, 6);
+  if (!is_one_of(type, {"connection", "authentication", "configuration", "deployment",
+                        "service", "container", "file_change", "agent_action",
+                        "approval", "health"}) ||
+      !is_one_of(source, {"agent", "user", "system", "docker", "git", "cloud"})) {
+    throw std::runtime_error("Stored activity has an unknown type or source");
+  }
+
+  nlohmann::json activity = {
+      {"id", column_text(row, 0)},
+      {"type", type},
+      {"title", column_text(row, 4)},
+      {"source", source},
+      {"actor", column_text(row, 7)},
+      {"createdAt", column_text(row, 11)},
+  };
+  add_optional_text(activity, "serverId", row, 1);
+  add_optional_text(activity, "workspaceId", row, 2);
+  add_optional_text(activity, "description", row, 5);
+  add_optional_text(activity, "reason", row, 8);
+  add_optional_text(activity, "traceId", row, 10);
+  if (sqlite3_column_type(row, 9) != SQLITE_NULL) {
+    const std::string outcome = column_text(row, 9);
+    if (!is_one_of(outcome, {"success", "failure", "cancelled", "denied"})) {
+      throw std::runtime_error("Stored activity has an unknown outcome");
+    }
+    activity["outcome"] = outcome;
+  }
+  return activity;
+}
+
+}  // namespace
+
 nlohmann::json DesktopDatabase::list_activities(
     const std::optional<std::string>& server_id, int limit) const {
   std::lock_guard lock(mutex_);
@@ -1954,39 +1991,25 @@ nlohmann::json DesktopDatabase::list_activities(
     const auto result = sqlite3_step(rows.get());
     if (result == SQLITE_DONE) break;
     if (result != SQLITE_ROW) throw std::runtime_error(sqlite3_errmsg(connection_));
-
-    const std::string type = column_text(rows.get(), 3);
-    const std::string source = column_text(rows.get(), 6);
-    if (!is_one_of(type, {"connection", "authentication", "configuration", "deployment",
-                          "service", "container", "file_change", "agent_action",
-                          "approval", "health"}) ||
-        !is_one_of(source, {"agent", "user", "system", "docker", "git", "cloud"})) {
-      throw std::runtime_error("Stored activity has an unknown type or source");
-    }
-
-    nlohmann::json activity = {
-        {"id", column_text(rows.get(), 0)},
-        {"type", type},
-        {"title", column_text(rows.get(), 4)},
-        {"source", source},
-        {"actor", column_text(rows.get(), 7)},
-        {"createdAt", column_text(rows.get(), 11)},
-    };
-    add_optional_text(activity, "serverId", rows.get(), 1);
-    add_optional_text(activity, "workspaceId", rows.get(), 2);
-    add_optional_text(activity, "description", rows.get(), 5);
-    add_optional_text(activity, "reason", rows.get(), 8);
-    add_optional_text(activity, "traceId", rows.get(), 10);
-    if (sqlite3_column_type(rows.get(), 9) != SQLITE_NULL) {
-      const std::string outcome = column_text(rows.get(), 9);
-      if (!is_one_of(outcome, {"success", "failure", "cancelled", "denied"})) {
-        throw std::runtime_error("Stored activity has an unknown outcome");
-      }
-      activity["outcome"] = outcome;
-    }
-    activities.push_back(std::move(activity));
+    activities.push_back(decode_activity_row(rows.get()));
   }
   return {{"activities", std::move(activities)}};
+}
+
+std::optional<nlohmann::json> DesktopDatabase::get_activity(const std::string& id) const {
+  std::lock_guard lock(mutex_);
+  if (connection_ == nullptr) return std::nullopt;
+  Statement row(connection_, R"SQL(
+      SELECT id, server_id, workspace_id, type, title, description, source, actor,
+             reason, outcome, trace_id, created_at
+        FROM activities
+       WHERE id = ?1
+    )SQL");
+  bind_text(connection_, row.get(), 1, id);
+  const auto result = sqlite3_step(row.get());
+  if (result == SQLITE_DONE) return std::nullopt;
+  if (result != SQLITE_ROW) throw std::runtime_error(sqlite3_errmsg(connection_));
+  return decode_activity_row(row.get());
 }
 
 nlohmann::json DesktopDatabase::list_tool_executions(
